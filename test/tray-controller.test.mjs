@@ -5,28 +5,26 @@ import { buildTrayMenuTemplate, createTrayController } from "../src/tray-control
 function actions(log) {
   return {
     showWindow: () => log.push("show"),
-    openControl: () => log.push("control"),
-    launch: () => log.push("launch"),
-    inject: () => log.push("inject"),
+    apply: () => log.push("apply"),
     restore: () => log.push("restore"),
+    openLogs: () => log.push("logs"),
     quit: () => log.push("quit"),
   };
 }
 
-test("tray menu exposes the complete resident workflow", async () => {
+test("tray menu exposes the simplified wallpaper workflow", async () => {
   const calls = [];
   const template = buildTrayMenuTemplate(actions(calls));
   assert.deepEqual(template.filter(({ label }) => label).map(({ label }) => label), [
-    "显示主窗口",
     "打开壁纸设置",
-    "保存后启动调试并注入",
-    "立即重新注入",
+    "应用到 Codex",
     "恢复官方外观",
+    "打开本地日志目录",
     "退出",
   ]);
-  template.find(({ label }) => label === "立即重新注入").click();
+  template.find(({ label }) => label === "应用到 Codex").click();
   await Promise.resolve();
-  assert.deepEqual(calls, ["inject"]);
+  assert.deepEqual(calls, ["apply"]);
 });
 
 test("tray controller binds menu, double click, notification, and cleanup", async () => {
@@ -56,7 +54,7 @@ test("tray controller binds menu, double click, notification, and cleanup", asyn
   });
 
   assert.equal(controller.tray.tooltip, "Codex Wallpaper Desktop");
-  assert.equal(builtTemplate.length, 8);
+  assert.equal(builtTemplate.length, 7);
   controller.tray.handlers.get("double-click")();
   await Promise.resolve();
   assert.deepEqual(calls, ["show"]);

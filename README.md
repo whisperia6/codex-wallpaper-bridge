@@ -1,8 +1,8 @@
 # Codex Wallpaper Desktop
 
-> 当前分支是 `0.6.0-alpha.1` 的 **1 秒级流式注入实验版**。稳定版仍为 v0.5.1；架构取舍和限制见 [实验说明](docs/one-second-injection-experiment.md)。
+> 当前分支是 `0.6.0-alpha.2` 的 **1 秒级流式注入实验版**。稳定版仍为 v0.5.1；架构取舍和限制见 [实验说明](docs/one-second-injection-experiment.md)。
 
-Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper Engine 项目作为 Codex 的窗口背景，并在一个界面里完成壁纸选择、实时预览、显示效果调整、Codex 调试启动、快速流式注入和官方外观恢复。
+Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper Engine 项目作为 Codex 的窗口背景，并在一张壁纸工作台里完成壁纸选择、实时预览、显示效果调整、Codex 目标选择、应用和官方外观恢复。
 
 它同时适配 Microsoft Store 版 Codex 和用户选择的本地 `ChatGPT.exe`，不会替换或修改 Codex 安装目录中的文件。项目可以独立克隆、运行和打包；仓库已经包含所需的 `bridge-runtime/`，不依赖仓库外的父目录。
 
@@ -21,9 +21,9 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 
 ## 工作方式
 
-1. 在右侧壁纸面板选择本地 Wallpaper Engine 壁纸并调整显示参数。
-2. 在左侧选择 Store 或本地 Codex；如果目标正在普通模式运行，软件会先询问是否关闭。
-3. 软件等待壁纸设置保存完成，再以隔离调试 profile 启动 Codex，注入轻量 Runtime 和配置。
+1. 在壁纸工作台选择本地 Wallpaper Engine 壁纸并调整显示参数。
+2. 在工作台顶部选择 Store 或本地 Codex；如果目标正在普通模式运行，软件会先询问是否关闭。
+3. 点击“应用到 Codex”。软件先等待壁纸设置保存完成；已有调试端点时直接重新应用，否则以隔离调试 profile 启动 Codex 后注入轻量 Runtime 和配置。
 4. Runtime 在 Codex 背景层创建一个轻量 `srcdoc` 媒体子页面；图片、视频和网页资源由该子页面从常驻托盘进程的 loopback 服务按需读取。
 
 ## 运行效果
@@ -34,11 +34,11 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 
 ![Codex Wallpaper Desktop 一体化控制台](docs/images/desktop-overview.png)
 
-### Codex 启动与快速流式注入
+### 顶部 Codex 应用栏
 
-选择 Store/本地 EXE、设置 CDP 端口和透明兼容模式，然后保存设置并自动启动注入。
+目标、CDP 端口、透明兼容、恢复和“应用到 Codex”全部集成在壁纸工作台顶部，不再保留单独的启动/重新注入面板。
 
-![Codex 启动与快速注入流程](docs/images/launcher-workflow.png)
+![紧凑窗口下的顶部 Codex 应用栏](docs/images/desktop-compact.png)
 
 ### 壁纸库、实时预览与显示设置
 
@@ -69,11 +69,11 @@ npm start
 首次启动后：
 
 1. Store 版会自动显示在“安装版本”中；自定义目录版点击“选择本地 EXE”。
-2. 直接在同一窗口右侧选择壁纸并调参数，不再打开第二个窗口。
-3. 点“保存后启动调试并注入”。左侧会等待右侧最近一次选择和效果参数写入完成，避免拿到旧配置或静态预览。
+2. 直接在同一张壁纸工作台选择壁纸并调参数，不再打开第二个窗口，也没有单独的日志/诊断侧栏。
+3. 在顶部选择目标并点“应用到 Codex”。软件会等待最近一次选择和效果参数写入完成，避免拿到旧配置或静态预览。
 4. 如果选定 Codex 正在普通模式运行，桌面版会先询问是否关闭；请保存尚未发送的输入，再选“关闭并继续”。取消弹窗不会关闭任何进程。
 5. 桌面版按所选可执行文件的完整路径关闭对应 Codex、以调试模式重新启动，并在 CDP 就绪后自动完成快速流式注入。
-6. 最小化或关闭主窗口后应用驻留 Windows 右下角托盘；双击托盘图标可恢复窗口，右键可打开设置、注入、恢复或彻底退出。
+6. 最小化或关闭主窗口后应用驻留 Windows 右下角托盘；双击托盘图标可恢复窗口，右键可打开设置、应用、恢复、打开本地日志目录或彻底退出。
 7. 托盘仍运行时，Codex renderer 重建或硬刷新会自动恢复；点“恢复官方外观”可完整清理。
 
 ## 托盘与流式注入的关系
@@ -89,9 +89,9 @@ npm start
 - 启动层：两者都以 `127.0.0.1` CDP 端口和各自独立 profile 启动，不修改安装目录。
 - 展示层：先运行现有壁纸桥，再按 renderer 的语义 `data-*`、旧/新哈希类名和受限几何特征安装兼容透明层，因此不依赖“Store / EXE”标签硬编码样式。Store 新壳层即使背景本身透明、只通过 `backdrop-filter` 模糊壁纸，也会被自适应层识别并清除滤镜。
 - 大视频层：CDP 仅发送小于 100 KiB 的 Runtime 和小于 10 KiB 的配置；受控 `srcdoc` 子页面直接读取随机 token 保护的 `127.0.0.1` Range 服务，不设置 512 MiB 上限。
-- 同步层：内嵌控制页会跟踪配置写入；启动和重新注入前必须收到“设置已同步”，保存失败会阻止注入。
-- 桌面层：控制页与启动器合并为一个窗口；关闭或最小化后驻留系统托盘。
-- 诊断层：另一台 Store 电脑可点“导出 JSON”。报告不采集对话正文，只记录版本、选择器命中、大型表面背景/滤镜摘要，以及壁纸媒体的标签、来源类型、分辨率、播放状态和实际滤镜。
+- 同步层：内嵌控制页会跟踪配置写入；“应用到 Codex”前必须收到保存完成信号，保存失败会阻止注入。
+- 桌面层：Codex 目标与应用操作直接集成到壁纸工作台；关闭或最小化后驻留系统托盘。
+- 诊断层：运行日志按日期写入 `%LOCALAPPDATA%\CodexWallpaperDesktop\logs`，会话 URL 会自动脱敏；应用失败时同目录自动生成兼容诊断 JSON。界面不展示日志和诊断正文。
 
 ## 构建 Windows 单文件版
 
@@ -113,4 +113,4 @@ npm run make
 npm test
 ```
 
-测试覆盖安装归一化、端口校验、运行中取消/确认关闭、保存握手、同窗控制页、托盘生命周期、Runtime/apply 拆分、子页面媒体桥与 URL 边界、HTTP Range 206/416、媒体大小无关 payload、自动注入顺序和兼容层恢复。性能基准可执行 `npm run benchmark:injection`。
+测试覆盖安装归一化、端口校验、运行中取消/确认关闭、单一应用入口、保存握手、单工作台消息桥、本地日志脱敏、托盘生命周期、Runtime/apply 拆分、子页面媒体桥与 URL 边界、HTTP Range 206/416、媒体大小无关 payload、自动注入顺序和兼容层恢复。性能基准可执行 `npm run benchmark:injection`。

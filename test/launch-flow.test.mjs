@@ -73,7 +73,7 @@ test("confirmation closes the selected Codex before launching and injecting", as
   assert.equal(result.launch.connected, true);
 });
 
-test("an already-debuggable Codex skips the close prompt and is injected", async () => {
+test("an already-debuggable Codex skips close, launch, and readiness wait", async () => {
   const calls = [];
   await runLaunchAndInjectFlow({
     installation: installation(),
@@ -93,7 +93,7 @@ test("an already-debuggable Codex skips the close prompt and is injected", async
     },
   });
 
-  assert.deepEqual(calls, ["launch", "wait", "inject"]);
+  assert.deepEqual(calls, ["inject"]);
 });
 
 test("a close failure stops launch and injection", async () => {

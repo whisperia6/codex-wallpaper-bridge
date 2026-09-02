@@ -12,130 +12,20 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="ambient ambient--one" aria-hidden="true"></div>
-    <div class="ambient ambient--two" aria-hidden="true"></div>
-    <main class="app-shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow"><span></span> ELECTRON DESKTOP 0.5</p>
-          <h1>壁纸设置、注入与托盘，一个窗口完成</h1>
-          <p class="hero__description">右侧直接选择动态壁纸；左侧会等设置保存完成后再快速注入，媒体通过本机流式读取，关闭或最小化窗口后驻留 Windows 托盘。</p>
-        </div>
-        <div class="status-pill" id="statusPill" data-tone="idle">
-          <i aria-hidden="true"></i>
-          <span id="statusText">正在检测环境</span>
-        </div>
-      </header>
-
-      <section class="notice" id="environmentNotice" aria-live="polite">
-        <div class="notice__icon" aria-hidden="true">i</div>
-        <div>
-          <strong id="noticeTitle">正在读取 Codex 安装</strong>
-          <p id="noticeDetail">请稍候…</p>
-        </div>
-      </section>
-
-      <div class="unified-workspace">
-        <aside class="control-column" aria-label="Codex 启动与注入控制">
-          <section class="panel setup-panel" aria-labelledby="setupTitle">
-            <div class="panel__heading">
-              <div>
-                <span class="step-label">01 / TARGET</span>
-                <h2 id="setupTitle">选择 Codex</h2>
-              </div>
-              <button class="button button--quiet" id="refreshButton" type="button">重新检测</button>
-            </div>
-
-            <label class="field" for="installationSelect">
-              <span>安装版本</span>
-              <select id="installationSelect" aria-describedby="installationHint"></select>
-            </label>
-            <p class="field-hint" id="installationHint">Store 版自动发现；自定义目录可手动选择 ChatGPT.exe。</p>
-            <button class="button button--secondary button--wide" id="chooseExecutableButton" type="button">选择本地 EXE</button>
-
-            <div class="field-row">
-              <label class="field" for="portInput">
-                <span>CDP 端口</span>
-                <input id="portInput" type="number" min="1024" max="65535" step="1" value="9335" inputmode="numeric" />
-              </label>
-              <div class="field profile-field">
-                <span>启动 profile</span>
-                <strong>独立隔离</strong>
-                <small>不会改官方安装文件</small>
-              </div>
-            </div>
-
-            <label class="switch-row" for="adaptiveInput">
-              <span>
-                <strong>自适应透明兼容</strong>
-                <small>推荐 Store / 未知构建启用</small>
-              </span>
-              <input id="adaptiveInput" type="checkbox" checked />
-              <i aria-hidden="true"></i>
-            </label>
-
-            <button class="button button--primary button--wide" id="launchButton" type="button">保存后启动调试并注入</button>
-            <p class="safety-copy">检测到所选 Codex 正在运行时会先询问；取消不会结束任何进程。</p>
-          </section>
-
-          <section class="panel action-panel" aria-labelledby="actionTitle">
-            <div class="panel__heading panel__heading--compact">
-              <div>
-                <span class="step-label">03 / APPLY</span>
-                <h2 id="actionTitle">快速操作</h2>
-              </div>
-              <span class="mode-tag">ONE SHOT</span>
-            </div>
-            <p class="action-copy">重新注入只发送 Runtime 与配置，不传完整视频；动态壁纸播放期间请保持托盘运行。</p>
-            <div class="action-grid">
-              <button class="button button--secondary" id="injectButton" type="button">立即重新注入</button>
-              <button class="button button--secondary" id="restoreButton" type="button">恢复官方外观</button>
-              <button class="button button--secondary" id="diagnoseButton" type="button">导出兼容诊断</button>
-            </div>
-            <button class="diagnostic-path" id="diagnosticPathButton" type="button" hidden></button>
-          </section>
-
-          <section class="panel log-panel" aria-labelledby="logTitle">
-            <div class="panel__heading panel__heading--compact">
-              <div>
-                <span class="step-label">04 / EVIDENCE</span>
-                <h2 id="logTitle">运行日志</h2>
-              </div>
-              <button class="button button--quiet" id="clearLogButton" type="button">清空</button>
-            </div>
-            <pre id="logOutput" tabindex="0" aria-live="polite">等待操作…</pre>
-          </section>
-        </aside>
-
-        <section class="panel wallpaper-panel" aria-labelledby="wallpaperTitle">
-          <header class="wallpaper-panel__header">
-            <div>
-              <span class="step-label">02 / WALLPAPER</span>
-              <h2 id="wallpaperTitle">壁纸设置</h2>
-            </div>
-            <div class="wallpaper-panel__actions">
-              <span class="control-state" id="controlState" data-tone="loading"><i></i><span>正在载入</span></span>
-              <button class="button button--quiet" id="controlPanelButton" type="button">重新载入</button>
-            </div>
-          </header>
-          <div class="control-stage">
-            <div class="control-placeholder" id="controlPlaceholder" aria-live="polite">
-              <span class="control-placeholder__spinner" aria-hidden="true"></span>
-              <strong>正在启动本地壁纸面板</strong>
-              <p>首次扫描 Wallpaper Engine 项目可能需要几秒。</p>
-            </div>
-            <iframe
-              id="controlFrame"
-              title="壁纸选择与效果设置"
-              sandbox="allow-scripts allow-same-origin allow-forms"
-              allow="autoplay"
-              referrerpolicy="no-referrer"
-            ></iframe>
-          </div>
-        </section>
+    <main class="desktop-shell">
+      <div class="control-placeholder" id="controlPlaceholder" aria-live="polite">
+        <span class="control-placeholder__spinner" aria-hidden="true"></span>
+        <strong>正在启动壁纸工作台</strong>
+        <p>首次扫描 Wallpaper Engine 项目可能需要几秒。</p>
       </div>
+      <iframe
+        id="controlFrame"
+        title="Codex 壁纸设置"
+        sandbox="allow-scripts allow-same-origin allow-forms"
+        allow="autoplay"
+        referrerpolicy="no-referrer"
+      ></iframe>
     </main>
-
     <script type="module" src="renderer-desktop.mjs"></script>
   </body>
 </html>

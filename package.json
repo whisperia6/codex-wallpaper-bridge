@@ -1,6 +1,6 @@
 {
   "name": "codex-wallpaper-desktop",
-  "version": "0.6.0-alpha.1",
+  "version": "0.6.0-alpha.2",
   "private": true,
   "type": "module",
   "description": "Experimental one-second streaming injector for Codex Wallpaper Bridge.",

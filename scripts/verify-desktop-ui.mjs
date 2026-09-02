@@ -6,10 +6,22 @@ import WebSocket from "ws";
 const debuggerPort = Number(process.argv[2] || 9450);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outputPath = path.resolve(here, "..", "out", "desktop-ui-smoke.png");
-const targets = await fetch(`http://127.0.0.1:${debuggerPort}/json/list`).then((response) => response.json());
-const mainTarget = targets.find(({ type, url }) => type === "page" && url.includes("/src/renderer/index.html"));
-const controlTarget = targets.find(({ type, url }) => type === "iframe" && url.startsWith("http://127.0.0.1:"));
-if (!mainTarget || !controlTarget) throw new Error("未找到 Electron 主窗口或内嵌壁纸面板 CDP target");
+const compactOutputPath = path.resolve(here, "..", "out", "desktop-ui-smoke-compact.png");
+const docsOverviewPath = path.resolve(here, "..", "docs", "images", "desktop-overview.png");
+const docsCompactPath = path.resolve(here, "..", "docs", "images", "desktop-compact.png");
+async function waitForTargets() {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const targets = await fetch(`http://127.0.0.1:${debuggerPort}/json/list`).then((response) => response.json());
+    const mainTarget = targets.find(({ type, url }) => type === "page" && url.includes("/renderer/index.html"));
+    const controlTarget = targets.find(({ type, url }) => type === "iframe" && url.startsWith("http://127.0.0.1:"));
+    if (mainTarget && controlTarget) return { mainTarget, controlTarget };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("未找到 Electron 主窗口或内嵌壁纸面板 CDP target");
+}
+
+const { mainTarget, controlTarget } = await waitForTargets();
 
 async function connect(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl);
@@ -58,13 +70,18 @@ try {
     height: innerHeight,
     browserWindowsInDom: document.querySelectorAll('#controlFrame').length,
     controlUrl: document.querySelector('#controlFrame')?.src,
-    controlState: document.querySelector('#controlState')?.textContent.trim(),
-    controlTone: document.querySelector('#controlState')?.dataset.tone,
     placeholderHidden: document.querySelector('#controlPlaceholder')?.hidden,
-    launchLabel: document.querySelector('#launchButton')?.textContent.trim()
+    legacyPanels: document.querySelectorAll('.control-column,.action-panel,.log-panel').length
   }))()`);
   const controlState = await evaluate(control, `(() => ({
     embedded: document.documentElement.dataset.cwbDesktopEmbedded,
+    desktopBarVisible: !document.querySelector('#desktopTargetBar')?.hidden,
+    targetCount: document.querySelector('#desktopInstallationSelect')?.options.length || 0,
+    selectedTarget: document.querySelector('#desktopInstallationSelect')?.value || null,
+    port: document.querySelector('#desktopPortInput')?.value,
+    adaptive: document.querySelector('#desktopAdaptiveInput')?.checked,
+    applyLabel: document.querySelector('#desktopApplyButton')?.textContent.trim(),
+    applyStatus: document.querySelector('#desktopApplyStatus')?.textContent.trim(),
     saveText: document.querySelector('#saveIndicator')?.textContent.trim(),
     selectedTitle: document.querySelector('.wallpaper-card[aria-selected="true"] .wallpaper-card__title')?.textContent.trim() || null,
     injectDisplay: getComputedStyle(document.querySelector('#injectButton')).display,
@@ -105,10 +122,70 @@ try {
     });
   })()`, { awaitPromise: true });
 
+  const invalidPort = await evaluate(control, `(async () => {
+    const port = document.querySelector('#desktopPortInput');
+    port.value = '1';
+    document.querySelector('#desktopApplyButton').click();
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const status = document.querySelector('#desktopApplyStatus')?.textContent.trim() || '';
+      if (status.includes('1024 到 65535')) {
+        return {
+          status,
+          tone: document.querySelector('#desktopApplyStatus')?.dataset.tone,
+          applyDisabled: document.querySelector('#desktopApplyButton')?.disabled
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('invalid port response timeout');
+  })()`, { awaitPromise: true });
+
+  const desktopRequest = await evaluate(control, `(async () => {
+    document.querySelector('#desktopRefreshButton').click();
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const status = document.querySelector('#desktopApplyStatus')?.textContent.trim() || '';
+      if (status.startsWith('已发现')) {
+        return {
+          status,
+          tone: document.querySelector('#desktopApplyStatus')?.dataset.tone,
+          targetCount: document.querySelector('#desktopInstallationSelect')?.options.length || 0
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('desktop request timeout');
+  })()`, { awaitPromise: true });
+
   const screenshot = await main.call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
   await mkdir(path.dirname(outputPath), { recursive: true });
   await writeFile(outputPath, Buffer.from(screenshot.data, "base64"));
-  console.log(JSON.stringify({ mainState, controlState, handshake, screenshot: outputPath }, null, 2));
+  await writeFile(docsOverviewPath, Buffer.from(screenshot.data, "base64"));
+  await evaluate(main, "window.resizeTo(1040, 700)");
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const compactState = await evaluate(control, `(() => {
+    const bar = document.querySelector('#desktopTargetBar');
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      bar: { clientWidth: bar?.clientWidth, scrollWidth: bar?.scrollWidth },
+      overflowing: Boolean(bar && bar.scrollWidth > bar.clientWidth),
+      applyVisible: document.querySelector('#desktopApplyButton')?.getBoundingClientRect().right <= innerWidth
+    };
+  })()`);
+  const compactScreenshot = await main.call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  await writeFile(compactOutputPath, Buffer.from(compactScreenshot.data, "base64"));
+  await writeFile(docsCompactPath, Buffer.from(compactScreenshot.data, "base64"));
+  await evaluate(main, "window.resizeTo(1540, 900)");
+  console.log(JSON.stringify({
+    mainState,
+    controlState,
+    handshake,
+    invalidPort,
+    desktopRequest,
+    compactState,
+    screenshots: [outputPath, compactOutputPath, docsOverviewPath, docsCompactPath],
+  }, null, 2));
 } finally {
   main.close();
   control.close();

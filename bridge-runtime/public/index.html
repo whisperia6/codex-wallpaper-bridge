@@ -31,6 +31,38 @@
     </div>
 
     <div class="app-shell">
+      <section class="desktop-target-bar glass-strip" id="desktopTargetBar" aria-label="Codex 应用设置" hidden>
+        <div class="desktop-target-bar__identity">
+          <span class="desktop-target-bar__dot" aria-hidden="true"></span>
+          <div>
+            <strong>应用到 Codex</strong>
+            <small id="desktopApplyStatus" data-tone="idle">正在读取安装目标…</small>
+          </div>
+        </div>
+        <label class="desktop-control desktop-control--target" for="desktopInstallationSelect">
+          <span>目标</span>
+          <select id="desktopInstallationSelect" aria-label="Codex 安装目标"></select>
+        </label>
+        <button class="desktop-icon-button" id="desktopRefreshButton" type="button" title="重新检测 Codex" aria-label="重新检测 Codex">
+          <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6"/></svg>
+        </button>
+        <button class="desktop-button" id="desktopChooseButton" type="button">选择 EXE</button>
+        <label class="desktop-control desktop-control--port" for="desktopPortInput">
+          <span>CDP 端口</span>
+          <input id="desktopPortInput" type="number" min="1024" max="65535" step="1" value="9335" inputmode="numeric" />
+        </label>
+        <label class="desktop-adaptive" for="desktopAdaptiveInput">
+          <span>自适应兼容</span>
+          <input id="desktopAdaptiveInput" type="checkbox" checked />
+          <i aria-hidden="true"></i>
+        </label>
+        <button class="desktop-button" id="desktopRestoreButton" type="button">恢复官方外观</button>
+        <button class="button button--primary desktop-apply-button" id="desktopApplyButton" type="button">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3"/></svg>
+          <span>应用到 Codex</span>
+        </button>
+      </section>
+
       <aside class="library glass-panel" aria-label="Wallpaper Engine 壁纸库">
         <header class="brand-row">
           <div class="brand-mark" aria-hidden="true">

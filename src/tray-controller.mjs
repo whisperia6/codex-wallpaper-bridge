@@ -10,12 +10,11 @@ function wrapAction(action, onError) {
 
 export function buildTrayMenuTemplate(actions, onError = () => {}) {
   return [
-    { label: "显示主窗口", click: wrapAction(actions.showWindow, onError) },
-    { label: "打开壁纸设置", click: wrapAction(actions.openControl, onError) },
+    { label: "打开壁纸设置", click: wrapAction(actions.showWindow, onError) },
     { type: "separator" },
-    { label: "保存后启动调试并注入", click: wrapAction(actions.launch, onError) },
-    { label: "立即重新注入", click: wrapAction(actions.inject, onError) },
+    { label: "应用到 Codex", click: wrapAction(actions.apply, onError) },
     { label: "恢复官方外观", click: wrapAction(actions.restore, onError) },
+    { label: "打开本地日志目录", click: wrapAction(actions.openLogs, onError) },
     { type: "separator" },
     { label: "退出", click: wrapAction(actions.quit, onError) },
   ];

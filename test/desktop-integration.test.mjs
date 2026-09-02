@@ -21,10 +21,15 @@ test("bundled control runtime contains exactly one Electron save handshake", asy
   assert.match(hostScript, /pendingWrites/);
   assert.match(hostScript, /flush-config/);
   assert.match(hostScript, /CONFIG_QUIET_MS = 360/);
-  assert.match(hostScript, /#injectButton,#restoreButton/);
+  assert.match(runtimeIndex, /id="desktopTargetBar"/);
+  assert.match(runtimeIndex, /id="desktopInstallationSelect"/);
+  assert.match(runtimeIndex, /id="desktopApplyButton"/);
+  assert.match(hostScript, /desktop-request/);
+  assert.match(hostScript, /desktop-response/);
+  assert.match(hostScript, /desktop-state/);
 });
 
-test("desktop renderer embeds the control page and flushes it before both injection paths", async () => {
+test("desktop renderer is only a wallpaper workbench and exposes one apply path", async () => {
   const [html, renderer] = await Promise.all([
     source("src/renderer/index.html"),
     source("src/renderer/renderer-desktop.mjs"),
@@ -32,24 +37,32 @@ test("desktop renderer embeds the control page and flushes it before both inject
   assert.match(html, /id="controlFrame"/);
   assert.match(html, /frame-src http:\/\/127\.0\.0\.1:\*/);
   assert.match(html, /renderer-desktop\.mjs/);
+  assert.doesNotMatch(html, /installationSelect|launchButton|injectButton|diagnoseButton|logOutput/);
   assert.match(renderer, /async function flushControlSettings/);
-  assert.match(renderer, /await prepareInjection\(\);\s+return api\.launchCodex/s);
-  assert.match(renderer, /await prepareInjection\(\);\s+return api\.injectOnce/s);
-  assert.match(renderer, /consumeTransferProgress/);
-  assert.match(renderer, /injection-ready/);
-  assert.match(renderer, /快速注入完成/);
-  assert.match(renderer, /媒体流请求失败/);
+  assert.match(renderer, /await flushControlSettings\(\)/);
+  assert.match(renderer, /await api\.applyCodex/);
+  assert.match(renderer, /desktop-request/);
+  assert.doesNotMatch(renderer, /api\.injectOnce|consumeTransferProgress|logOutput/);
 });
 
-test("main process owns one BrowserWindow and redirects tray actions to the shared renderer flow", async () => {
-  const main = await source("src/main.mjs");
+test("main process owns one BrowserWindow, one apply IPC, and local-only logs", async () => {
+  const [main, preload] = await Promise.all([
+    source("src/main.mjs"),
+    source("src/preload.cjs"),
+  ]);
   assert.equal((main.match(/new BrowserWindow\(/g) || []).length, 1);
   assert.match(main, /createApplicationTray/);
   assert.match(main, /window\.on\("minimize", hideToTray\)/);
   assert.match(main, /window\.on\("close", hideToTray\)/);
-  assert.match(main, /sendTrayAction\("launch"\)/);
+  assert.match(main, /sendTrayAction\("apply"\)/);
   assert.match(main, /invokeBridgeAction/);
   assert.match(main, /action: "inject"/);
+  assert.match(main, /cwb:apply-codex/);
+  assert.match(main, /writeCompatibilityDiagnostic/);
+  assert.match(main, /CodexWallpaperDesktop", "logs/);
+  assert.doesNotMatch(main, /cwb:inject-once|cwb:export-diagnostics|cwb:log/);
+  assert.match(preload, /applyCodex/);
+  assert.doesNotMatch(preload, /injectOnce|exportDiagnostics|revealDiagnostics|onLog/);
   assert.match(main, /requestSingleInstanceLock/);
   assert.doesNotMatch(main, /previewWindow/);
 });

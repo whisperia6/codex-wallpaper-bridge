@@ -3,220 +3,108 @@ const CONTROL_CHANNEL = "cwb-control";
 const CONTROL_READY_TIMEOUT_MS = 10_000;
 const CONTROL_FLUSH_TIMEOUT_MS = 7_000;
 const elements = {
-  statusPill: document.querySelector("#statusPill"),
-  statusText: document.querySelector("#statusText"),
-  noticeTitle: document.querySelector("#noticeTitle"),
-  noticeDetail: document.querySelector("#noticeDetail"),
-  installationSelect: document.querySelector("#installationSelect"),
-  portInput: document.querySelector("#portInput"),
-  adaptiveInput: document.querySelector("#adaptiveInput"),
-  refreshButton: document.querySelector("#refreshButton"),
-  chooseExecutableButton: document.querySelector("#chooseExecutableButton"),
-  launchButton: document.querySelector("#launchButton"),
-  controlPanelButton: document.querySelector("#controlPanelButton"),
-  injectButton: document.querySelector("#injectButton"),
-  restoreButton: document.querySelector("#restoreButton"),
-  diagnoseButton: document.querySelector("#diagnoseButton"),
-  diagnosticPathButton: document.querySelector("#diagnosticPathButton"),
-  clearLogButton: document.querySelector("#clearLogButton"),
-  logOutput: document.querySelector("#logOutput"),
-  controlState: document.querySelector("#controlState"),
-  controlPlaceholder: document.querySelector("#controlPlaceholder"),
   controlFrame: document.querySelector("#controlFrame"),
+  controlPlaceholder: document.querySelector("#controlPlaceholder"),
 };
-const actionButtons = [
-  elements.refreshButton,
-  elements.chooseExecutableButton,
-  elements.launchButton,
-  elements.controlPanelButton,
-  elements.injectButton,
-  elements.restoreButton,
-  elements.diagnoseButton,
-];
 const state = {
   installations: [],
   selectedId: null,
+  port: 9335,
+  adaptive: true,
   busy: false,
-  logs: [],
-  diagnosticPath: null,
+  feedback: "选择壁纸后，点击“应用到 Codex”即可生效",
+  feedbackTone: "idle",
   controlUrl: null,
   controlPort: null,
   controlReady: false,
   controlLoadPromise: null,
-  controlRequestSequence: 0,
+  requestSequence: 0,
   flushRequests: new Map(),
-  progressLogBuffer: "",
 };
 
 function delay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-function port() {
-  const value = Number(elements.portInput.value);
-  if (!Number.isInteger(value) || value < 1024 || value > 65535) {
+function normalizePort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error("CDP 端口必须在 1024 到 65535 之间");
   }
-  return value;
-}
-
-function setStatus(text, tone = "idle") {
-  elements.statusText.textContent = text;
-  elements.statusPill.dataset.tone = tone;
-}
-
-function setControlState(text, tone = "loading") {
-  elements.controlState.querySelector("span").textContent = text;
-  elements.controlState.dataset.tone = tone;
-}
-
-function showControlPlaceholder(title, detail) {
-  elements.controlPlaceholder.hidden = false;
-  elements.controlPlaceholder.querySelector("strong").textContent = title;
-  elements.controlPlaceholder.querySelector("p").textContent = detail;
-}
-
-function consumeTransferProgress(text) {
-  state.progressLogBuffer += text;
-  const lines = state.progressLogBuffer.split(/\r?\n/);
-  state.progressLogBuffer = lines.pop() || "";
-  if (state.progressLogBuffer.length > 2_048) {
-    state.progressLogBuffer = state.progressLogBuffer.slice(-2_048);
-  }
-
-  for (const line of lines) {
-    const ready = line.match(/\[CDP\] injection-ready(?:[：:]\s*(.+))?$/);
-    if (ready) {
-      setStatus(`快速注入完成 · ${ready[1] || "Runtime 与背景 DOM 已就绪"}`, "ready");
-      continue;
-    }
-    const mediaError = line.match(/\[CDP\] media-request-error(?:[：:]\s*(.+))?$/);
-    if (mediaError) {
-      setStatus(`媒体流请求失败 · ${mediaError[1] || "请查看日志"}`, "error");
-      continue;
-    }
-    const match = line.match(
-      /\[CDP\] asset-transfer-(start|progress|fallback|complete)(?:[：:]\s*(.+))?$/
-    );
-    if (!match) continue;
-    const [, phase, detail = ""] = match;
-    if (phase === "fallback") {
-      setStatus(`视频注入 · ${detail || "高速传输失败，正在切换兼容模式"}`, "busy");
-    } else if (phase === "complete") {
-      setStatus(`视频注入完成 · ${detail}`, "busy");
-    } else {
-      setStatus(`视频注入 · ${detail}`, "busy");
-    }
-  }
-}
-
-function appendLog(entry) {
-  const text = String(entry?.text || "");
-  if (!text) return;
-  consumeTransferProgress(text);
-  state.logs.push({ stream: entry.stream || "system", text });
-  if (state.logs.length > 220) state.logs.splice(0, state.logs.length - 220);
-  elements.logOutput.textContent = state.logs.map(({ stream, text: line }) => {
-    const prefix = stream === "stderr" ? "[ERROR] " : stream === "system" ? "[SYSTEM] " : "";
-    return `${prefix}${line}`;
-  }).join("");
-  elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
-}
-
-function setBusy(isBusy, label = "") {
-  state.busy = isBusy;
-  for (const button of actionButtons) button.disabled = isBusy;
-  elements.installationSelect.disabled = isBusy;
-  elements.portInput.disabled = isBusy;
-  elements.adaptiveInput.disabled = isBusy;
-  if (isBusy) setStatus(label || "正在执行", "busy");
-}
-
-function installationLabel(installation) {
-  const running = installation.isRunning ? " · 正在运行" : "";
-  return `${installation.label} · ${installation.version}${running}`;
-}
-
-function renderInstallations(payload, { applyPreferences = false } = {}) {
-  state.installations = payload.installations || [];
-  state.selectedId = payload.selectedId || state.installations[0]?.id || null;
-  if (applyPreferences) {
-    if (Number.isInteger(payload.port)) elements.portInput.value = String(payload.port);
-    elements.adaptiveInput.checked = payload.adaptive !== false;
-  }
-  elements.installationSelect.replaceChildren();
-  if (state.installations.length === 0) {
-    const option = document.createElement("option");
-    option.textContent = "未检测到 Codex，请选择本地 EXE";
-    option.value = "";
-    elements.installationSelect.append(option);
-  } else {
-    for (const installation of state.installations) {
-      const option = document.createElement("option");
-      option.value = installation.id;
-      option.textContent = installationLabel(installation);
-      option.title = installation.path;
-      elements.installationSelect.append(option);
-    }
-    elements.installationSelect.value = state.selectedId;
-  }
-  elements.launchButton.disabled = state.busy || !state.selectedId;
-  if (payload.hasStoreInstall) {
-    elements.noticeTitle.textContent = "已检测到 Microsoft Store 版";
-    elements.noticeDetail.textContent = "Store 与本地 EXE 共用同一壁纸设置、保存握手和注入流程。";
-  } else {
-    elements.noticeTitle.textContent = "当前电脑未检测到 Store 包";
-    elements.noticeDetail.textContent = "本机可验证本地 EXE；关闭窗口后应用会驻留右下角托盘。";
-  }
-  setStatus(`已发现 ${state.installations.length} 个安装目标`, "ready");
-}
-
-async function refreshInstallations(useInitialState = false) {
-  setBusy(true, "正在检测安装");
-  try {
-    const payload = useInitialState ? await api.getState() : await api.refreshInstallations();
-    renderInstallations(payload, { applyPreferences: useInitialState });
-  } catch (error) {
-    setStatus("检测失败", "error");
-    appendLog({ stream: "stderr", text: `${error.message}\n` });
-  } finally {
-    setBusy(false);
-    elements.launchButton.disabled = !state.selectedId;
-  }
+  return port;
 }
 
 function trustedControlUrl(rawUrl) {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || parsed.username || parsed.password) {
-    throw new Error("壁纸面板地址不是受信任的本机回环地址");
+    throw new Error("壁纸工作台地址不是受信任的本机回环地址");
   }
   return parsed.href;
 }
 
-function loadControlFrame(url, forceReload) {
+function showPlaceholder(title, detail) {
+  elements.controlPlaceholder.hidden = false;
+  elements.controlPlaceholder.querySelector("strong").textContent = title;
+  elements.controlPlaceholder.querySelector("p").textContent = detail;
+}
+
+function desktopPayload() {
+  return {
+    installations: state.installations,
+    selectedId: state.selectedId,
+    port: state.port,
+    adaptive: state.adaptive,
+    busy: state.busy,
+    feedback: state.feedback,
+    feedbackTone: state.feedbackTone,
+  };
+}
+
+function postToControl(message) {
+  if (!state.controlUrl || !elements.controlFrame.contentWindow) return;
+  elements.controlFrame.contentWindow.postMessage(
+    { channel: CONTROL_CHANNEL, ...message },
+    new URL(state.controlUrl).origin,
+  );
+}
+
+function sendDesktopState() {
+  postToControl({ type: "desktop-state", state: desktopPayload() });
+}
+
+function updateDesktopState(payload = {}) {
+  state.installations = payload.installations || state.installations;
+  state.selectedId = payload.selectedId || state.installations[0]?.id || null;
+  if (Number.isInteger(payload.port)) state.port = payload.port;
+  if (typeof payload.adaptive === "boolean") state.adaptive = payload.adaptive;
+  sendDesktopState();
+}
+
+function setFeedback(message, tone = "idle") {
+  state.feedback = message;
+  state.feedbackTone = tone;
+  sendDesktopState();
+}
+
+function loadControlFrame(url, forceReload = false) {
   state.controlReady = false;
-  setControlState("正在连接", "loading");
-  showControlPlaceholder("正在连接壁纸面板", "配置保存完成后，左侧注入按钮才会继续。 ");
+  showPlaceholder("正在连接壁纸工作台", "配置、Codex 目标和应用操作都将在同一页完成。");
   if (forceReload && elements.controlFrame.src === url) {
     elements.controlFrame.src = "about:blank";
-    window.setTimeout(() => {
-      elements.controlFrame.src = url;
-    }, 0);
+    window.setTimeout(() => { elements.controlFrame.src = url; }, 0);
   } else {
     elements.controlFrame.src = url;
   }
 }
 
-async function ensureControlPanel({ forceReload = false } = {}) {
-  const desiredPort = port();
+async function ensureControlPanel({ port = state.port, forceReload = false } = {}) {
+  const desiredPort = normalizePort(port);
   if (!forceReload && state.controlReady && state.controlPort === desiredPort) return state.controlUrl;
   if (state.controlLoadPromise) return state.controlLoadPromise;
 
-  setControlState("正在启动", "loading");
-  showControlPlaceholder("正在启动本地壁纸面板", "首次扫描 Wallpaper Engine 项目可能需要几秒。 ");
   state.controlLoadPromise = (async () => {
     const result = await api.openControlPanel({ port: desiredPort });
-    if (!result?.ok) throw new Error(result?.message || "壁纸面板启动失败");
+    if (!result?.ok) throw new Error(result?.message || "壁纸工作台启动失败");
     const url = trustedControlUrl(result.url);
     const shouldReload = forceReload || state.controlUrl !== url || state.controlPort !== desiredPort;
     state.controlUrl = url;
@@ -229,8 +117,7 @@ async function ensureControlPanel({ forceReload = false } = {}) {
     return await state.controlLoadPromise;
   } catch (error) {
     state.controlReady = false;
-    setControlState("载入失败", "error");
-    showControlPlaceholder("壁纸面板载入失败", error.message);
+    showPlaceholder("壁纸工作台载入失败", error.message);
     throw error;
   } finally {
     state.controlLoadPromise = null;
@@ -240,89 +127,93 @@ async function ensureControlPanel({ forceReload = false } = {}) {
 async function waitForControlReady() {
   const deadline = Date.now() + CONTROL_READY_TIMEOUT_MS;
   while (!state.controlReady && Date.now() < deadline) await delay(50);
-  if (!state.controlReady) throw new Error("壁纸面板未就绪，请点击右上角“重新载入”后再试");
+  if (!state.controlReady) throw new Error("壁纸工作台尚未就绪，请稍后重试");
 }
 
 async function flushControlSettings() {
-  await ensureControlPanel();
+  if (!state.controlUrl) await ensureControlPanel();
   await waitForControlReady();
-  const requestId = `flush-${Date.now()}-${++state.controlRequestSequence}`;
-  const targetOrigin = new URL(state.controlUrl).origin;
-  if (!elements.controlFrame.contentWindow) throw new Error("壁纸面板窗口不可用，请重新载入");
+  const requestId = `flush-${Date.now()}-${++state.requestSequence}`;
   const result = new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       state.flushRequests.delete(requestId);
-      reject(new Error("等待壁纸设置保存超时，请确认右侧没有显示保存失败"));
+      reject(new Error("等待壁纸设置保存超时"));
     }, CONTROL_FLUSH_TIMEOUT_MS);
     state.flushRequests.set(requestId, { resolve, reject, timer });
   });
-  elements.controlFrame.contentWindow.postMessage({
-    channel: CONTROL_CHANNEL,
-    action: "flush-config",
-    requestId,
-  }, targetOrigin);
+  postToControl({ action: "flush-config", requestId });
   return result;
 }
 
-async function prepareInjection() {
-  setStatus("正在等待壁纸设置保存", "busy");
-  appendLog({ stream: "system", text: "正在确认右侧壁纸设置已写入磁盘…\n" });
+async function applyCodex(payload = {}) {
+  const selectedId = payload.installationId || state.selectedId;
+  const selectedPort = normalizePort(payload.port ?? state.port);
+  const adaptive = payload.adaptive !== false;
+  if (!selectedId) throw new Error("请选择 Codex 安装目标");
+  state.selectedId = selectedId;
+  state.port = selectedPort;
+  state.adaptive = adaptive;
+
+  setFeedback("正在保存壁纸设置…", "busy");
   await flushControlSettings();
-  appendLog({ stream: "system", text: "壁纸设置已保存，开始注入。\n" });
+  setFeedback("正在应用到 Codex…", "busy");
+  const result = await api.applyCodex({ installationId: selectedId, port: selectedPort, adaptive });
+  if (result?.canceled) setFeedback("已取消，Codex 未被关闭", "idle");
+  else if (result?.ok) setFeedback(result.message || "已应用到 Codex", "success");
+  else setFeedback(result?.message || "应用失败，详情已写入本地日志", "error");
+
+  if (selectedPort !== state.controlPort) {
+    await ensureControlPanel({ port: selectedPort, forceReload: true });
+  }
+  return result;
 }
 
-async function runAction(label, action) {
-  if (state.busy) return;
-  setBusy(true, label);
+async function restoreOfficialAppearance(payload = {}) {
+  const selectedPort = normalizePort(payload.port ?? state.port);
+  setFeedback("正在恢复官方外观…", "busy");
+  const result = await api.restore({ port: selectedPort });
+  if (result?.ok) setFeedback("已恢复官方外观", "success");
+  else setFeedback(result?.message || "恢复失败，详情已写入本地日志", "error");
+  return result;
+}
+
+async function executeDesktopAction(action, payload = {}) {
+  if (state.busy) return { ok: false, message: "当前操作尚未完成，请稍候" };
+  state.busy = true;
+  sendDesktopState();
   try {
-    const result = await action();
-    if (result?.canceled) {
-      setStatus("已取消，Codex 未被关闭", "ready");
-    } else if (result?.ok) {
-      setStatus(result.message || `${label}完成`, "ready");
-      if (result.diagnosticPath) {
-        state.diagnosticPath = result.diagnosticPath;
-        elements.diagnosticPathButton.hidden = false;
-        elements.diagnosticPathButton.textContent = `诊断文件：${result.diagnosticPath}`;
-      }
-      if (result.warnings?.length) {
-        appendLog({ stream: "system", text: `警告：${result.warnings.join("；")}\n` });
-      }
-    } else {
-      setStatus(result?.message || `${label}失败`, "error");
+    if (action === "apply") {
+      state.selectedId = payload.installationId || state.selectedId;
+      state.port = normalizePort(payload.port ?? state.port);
+      state.adaptive = payload.adaptive !== false;
     }
+    if (action === "refresh-installations") {
+      const result = await api.refreshInstallations();
+      updateDesktopState(result);
+      setFeedback(`已发现 ${result.installations?.length || 0} 个 Codex 目标`, "success");
+      return { ok: true, ...result };
+    }
+    if (action === "choose-executable") {
+      const result = await api.chooseExecutable();
+      updateDesktopState(result);
+      setFeedback("本地 EXE 列表已更新", "success");
+      return { ok: true, ...result };
+    }
+    if (action === "apply") return applyCodex(payload);
+    if (action === "restore") return restoreOfficialAppearance(payload);
+    throw new Error(`不支持的桌面操作：${action}`);
   } catch (error) {
-    setStatus(`${label}失败`, "error");
-    appendLog({ stream: "stderr", text: `${error.message}\n` });
+    setFeedback(error.message || "操作失败，详情已写入本地日志", "error");
+    return { ok: false, message: error.message || String(error) };
   } finally {
-    setBusy(false);
-    elements.launchButton.disabled = !state.selectedId;
+    state.busy = false;
+    sendDesktopState();
   }
 }
 
-function launchAndInject() {
-  return runAction("启动并自动注入", async () => {
-    await prepareInjection();
-    return api.launchCodex({
-      installationId: state.selectedId,
-      port: port(),
-      adaptive: elements.adaptiveInput.checked,
-    });
-  });
-}
-
-function injectOnce() {
-  return runAction("快速流式注入", async () => {
-    await prepareInjection();
-    return api.injectOnce({
-      port: port(),
-      adaptive: elements.adaptiveInput.checked,
-    });
-  });
-}
-
-function restoreOfficialAppearance() {
-  return runAction("恢复官方外观", () => api.restore({ port: port() }));
+async function handleDesktopRequest(message) {
+  const result = await executeDesktopAction(message.action, message.payload);
+  postToControl({ type: "desktop-response", requestId: message.requestId, result });
 }
 
 window.addEventListener("message", (event) => {
@@ -333,19 +224,11 @@ window.addEventListener("message", (event) => {
   if (message.type === "ready") {
     state.controlReady = true;
     elements.controlPlaceholder.hidden = true;
-    setControlState("设置已就绪", "ready");
+    sendDesktopState();
     return;
   }
-  if (message.type === "dirty" || message.type === "saving") {
-    setControlState("正在保存", "saving");
-    return;
-  }
-  if (message.type === "saved") {
-    setControlState("设置已保存", "ready");
-    return;
-  }
-  if (message.type === "save-error") {
-    setControlState("保存失败", "error");
+  if (message.type === "desktop-request" && typeof message.requestId === "string") {
+    void handleDesktopRequest(message);
     return;
   }
   if (message.type !== "flush-complete" || typeof message.requestId !== "string") return;
@@ -353,73 +236,35 @@ window.addEventListener("message", (event) => {
   if (!pending) return;
   window.clearTimeout(pending.timer);
   state.flushRequests.delete(message.requestId);
-  if (message.ok) {
-    setControlState("设置已同步", "ready");
-    pending.resolve(message);
-  } else {
-    setControlState("保存失败", "error");
-    pending.reject(new Error(message.message || "壁纸设置保存失败"));
-  }
+  if (message.ok) pending.resolve(message);
+  else pending.reject(new Error(message.message || "壁纸设置保存失败"));
 });
 
-elements.controlFrame.addEventListener("load", () => {
-  if (!state.controlUrl || elements.controlFrame.src === "about:blank") return;
-  if (state.controlReady) return;
-  setControlState("正在初始化", "loading");
-});
-elements.installationSelect.addEventListener("change", () => {
-  state.selectedId = elements.installationSelect.value || null;
-  elements.launchButton.disabled = !state.selectedId;
-});
-elements.refreshButton.addEventListener("click", () => refreshInstallations());
-elements.chooseExecutableButton.addEventListener("click", () => runAction("选择本地 EXE", async () => {
-  const payload = await api.chooseExecutable();
-  renderInstallations(payload);
-  return { ok: true, message: "已添加本地 EXE" };
-}));
-elements.launchButton.addEventListener("click", launchAndInject);
-elements.controlPanelButton.addEventListener("click", () => runAction("重新载入壁纸面板", async () => {
-  await ensureControlPanel({ forceReload: true });
-  await waitForControlReady();
-  return { ok: true, message: "壁纸面板已重新载入" };
-}));
-elements.injectButton.addEventListener("click", injectOnce);
-elements.restoreButton.addEventListener("click", restoreOfficialAppearance);
-elements.diagnoseButton.addEventListener("click", () => runAction("导出兼容诊断", () => api.exportDiagnostics({
-  port: port(),
-  installationId: state.selectedId,
-})));
-elements.diagnosticPathButton.addEventListener("click", () => {
-  if (state.diagnosticPath) void api.revealDiagnostics(state.diagnosticPath);
-});
-elements.clearLogButton.addEventListener("click", () => {
-  state.logs = [];
-  elements.logOutput.textContent = "等待操作…";
-});
-
-api.onLog(appendLog);
 api.onTrayAction((action) => {
   if (action === "control-disconnected") {
     state.controlReady = false;
-    setControlState("连接已断开", "error");
-    showControlPlaceholder("壁纸面板连接已断开", "点击“重新载入”恢复设置面板。 ");
+    showPlaceholder("壁纸工作台连接已断开", "正在尝试重新连接…");
+    void ensureControlPanel({ port: state.port, forceReload: true }).catch(() => {});
     return;
   }
-  if (action === "control") void ensureControlPanel({ forceReload: true });
-  if (action === "launch") void launchAndInject();
-  if (action === "inject") void injectOnce();
-  if (action === "restore") void restoreOfficialAppearance();
+  if (action === "apply") void executeDesktopAction("apply", {
+    installationId: state.selectedId,
+    port: state.port,
+    adaptive: state.adaptive,
+  });
+  if (action === "restore") void executeDesktopAction("restore", { port: state.port });
 });
+
 window.addEventListener("unhandledrejection", (event) => {
-  appendLog({ stream: "stderr", text: `${event.reason?.message || event.reason}\n` });
+  setFeedback(event.reason?.message || String(event.reason), "error");
 });
 
 async function initialize() {
-  await refreshInstallations(true);
   try {
-    await ensureControlPanel();
+    updateDesktopState(await api.getState());
+    await ensureControlPanel({ port: state.port });
   } catch (error) {
-    appendLog({ stream: "stderr", text: `壁纸面板：${error.message}\n` });
+    showPlaceholder("壁纸工作台启动失败", error.message);
   }
 }
 

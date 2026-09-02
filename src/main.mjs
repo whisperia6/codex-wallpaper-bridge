@@ -9,7 +9,7 @@ import {
   Tray,
   utilityProcess,
 } from "electron";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -28,6 +28,7 @@ import { closeCodexProcesses, launchCodex } from "./codex-launcher.mjs";
 import { buildCompatibilityRestoreScript, buildCompatibilityScript } from "./compatibility-script.mjs";
 import { detectInstallations, validateCdpPort, validateExecutable } from "./installations.mjs";
 import { runLaunchAndInjectFlow } from "./launch-flow.mjs";
+import { dailyLogFilename, formatLogEntry, sanitizeLogText } from "./local-logging.mjs";
 import { createTrayController } from "./tray-controller.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -50,8 +51,9 @@ let settings = {
 };
 let activeOperation = null;
 let settingsPath = null;
-let diagnosticsRoot = null;
+let logsRoot = null;
 let bridgeRoot = null;
+let logWriteQueue = Promise.resolve();
 
 function forkBridgeUtility(modulePath, args, { cwd }) {
   const utilityPath = resolveBridgeUtilityPath({
@@ -73,11 +75,20 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
 function log(entry) {
   const normalized = {
     stream: entry?.stream || "system",
-    text: String(entry?.text || ""),
+    text: sanitizeLogText(entry?.text),
     at: new Date().toISOString(),
   };
   if (!normalized.text) return;
-  mainWindow?.webContents.send("cwb:log", normalized);
+  if (!logsRoot) return;
+  const append = async () => {
+    await mkdir(logsRoot, { recursive: true });
+    await appendFile(
+      path.join(logsRoot, dailyLogFilename(new Date(normalized.at))),
+      formatLogEntry(normalized),
+      "utf8",
+    );
+  };
+  logWriteQueue = logWriteQueue.then(append, append).catch(() => {});
 }
 
 async function loadSettings() {
@@ -168,6 +179,38 @@ async function resolveInstallation(installationId) {
   settings.selectedId = installation.id;
   await saveSettings();
   return installation;
+}
+
+async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
+  let diagnostics = { targets: [] };
+  let collectionError = null;
+  try {
+    diagnostics = await collectCdpDiagnostics(validateCdpPort(port));
+  } catch (error) {
+    collectionError = error.message;
+  }
+  const current = await currentState().catch(() => ({ installations: [] }));
+  const installation = current.installations.find(({ id }) => id === installationId) || null;
+  const report = {
+    schemaVersion: 2,
+    createdAt: new Date().toISOString(),
+    note: "自动兼容诊断不采集对话正文，仅包含版本、DOM 语义命中和表面样式摘要。",
+    reason: sanitizeLogText(reason),
+    collectionError,
+    installation: installation ? {
+      id: installation.id,
+      kind: installation.kind,
+      label: installation.label,
+      version: installation.version,
+      executableName: path.basename(installation.path),
+    } : null,
+    ...diagnostics,
+  };
+  await mkdir(logsRoot, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const diagnosticPath = path.join(logsRoot, `codex-compat-${timestamp}.json`);
+  await writeFile(diagnosticPath, JSON.stringify(report, null, 2), "utf8");
+  return diagnosticPath;
 }
 
 async function injectOnceAtPort({ port, adaptive }) {
@@ -310,10 +353,13 @@ function createApplicationTray() {
     nativeImageApi: nativeImage,
     actions: {
       showWindow: showMainWindow,
-      openControl: () => sendTrayAction("control"),
-      launch: () => sendTrayAction("launch"),
-      inject: () => sendTrayAction("inject"),
+      apply: () => sendTrayAction("apply"),
       restore: () => sendTrayAction("restore"),
+      openLogs: async () => {
+        await mkdir(logsRoot, { recursive: true });
+        const error = await shell.openPath(logsRoot);
+        if (error) throw new Error(error);
+      },
       quit: () => {
         isQuitting = true;
         app.quit();
@@ -347,42 +393,53 @@ function registerIpcHandlers() {
     await saveSettings();
     return currentState();
   });
-  registerHandler("cwb:launch-codex", ({ installationId, port, adaptive = true } = {}) => runOperation("启动并自动注入", async () => {
-    await rememberOperationSettings({ port, adaptive });
-    const installation = await resolveInstallation(installationId);
-    const normalizedPort = validateCdpPort(port);
-    const flow = await runLaunchAndInjectFlow({
-      installation,
-      port: normalizedPort,
-      adaptive: Boolean(adaptive),
-      isEndpointReady: isCdpEndpointReady,
-      confirmClose: confirmCloseRunningCodex,
-      closeCodex: (selected) => closeCodexProcesses({
-        installation: selected,
-        onLog: log,
-      }),
-      launchCodex: ({ installation: selected, port: selectedPort }) => launchCodex({
-        installation: selected,
-        port: selectedPort,
-        profileRoot: path.join(app.getPath("userData"), "codex-profiles"),
-        onLog: log,
-      }),
-      waitForTarget: waitForCodexTarget,
-      injectOnce: injectOnceAtPort,
-    });
-    if (flow.canceled) return flow;
-    return {
-      result: flow.launch,
-      compatibility: flow.injection.compatibility,
-      adaptive: flow.injection.adaptive,
-      closedCount: flow.closed?.closedCount || 0,
-      message: "Codex 已启动并完成快速流式注入；媒体服务将在托盘中保持运行",
-    };
-  }));
-  registerHandler("cwb:inject-once", ({ port, adaptive = true } = {}) => runOperation("快速流式注入", async () => {
-    await rememberOperationSettings({ port, adaptive });
-    const normalizedPort = validateCdpPort(port);
-    return injectOnceAtPort({ port: normalizedPort, adaptive: Boolean(adaptive) });
+  registerHandler("cwb:apply-codex", ({ installationId, port, adaptive = true } = {}) => runOperation("应用到 Codex", async () => {
+    try {
+      await rememberOperationSettings({ port, adaptive });
+      const installation = await resolveInstallation(installationId);
+      const normalizedPort = validateCdpPort(port);
+      const flow = await runLaunchAndInjectFlow({
+        installation,
+        port: normalizedPort,
+        adaptive: Boolean(adaptive),
+        isEndpointReady: isCdpEndpointReady,
+        confirmClose: confirmCloseRunningCodex,
+        closeCodex: (selected) => closeCodexProcesses({
+          installation: selected,
+          onLog: log,
+        }),
+        launchCodex: ({ installation: selected, port: selectedPort }) => launchCodex({
+          installation: selected,
+          port: selectedPort,
+          profileRoot: path.join(app.getPath("userData"), "codex-profiles"),
+          onLog: log,
+        }),
+        waitForTarget: waitForCodexTarget,
+        injectOnce: injectOnceAtPort,
+      });
+      if (flow.canceled) return flow;
+      return {
+        result: flow.launch,
+        compatibility: flow.injection.compatibility,
+        adaptive: flow.injection.adaptive,
+        closedCount: flow.closed?.closedCount || 0,
+        message: flow.launch
+          ? "Codex 已启动并应用壁纸；媒体服务将在托盘中保持运行"
+          : "壁纸已重新应用到正在调试的 Codex",
+      };
+    } catch (error) {
+      try {
+        const diagnosticPath = await writeCompatibilityDiagnostic({
+          port,
+          installationId,
+          reason: error.message,
+        });
+        log({ stream: "system", text: `已自动写入兼容诊断：${diagnosticPath}\n` });
+      } catch (diagnosticError) {
+        log({ stream: "stderr", text: `兼容诊断写入失败：${diagnosticError.message}\n` });
+      }
+      throw error;
+    }
   }));
   registerHandler("cwb:restore", ({ port } = {}) => runOperation("恢复官方外观", async () => {
     await rememberOperationSettings({ port });
@@ -403,43 +460,10 @@ function registerIpcHandlers() {
     if (warnings.length === 2) throw new Error(warnings.join("；"));
     return { compatibility, warnings };
   }));
-  registerHandler("cwb:export-diagnostics", ({ port, installationId } = {}) => runOperation("导出兼容诊断", async () => {
-    const normalizedPort = validateCdpPort(port);
-    const diagnostics = await collectCdpDiagnostics(normalizedPort);
-    const state = await currentState();
-    const installation = state.installations.find(({ id }) => id === installationId) || null;
-    const installationSummary = installation ? {
-      id: installation.id,
-      kind: installation.kind,
-      label: installation.label,
-      version: installation.version,
-      executableName: path.basename(installation.path),
-    } : null;
-    const report = {
-      schemaVersion: 1,
-      note: "报告不采集对话正文，仅包含版本、DOM 语义命中和表面样式摘要。",
-      installation: installationSummary,
-      ...diagnostics,
-    };
-    await mkdir(diagnosticsRoot, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const diagnosticPath = path.join(diagnosticsRoot, `codex-compat-${timestamp}.json`);
-    await writeFile(diagnosticPath, JSON.stringify(report, null, 2), "utf8");
-    return { diagnosticPath, targetCount: diagnostics.targets.length };
-  }));
   registerHandler("cwb:open-control-panel", ({ port } = {}) => runOperation("载入壁纸面板", async () => {
     await rememberOperationSettings({ port });
     return ensureControlPanel(port);
   }));
-  registerHandler("cwb:reveal-diagnostics", async (diagnosticPath) => {
-    const resolvedPath = path.resolve(String(diagnosticPath || ""));
-    const relativePath = path.relative(diagnosticsRoot, resolvedPath);
-    if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-      throw new Error("只能打开本桌面版生成的诊断文件");
-    }
-    shell.showItemInFolder(resolvedPath);
-    return { ok: true };
-  });
 }
 
 if (!hasSingleInstanceLock) {
@@ -449,7 +473,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     app.setAppUserModelId("com.local.codex-wallpaper-desktop");
     settingsPath = path.join(app.getPath("userData"), "settings.json");
-    diagnosticsRoot = path.join(app.getPath("userData"), "diagnostics");
+    logsRoot = path.join(process.env.LOCALAPPDATA || app.getPath("userData"), "CodexWallpaperDesktop", "logs");
     bridgeRoot = resolveBridgeRoot({
       isPackaged: app.isPackaged,
       appPath: app.getAppPath(),

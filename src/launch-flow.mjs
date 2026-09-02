@@ -29,11 +29,14 @@ export async function runLaunchAndInjectFlow({
     };
   }
 
-  const launch = await launchCodex({
-    installation: selectedInstallation,
-    port,
-  });
-  await waitForTarget(port);
+  let launch = null;
+  if (!alreadyDebuggable) {
+    launch = await launchCodex({
+      installation: selectedInstallation,
+      port,
+    });
+    await waitForTarget(port);
+  }
   const injection = await injectOnce({ port, adaptive });
   return {
     canceled: false,
