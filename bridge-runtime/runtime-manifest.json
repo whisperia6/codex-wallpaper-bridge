@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "source": "bundled standalone bridge runtime with Electron-only overrides",
+  "bridgeVersion": "0.1.0",
+  "overrides": [
+    "large-video-cdp-blob-transfer",
+    "embedded-control-save-handshake"
+  ]
+}

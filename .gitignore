@@ -1,0 +1,29 @@
+# Dependencies restored by npm ci
+node_modules/
+bridge-runtime/node_modules/
+
+# Generated build and release artifacts
+dist/
+out/
+release/
+coverage/
+*.exe
+*.zip
+*.7z
+*.blockmap
+
+# Local diagnostics, editor state, and work notes
+screenshots/
+.ai-memory/
+_plan.md
+*.bak
+*.bak.*
+*.log
+.env
+.env.*
+!.env.example
+.npmrc
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,70 @@
+{
+  "name": "codex-wallpaper-desktop",
+  "version": "0.5.1",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Electron desktop shell for Codex Wallpaper Bridge.",
+  "main": "dist/main.mjs",
+  "scripts": {
+    "sync:bridge": "node scripts/sync-bridge-runtime.mjs",
+    "build:app": "node scripts/build-app.mjs",
+    "prestart": "npm run sync:bridge && npm run build:app",
+    "start": "electron .",
+    "pretest": "npm run sync:bridge",
+    "test": "node --test",
+    "prepackage": "npm run sync:bridge && npm run build:app",
+    "package": "node scripts/package-windows.mjs",
+    "premake": "npm run sync:bridge && npm run build:app",
+    "make": "node scripts/package-windows.mjs"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.3.0",
+    "electron": "44.1.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "javascript-obfuscator": "5.6.0"
+  },
+  "build": {
+    "appId": "com.local.codex-wallpaper-desktop",
+    "productName": "Codex Wallpaper Desktop",
+    "compression": "normal",
+    "npmRebuild": false,
+    "asar": true,
+    "asarUnpack": [
+      "dist/bridge-utility-entry.mjs",
+      "dist/bridge-runtime/**/*"
+    ],
+    "directories": {
+      "output": "out/.portable-build"
+    },
+    "files": [
+      "dist/**/*"
+    ],
+    "extraMetadata": {
+      "main": "dist/main.mjs"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "CodexWallpaperDesktop",
+      "artifactName": "CodexWallpaperDesktop-${version}.${ext}"
+    }
+  }
+}

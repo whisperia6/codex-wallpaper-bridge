@@ -1,0 +1,19 @@
+{
+  "name": "codex-wallpaper-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Use local Wallpaper Engine projects as a Codex desktop background.",
+  "scripts": {
+    "start": "node src/cli.mjs preview",
+    "preview": "node src/cli.mjs preview",
+    "inject": "node src/cli.mjs inject",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

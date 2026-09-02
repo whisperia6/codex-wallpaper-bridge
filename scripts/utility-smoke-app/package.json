@@ -1,0 +1,6 @@
+{
+  "name": "cwb-utility-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "main": "../utility-smoke.cjs"
+}
