@@ -1,6 +1,52 @@
 # Codex Wallpaper Desktop
 
-这是可独立克隆、运行和打包的 Electron 桌面版。仓库已经包含所需的 `bridge-runtime/`，启动或构建前只会叠加 `bridge-overrides/` 中的 Electron 专用功能，不依赖仓库外的父目录。
+Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper Engine 项目作为 Codex 的窗口背景，并在一个界面里完成壁纸选择、实时预览、显示效果调整、Codex 调试启动、一次性注入和官方外观恢复。
+
+它同时适配 Microsoft Store 版 Codex 和用户选择的本地 `ChatGPT.exe`，不会替换或修改 Codex 安装目录中的文件。项目可以独立克隆、运行和打包；仓库已经包含所需的 `bridge-runtime/`，不依赖仓库外的父目录。
+
+## 它具体能做什么
+
+- 扫描本机 Wallpaper Engine 项目，支持图片、视频、网页和场景壁纸的选择与预览。
+- 自动发现 Store 版 Codex，也可手动选择其他目录中的本地 EXE。
+- 以独立 profile 和仅监听 `127.0.0.1` 的 CDP 端口启动 Codex，不改官方配置文件。
+- 把壁纸、亮度、暗化遮罩、模糊、饱和度和适配方式一次性注入当前 Codex renderer。
+- 自动清理 Store/本地不同构建中的不透明背景和大型模糊壳层，让壁纸保持清晰可见。
+- 大视频使用 8 MiB 分块和最多 3 路流水传输；高速路径失败时自动切换兼容模式并显示进度。
+- 关闭或最小化控制窗口后驻留 Windows 托盘；也可完全退出，当前 Codex 窗口中的已注入效果仍会保留。
+- 随时执行“恢复官方外观”，清理壁纸节点、透明兼容样式和运行时状态。
+
+简单来说，它不是修改 Codex 安装包的“永久补丁”，而是一个可恢复的桌面注入控制器。Codex 重启、硬刷新或 renderer 重建后需要重新注入。
+
+## 工作方式
+
+1. 在右侧壁纸面板选择本地 Wallpaper Engine 壁纸并调整显示参数。
+2. 在左侧选择 Store 或本地 Codex；如果目标正在普通模式运行，软件会先询问是否关闭。
+3. 软件等待壁纸设置保存完成，再以隔离调试 profile 启动 Codex 并执行一次性注入。
+4. 注入结束后无需保持注入进程运行；需要修改、恢复或重新注入时再打开本软件。
+
+## 运行效果
+
+### 一体化控制台
+
+目标选择、注入操作、壁纸库和显示设置集中在同一个窗口。
+
+![Codex Wallpaper Desktop 一体化控制台](docs/images/desktop-overview.png)
+
+### Codex 启动与一次性注入
+
+选择 Store/本地 EXE、设置 CDP 端口和透明兼容模式，然后保存设置并自动启动注入。
+
+![Codex 启动与一次性注入流程](docs/images/launcher-workflow.png)
+
+### 壁纸库、实时预览与显示设置
+
+直接浏览本地壁纸、预览动态效果，并调整亮度、暗化、模糊、饱和度和适配方式。
+
+![壁纸库与实时显示设置](docs/images/wallpaper-library.png)
+
+## 下载
+
+从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases/latest) 下载 `CodexWallpaperDesktop.exe`，无需安装，双击即可运行。
 
 ## 首次安装依赖
 
