@@ -85,6 +85,16 @@ function consumeTransferProgress(text) {
   }
 
   for (const line of lines) {
+    const ready = line.match(/\[CDP\] injection-ready(?:[：:]\s*(.+))?$/);
+    if (ready) {
+      setStatus(`快速注入完成 · ${ready[1] || "Runtime 与背景 DOM 已就绪"}`, "ready");
+      continue;
+    }
+    const mediaError = line.match(/\[CDP\] media-request-error(?:[：:]\s*(.+))?$/);
+    if (mediaError) {
+      setStatus(`媒体流请求失败 · ${mediaError[1] || "请查看日志"}`, "error");
+      continue;
+    }
     const match = line.match(
       /\[CDP\] asset-transfer-(start|progress|fallback|complete)(?:[：:]\s*(.+))?$/
     );
@@ -302,7 +312,7 @@ function launchAndInject() {
 }
 
 function injectOnce() {
-  return runAction("一次性注入", async () => {
+  return runAction("快速流式注入", async () => {
     await prepareInjection();
     return api.injectOnce({
       port: port(),

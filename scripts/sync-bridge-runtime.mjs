@@ -49,7 +49,7 @@ const manifest = {
   schemaVersion: 1,
   source: "bundled standalone bridge runtime with Electron-only overrides",
   bridgeVersion: packageJson.version,
-  overrides: ["large-video-cdp-blob-transfer", "embedded-control-save-handshake"],
+  overrides: ["one-second-range-streaming", "embedded-control-save-handshake"],
 };
 await writeFile(
   path.join(targetRoot, "runtime-manifest.json"),

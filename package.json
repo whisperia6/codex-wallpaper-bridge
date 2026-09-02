@@ -1,9 +1,9 @@
 {
   "name": "codex-wallpaper-desktop",
-  "version": "0.5.1",
+  "version": "0.6.0-alpha.1",
   "private": true,
   "type": "module",
-  "description": "Standalone Electron desktop shell for Codex Wallpaper Bridge.",
+  "description": "Experimental one-second streaming injector for Codex Wallpaper Bridge.",
   "main": "dist/main.mjs",
   "scripts": {
     "sync:bridge": "node scripts/sync-bridge-runtime.mjs",
@@ -12,6 +12,7 @@
     "start": "electron .",
     "pretest": "npm run sync:bridge",
     "test": "node --test",
+    "benchmark:injection": "npm run sync:bridge && node scripts/benchmark-one-second-injection.mjs",
     "prepackage": "npm run sync:bridge && npm run build:app",
     "package": "node scripts/package-windows.mjs",
     "premake": "npm run sync:bridge && npm run build:app",

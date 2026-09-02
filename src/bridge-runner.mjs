@@ -20,11 +20,42 @@ export function buildBridgeArguments(command, port) {
     throw new Error("CDP 端口必须在 1024 到 65535 之间");
   }
   if (command === "inject") {
-    return ["inject", "--cdp-port", String(normalizedPort), "--once", "--no-open"];
+    throw new Error("流式注入必须通过常驻壁纸面板执行");
   }
   if (command === "restore") return ["restore", "--cdp-port", String(normalizedPort)];
   if (command === "preview") return ["preview", "--cdp-port", String(normalizedPort), "--no-open"];
   throw new Error(`不支持的桥接命令：${command}`);
+}
+
+export async function invokeBridgeAction({
+  controlUrl,
+  action,
+  timeoutMs = 15_000,
+}) {
+  const base = new URL(String(controlUrl || ""));
+  if (
+    base.protocol !== "http:" ||
+    base.hostname !== "127.0.0.1" ||
+    base.username || base.password ||
+    base.search || base.hash ||
+    !/^\/[A-Za-z0-9_-]{22,}\/$/.test(base.pathname)
+  ) {
+    throw new Error("壁纸操作地址不是受信任的本机服务");
+  }
+  if (typeof action !== "string" || !action.trim() || action.length > 100) {
+    throw new Error("壁纸操作名称无效");
+  }
+  const response = await fetch(new URL("api/action", base), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.ok !== true) {
+    throw new Error(payload?.error || payload?.message || `壁纸操作返回 HTTP ${response.status}`);
+  }
+  return payload;
 }
 
 export function resolveBridgeRoot({ isPackaged, appPath, resourcesPath }) {

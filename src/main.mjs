@@ -13,7 +13,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  runBridgeCommand,
+  invokeBridgeAction,
   resolveBridgeRoot,
   resolveBridgeUtilityPath,
   startBridgePreview,
@@ -171,19 +171,21 @@ async function resolveInstallation(installationId) {
 }
 
 async function injectOnceAtPort({ port, adaptive }) {
-  await runBridgeCommand({
-    executablePath: process.execPath,
-    bridgeRoot,
-    command: "inject",
-    port,
-    onLog: log,
-    processFactory: forkBridgeUtility,
-  });
+  const startedAt = performance.now();
+  const control = await ensureControlPanel(port);
+  const injection = await invokeBridgeAction({ controlUrl: control.url, action: "inject" });
   const compatibility = await evaluateInCodexTargets(
     port,
     buildCompatibilityScript({ adaptive: Boolean(adaptive) }),
   );
-  return { compatibility, adaptive: Boolean(adaptive) };
+  const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
+  return {
+    compatibility,
+    adaptive: Boolean(adaptive),
+    injection,
+    elapsedMs,
+    message: `${injection.message || "Runtime 与背景 DOM 已注入"}；总流程 ${elapsedMs} ms`,
+  };
 }
 
 async function confirmCloseRunningCodex(installation) {
@@ -192,7 +194,7 @@ async function confirmCloseRunningCodex(installation) {
     type: "warning",
     title: "Codex 正在运行",
     message: `${installation.label}正在运行，是否关闭并继续？`,
-    detail: `将只关闭下面路径对应的 Codex 进程，然后以调试模式重新启动并自动完成一次性注入。请先保存尚未发送的输入。\n\n${installation.path}\n\n已发现进程：${processCount} 个`,
+    detail: `将只关闭下面路径对应的 Codex 进程，然后以调试模式重新启动并自动完成快速流式注入。请先保存尚未发送的输入。\n\n${installation.path}\n\n已发现进程：${processCount} 个`,
     buttons: ["关闭并继续", "取消"],
     defaultId: 1,
     cancelId: 1,
@@ -374,10 +376,10 @@ function registerIpcHandlers() {
       compatibility: flow.injection.compatibility,
       adaptive: flow.injection.adaptive,
       closedCount: flow.closed?.closedCount || 0,
-      message: "Codex 已启动并完成一次性注入",
+      message: "Codex 已启动并完成快速流式注入；媒体服务将在托盘中保持运行",
     };
   }));
-  registerHandler("cwb:inject-once", ({ port, adaptive = true } = {}) => runOperation("一次性注入", async () => {
+  registerHandler("cwb:inject-once", ({ port, adaptive = true } = {}) => runOperation("快速流式注入", async () => {
     await rememberOperationSettings({ port, adaptive });
     const normalizedPort = validateCdpPort(port);
     return injectOnceAtPort({ port: normalizedPort, adaptive: Boolean(adaptive) });
@@ -393,14 +395,8 @@ function registerIpcHandlers() {
       warnings.push(`兼容层：${error.message}`);
     }
     try {
-      await runBridgeCommand({
-        executablePath: process.execPath,
-        bridgeRoot,
-        command: "restore",
-        port: normalizedPort,
-        onLog: log,
-        processFactory: forkBridgeUtility,
-      });
+      const control = await ensureControlPanel(normalizedPort);
+      await invokeBridgeAction({ controlUrl: control.url, action: "restore" });
     } catch (error) {
       warnings.push(`壁纸层：${error.message}`);
     }

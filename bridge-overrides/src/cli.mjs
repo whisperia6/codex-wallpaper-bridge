@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CdpWallpaperInjector, restoreCdpWallpaper } from "./cdp-injector.mjs";
 import { createConfigStore } from "./config-store.mjs";
-import { buildInjectionScript } from "./injected-renderer.mjs";
+import { buildCurrentInjection } from "./injection-plan.mjs";
 import { createMediaServer } from "./media-server.mjs";
 import { scanWallpaperProjects } from "./scanner.mjs";
 
@@ -17,15 +17,6 @@ const stateRoot = process.platform === "win32"
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "CodexWallpaperBridge")
   : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "codex-wallpaper-bridge");
 const runtimePath = path.join(stateRoot, "runtime.json");
-const inlineAssetCache = new Map();
-const INLINE_VIDEO_MAX_BYTES = 32 * 1024 * 1024;
-const TRANSFER_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
-const VIDEO_MIME_TYPES = new Map([
-  [".m4v", "video/mp4"],
-  [".mov", "video/quicktime"],
-  [".mp4", "video/mp4"],
-  [".webm", "video/webm"]
-]);
 
 function parseArguments(argv) {
   const args = [...argv];
@@ -49,6 +40,9 @@ function parseArguments(argv) {
   if ((options.once || options.keepOnExit) && command !== "inject") {
     throw new Error("--once 和 --keep-on-exit 只能与 inject 命令一起使用");
   }
+  if (options.once || options.keepOnExit) {
+    throw new Error("1 秒流式架构需要媒体服务常驻；请移除 --once/--keep-on-exit，并将桌面程序最小化到托盘");
+  }
   return options;
 }
 
@@ -57,13 +51,12 @@ function printHelp() {
 
 用法：
   node src/cli.mjs preview [--no-open]
-  node src/cli.mjs inject [--cdp-port 9335] [--no-open] [--once | --keep-on-exit]
+  node src/cli.mjs inject [--cdp-port 9335] [--no-open]
   node src/cli.mjs restore [--cdp-port 9335]
   node src/cli.mjs scan [--steam-root D:\\steam]
 
-选项：
-  --once         注入已保存的皮肤后立即退出，保留当前 Codex 窗口中的效果
-  --keep-on-exit 保持控制页实时同步；退出桥接时保留当前 Codex 窗口中的效果
+说明：
+  1 秒流式架构通过本机 HTTP Range 提供媒体，播放期间需保持桥接或桌面托盘进程运行。
 `);
 }
 
@@ -81,81 +74,6 @@ function openExternal(url) {
   child.unref();
 }
 
-function absoluteAssetUrl(value, origin) {
-  if (!value) return null;
-  return new URL(value, origin).href;
-}
-
-async function fetchAsDataUrl(url, maximumBytes) {
-  if (!url) return null;
-  const cacheKey = `${maximumBytes}:${url}`;
-  if (inlineAssetCache.has(cacheKey)) return inlineAssetCache.get(cacheKey);
-  const head = await fetch(url, { method: "HEAD" }).catch(() => null);
-  const declaredLength = Number(head?.headers?.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-    inlineAssetCache.set(cacheKey, null);
-    return null;
-  }
-  const response = await fetch(url);
-  if (!response.ok) return null;
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > maximumBytes) {
-    inlineAssetCache.set(cacheKey, null);
-    return null;
-  }
-  const contentType = response.headers.get("content-type")?.split(";", 1)[0] || "application/octet-stream";
-  const result = `data:${contentType};base64,${bytes.toString("base64")}`;
-  inlineAssetCache.set(cacheKey, result);
-  return result;
-}
-
-async function createVideoTransferAsset(project) {
-  const filePath = project?.mediaPath;
-  if (typeof filePath !== "string" || !filePath) return null;
-  try {
-    const info = await stat(filePath);
-    if (!info.isFile() || info.size <= 0 || info.size > TRANSFER_VIDEO_MAX_BYTES) return null;
-    return {
-      key: `video:${project.id}:${info.size}:${Math.trunc(info.mtimeMs)}`,
-      filePath,
-      size: info.size,
-      mtimeMs: info.mtimeMs,
-      contentType: VIDEO_MIME_TYPES.get(path.extname(filePath).toLowerCase()) || "video/mp4"
-    };
-  } catch {
-    return null;
-  }
-}
-
-function rendererEffects(config) {
-  const effects = config?.effects || {};
-  const asPercent = (value, fallback) => {
-    const number = Number(value);
-    if (!Number.isFinite(number)) return fallback;
-    return number <= 3 ? number * 100 : number;
-  };
-  const rawDim = effects.dim ?? effects.darkness;
-  const dimNumber = Number(rawDim);
-  return {
-    brightness: asPercent(effects.brightness, 82),
-    saturation: asPercent(effects.saturation, 105),
-    dim: Number.isFinite(dimNumber) ? (dimNumber <= 1 ? dimNumber * 100 : dimNumber) : 28,
-    blur: Number(effects.blur) || 0,
-    fit: effects.fit || "cover",
-    position: effects.position || "50% 50%",
-    playing: effects.playing !== false,
-    pauseWhenHidden: effects.pauseWhenHidden !== false,
-    glassOpacity: Number(effects.glassOpacity) || 62,
-    glassBlur: Number(effects.glassBlur) || 18
-  };
-}
-
-async function fetchPublicInventory(server) {
-  const response = await fetch(new URL("api/inventory", server.baseUrl));
-  if (!response.ok) throw new Error(`壁纸 API 返回 HTTP ${response.status}`);
-  return response.json();
-}
-
 async function chooseDefault(configStore, projects) {
   let config = await configStore.get();
   if (projects.some((project) => project.id === config.selectedId)) return config;
@@ -165,66 +83,6 @@ async function chooseDefault(configStore, projects) {
     || projects[0];
   if (preferred) config = await configStore.set({ selectedId: preferred.id });
   return config;
-}
-
-async function buildCurrentScript(server, configStore, sourceProjects = []) {
-  const inventory = await fetchPublicInventory(server);
-  const config = await configStore.get();
-  const projects = inventory.projects || inventory.items || [];
-  const selected = projects.find((project) => project.id === config.selectedId) || projects[0] || null;
-  let wallpaper = null;
-  const assets = [];
-  if (selected) {
-    const mediaUrl = absoluteAssetUrl(selected.mediaUrl, server.origin);
-    const previewUrl = absoluteAssetUrl(selected.previewUrl, server.origin);
-    const webUrl = absoluteAssetUrl(selected.webUrl, server.origin);
-    const inlinePreview = await fetchAsDataUrl(previewUrl, 12 * 1024 * 1024);
-    if (selected.type === "video") {
-      // app:// renderers cannot read the loopback media URL directly. Small
-      // videos stay inline; larger files are transferred over CDP in bounded
-      // chunks and assembled into a renderer-owned Blob URL.
-      const inlineVideo = await fetchAsDataUrl(mediaUrl, INLINE_VIDEO_MAX_BYTES);
-      if (inlineVideo) {
-        wallpaper = { ...selected, playable: "video", mediaUrl: inlineVideo, previewUrl: inlinePreview };
-      } else {
-        const sourceProject = sourceProjects.find((project) => String(project.id) === String(selected.id));
-        const asset = await createVideoTransferAsset(sourceProject);
-        if (asset) {
-          assets.push(asset);
-          wallpaper = {
-            ...selected,
-            playable: "video",
-            mediaUrl: null,
-            mediaAssetKey: asset.key,
-            previewUrl: inlinePreview
-          };
-        } else {
-          console.warn("大视频无法安全传输（文件不可读或超过 512 MiB），已使用静态预览。");
-          wallpaper = {
-            ...selected,
-            type: "scene",
-            playable: "image",
-            mediaUrl: inlinePreview,
-            previewUrl: inlinePreview
-          };
-        }
-      }
-    } else if (selected.type === "web") {
-      // Web wallpapers remain fully interactive in the HTTP preview. Codex's
-      // app:// URL safety policy rejects their loopback iframe, so injection
-      // uses the preview image until a dedicated protocol bridge is added.
-      wallpaper = { ...selected, type: "scene", playable: "image", mediaUrl: inlinePreview, previewUrl: inlinePreview, webUrl };
-    } else {
-      wallpaper = { ...selected, playable: "image", mediaUrl: inlinePreview, previewUrl: inlinePreview };
-    }
-  }
-  return {
-    script: buildInjectionScript({
-      wallpaper,
-      config: { ...config, effects: rendererEffects(config) }
-    }),
-    assets
-  };
 }
 
 async function writeRuntime(server, options, scanResult, injectorActive) {
@@ -286,9 +144,14 @@ async function main() {
 
   const refreshInjection = async () => {
     if (!injector) return { ok: true, status: "preview-only" };
-    const injection = await buildCurrentScript(server, configStore, scanResult.projects);
+    const injection = await buildCurrentInjection(server, configStore);
     const result = await injector.update(injection);
-    return { ok: result.failed === 0, status: `updated:${result.sessions}` };
+    return {
+      ok: result.sessions > 0 && result.failed === 0,
+      status: `updated:${result.sessions}`,
+      metrics: injection.metrics,
+      timings: result.timings
+    };
   };
 
   const ensureInjector = async () => {
@@ -301,15 +164,16 @@ async function main() {
           console.log(`[CDP] ${status.type}${suffix}`);
         }
       });
-      const injection = await buildCurrentScript(server, configStore, scanResult.projects);
+      const injection = await buildCurrentInjection(server, configStore);
       await injector.start(injection);
       if (injector.sessions.size === 0) {
         await injector.close();
         injector = null;
         throw new Error(`没有在 127.0.0.1:${options.cdpPort} 找到 Codex renderer；可先使用预览页`);
       }
+      return { injector, started: true, metrics: injection.metrics };
     }
-    return injector;
+    return { injector, started: false, metrics: null };
   };
 
   server = createMediaServer({
@@ -319,10 +183,19 @@ async function main() {
     onConfigChange: async () => refreshInjection(),
     onAction: async (action) => {
       if (action === "inject") {
-        await ensureInjector();
-        await refreshInjection();
+        const startedAt = performance.now();
+        const state = await ensureInjector();
+        const update = state.started
+          ? { ok: true, metrics: state.metrics, timings: [] }
+          : await refreshInjection();
+        if (!update.ok) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
         await writeRuntime(server, options, scanResult, true);
-        return { ok: true, message: "已注入当前 Codex 窗口", status: "injected" };
+        const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
+        return {
+          ok: true,
+          message: `Runtime 与背景 DOM 已注入：${elapsedMs} ms；媒体正在按需加载`,
+          status: `injected:${elapsedMs}`
+        };
       }
       if (action === "restore") {
         if (injector) {
@@ -335,7 +208,6 @@ async function main() {
         return { ok: true, message: "已恢复官方外观", status: "restored" };
       }
       if (action === "rescan") {
-        inlineAssetCache.clear();
         scanResult = await scanWallpaperProjects({ explicitRoots: options.steamRoots, steamRoots: options.steamRoots });
         server.setProjects(scanResult.projects);
         await chooseDefault(configStore, scanResult.projects);
@@ -359,17 +231,6 @@ async function main() {
 
   if (options.command === "inject") {
     await ensureInjector();
-    if (options.once) {
-      try {
-        await injector.close({ preserveCurrentPage: true });
-      } finally {
-        injector = null;
-        await server.close().catch(() => {});
-        await rm(runtimePath, { force: true }).catch(() => {});
-      }
-      console.log("一次性注入完成；桥接已退出，当前 Codex 窗口将保留皮肤。");
-      return;
-    }
   }
   await writeRuntime(server, options, scanResult, Boolean(injector));
   if (options.open) openExternal(server.baseUrl);
@@ -379,9 +240,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     console.log(`\n收到 ${signal}，正在清理...`);
-    await injector?.close(options.keepOnExit
-      ? { preserveCurrentPage: true }
-      : { restore: true }).catch(() => {});
+    await injector?.close({ restore: true }).catch(() => {});
     await server.close().catch(() => {});
     await rm(runtimePath, { force: true }).catch(() => {});
     process.exit(0);

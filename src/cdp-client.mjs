@@ -50,10 +50,14 @@ const DIAGNOSTIC_EXPRESSION = `(() => {
       webkitBackdropFilter: style.webkitBackdropFilter || "none"
     });
   }
-  const media = document.getElementById("codex-wallpaper-bridge-media");
+  const mediaFrame = document.getElementById("codex-wallpaper-bridge-media");
+  const media = mediaFrame?.tagName === "IFRAME"
+    ? mediaFrame.contentDocument?.getElementById("cwb-media")
+    : mediaFrame;
   const mediaSource = String(media?.currentSrc || media?.src || "");
   const mediaStyle = media ? getComputedStyle(media) : null;
   const wallpaperMedia = media ? {
+    frameTag: mediaFrame?.tagName.toLowerCase() || null,
     tag: media.tagName.toLowerCase(),
     sourceKind: mediaSource.startsWith("blob:")
       ? "blob"

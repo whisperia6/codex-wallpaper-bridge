@@ -42,6 +42,7 @@ test("adaptive mode clears transparent Store surfaces that only blur their backd
   assert.match(cdpClient, /backdropFilter:\s*style\.backdropFilter/);
   assert.match(cdpClient, /webkitBackdropFilter:\s*style\.webkitBackdropFilter/);
   assert.match(cdpClient, /wallpaperMedia/);
+  assert.match(cdpClient, /contentDocument\?\.getElementById\("cwb-media"\)/);
   assert.match(cdpClient, /sourceKind/);
   assert.match(cdpClient, /videoWidth/);
 });

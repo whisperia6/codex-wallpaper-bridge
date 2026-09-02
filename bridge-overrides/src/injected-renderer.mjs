@@ -1,16 +1,12 @@
 const GLOBAL_KEY = "__codexWallpaperBridgeRuntime";
-const TRANSFERRED_ASSETS_KEY = "__codexWallpaperBridgeAssets";
-const ASSET_TRANSFER_KEY = "__codexWallpaperBridgeAssetTransfer";
 
 function safePayload(payload) {
   return JSON.stringify(payload ?? {}).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
 
-function rendererBootstrap(incoming) {
+function rendererBootstrap() {
     const KEY = "__codexWallpaperBridgeRuntime";
-    const ASSETS_KEY = "__codexWallpaperBridgeAssets";
-    const TRANSFER_KEY = "__codexWallpaperBridgeAssetTransfer";
-    const VERSION = "0.2.0";
+    const VERSION = "0.3.0-stream";
 
     const createRuntime = () => {
       const ids = {
@@ -22,7 +18,9 @@ function rendererBootstrap(incoming) {
       let current = null;
       let observer = null;
       let visibilityHandler = null;
-      let activeAssetKey = null;
+      let currentMediaIdentity = null;
+      let mediaState = { state: "idle", at: performance.now() };
+      let mediaMessageHandler = null;
       const shellInlineState = new Map();
 
       const shellSelectors = {
@@ -340,74 +338,127 @@ function rendererBootstrap(incoming) {
         return root;
       };
 
-      const assetRegistry = () => {
-        const existing = globalThis[ASSETS_KEY];
-        if (existing instanceof Map) return existing;
-        const registry = new Map();
-        globalThis[ASSETS_KEY] = registry;
-        return registry;
+      const updateMediaState = (state, detail = null) => {
+        mediaState = { state, detail, at: performance.now() };
       };
 
-      const releaseAsset = (key) => {
-        if (!key) return;
-        const registry = assetRegistry();
-        const asset = registry.get(key);
-        if (asset?.url) URL.revokeObjectURL(asset.url);
-        registry.delete(key);
-      };
-
-      const releaseMedia = (nextAssetKey = null) => {
+      const releaseMedia = () => {
         const media = document.getElementById(ids.media);
         if (media) {
-          if (media.tagName === "VIDEO") {
-            try { media.pause(); } catch {}
-            media.removeAttribute("src");
-            try { media.load(); } catch {}
-          } else if (media.tagName === "IFRAME") {
+          const innerMedia = media.tagName === "IFRAME"
+            ? media.contentDocument?.getElementById("cwb-media")
+            : media;
+          try { innerMedia?.pause?.(); } catch {}
+          try { innerMedia?.removeAttribute?.("src"); } catch {}
+          try { innerMedia?.load?.(); } catch {}
+          if (media.tagName === "IFRAME") {
+            media.srcdoc = "";
             media.src = "about:blank";
           }
           media.remove();
         }
-        if (activeAssetKey && activeAssetKey !== nextAssetKey) releaseAsset(activeAssetKey);
-        activeAssetKey = nextAssetKey || null;
+        if (mediaMessageHandler) removeEventListener("message", mediaMessageHandler);
+        mediaMessageHandler = null;
+        currentMediaIdentity = null;
+        updateMediaState("idle");
       };
 
       const mountMedia = (wallpaper) => {
         const root = ensureRoot();
         if (!root) return;
-        const assetKey = typeof wallpaper?.mediaAssetKey === "string"
-          ? wallpaper.mediaAssetKey
-          : null;
-        releaseMedia(assetKey);
+        const identity = wallpaper ? JSON.stringify([
+          wallpaper.id || null,
+          wallpaper.type || null,
+          wallpaper.playable || null,
+          wallpaper.mediaUrl || null,
+          wallpaper.previewUrl || null,
+          wallpaper.webUrl || null
+        ]) : null;
+        const existing = document.getElementById(ids.media);
+        if (
+          identity && identity === currentMediaIdentity &&
+          existing?.tagName === "IFRAME" && existing.dataset.cwbMediaIdentity === identity
+        ) return;
+        releaseMedia();
         if (!wallpaper) return;
 
-        let media;
-        const transferredUrl = assetKey ? assetRegistry().get(assetKey)?.url : null;
-        const videoUrl = transferredUrl || wallpaper.mediaUrl || wallpaper.url || "";
-        if ((wallpaper.playable === "video" || wallpaper.type === "video") && videoUrl) {
-          media = document.createElement("video");
-          media.muted = true;
-          media.loop = true;
-          media.autoplay = current?.effects?.playing !== false;
-          media.playsInline = true;
-          media.preload = "auto";
-          media.src = videoUrl;
-          if (current?.effects?.playing !== false) {
-            media.addEventListener("canplay", () => media.play().catch(() => {}), { once: true });
-          }
-        } else if (wallpaper.playable === "web" || wallpaper.type === "web") {
-          media = document.createElement("iframe");
-          media.sandbox = "allow-scripts";
-          media.referrerPolicy = "no-referrer";
-          media.src = wallpaper.webUrl || wallpaper.mediaUrl || "about:blank";
-        } else {
-          media = document.createElement("img");
-          media.alt = "";
-          media.decoding = "async";
-          media.src = wallpaper.previewUrl || wallpaper.mediaUrl || wallpaper.url || "";
-        }
+        const kind = (wallpaper.playable === "video" || wallpaper.type === "video")
+          ? "video"
+          : ((wallpaper.playable === "web" || wallpaper.type === "web") ? "web" : "image");
+        const source = kind === "web"
+          ? (wallpaper.webUrl || wallpaper.mediaUrl || "")
+          : (wallpaper.mediaUrl || wallpaper.previewUrl || wallpaper.url || "");
+        const framePayload = JSON.stringify({
+          kind,
+          source,
+          poster: wallpaper.previewUrl || "",
+          playing: current?.effects?.playing !== false,
+          fit: current?.effects?.fit || "cover",
+          position: current?.effects?.position || "50% 50%"
+        }).replace(/</g, "\\u003c");
+        const media = document.createElement("iframe");
         media.id = ids.media;
+        media.dataset.cwbMediaIdentity = identity;
+        media.title = "Codex wallpaper media";
+        media.referrerPolicy = "no-referrer";
+        media.srcdoc = `<!doctype html><meta charset="utf-8"><style>
+          html,body,#mount,#cwb-media{margin:0;width:100%;height:100%;overflow:hidden;background:#0d1119}
+          #cwb-media{display:block;border:0;object-fit:cover}
+        </style><div id="mount"></div><script>(()=>{
+          const config=${framePayload};
+          const report=(event, detail=null)=>parent.postMessage({channel:"cwb-media-frame",event,detail},"*");
+          let media;
+          if(config.kind==="video"){
+            media=document.createElement("video");
+            media.muted=true;media.loop=true;media.autoplay=config.playing;media.playsInline=true;media.preload="auto";
+            if(config.poster)media.poster=config.poster;
+            for(const event of ["loadstart","loadeddata","canplay","playing","pause"]){
+              media.addEventListener(event,()=>report(event),{passive:true});
+            }
+            media.addEventListener("error",()=>report("error",media.error?.message||"media error"),{passive:true});
+          }else if(config.kind==="web"){
+            media=document.createElement("iframe");
+            media.sandbox="allow-scripts";media.referrerPolicy="no-referrer";
+            media.addEventListener("load",()=>report("loaded"),{once:true});
+          }else{
+            media=document.createElement("img");media.alt="";media.decoding="async";
+            media.addEventListener("load",()=>report("loaded"),{once:true});
+            media.addEventListener("error",()=>report("error","image error"),{once:true});
+          }
+          media.id="cwb-media";media.style.objectFit=config.fit;media.style.objectPosition=config.position;
+          media.src=config.source;document.getElementById("mount").append(media);
+          addEventListener("message",event=>{
+            if(event.source!==parent||event.data?.channel!=="cwb-media-control")return;
+            if(event.data.fit)media.style.objectFit=event.data.fit;
+            if(event.data.position)media.style.objectPosition=event.data.position;
+            if(event.data.action==="play")media.play?.().catch(()=>{});
+            if(event.data.action==="pause")media.pause?.();
+          });
+          if(config.kind==="video"&&config.playing)media.play().catch(error=>report("play-rejected",error.message));
+        })()<\/script>`;
+        mediaMessageHandler = (event) => {
+          if (event.source !== media.contentWindow || event.data?.channel !== "cwb-media-frame") return;
+          updateMediaState(event.data.event || "unknown", event.data.detail || null);
+        };
+        addEventListener("message", mediaMessageHandler);
+        updateMediaState("loading");
         root.insertBefore(media, document.getElementById(ids.scrim));
+        currentMediaIdentity = identity;
+      };
+
+      const syncPlayback = () => {
+        const media = document.getElementById(ids.media);
+        if (!media || media.tagName !== "IFRAME") return;
+        const action = current?.effects?.playing === false ||
+          (document.hidden && current?.effects?.pauseWhenHidden)
+          ? "pause"
+          : "play";
+        media.contentWindow?.postMessage({
+          channel: "cwb-media-control",
+          action,
+          fit: current?.effects?.fit,
+          position: current?.effects?.position
+        }, "*");
       };
 
       const applyVariables = (effects) => {
@@ -447,12 +498,7 @@ function rendererBootstrap(incoming) {
 
       const updateVisibilityHandler = () => {
         if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
-        visibilityHandler = () => {
-          const video = document.getElementById(ids.media);
-          if (!video || video.tagName !== "VIDEO") return;
-          if (document.hidden && current?.effects?.pauseWhenHidden) video.pause();
-          else if (current?.effects?.playing) video.play().catch(() => {});
-        };
+        visibilityHandler = () => syncPlayback();
         document.addEventListener("visibilitychange", visibilityHandler);
       };
 
@@ -532,12 +578,20 @@ function rendererBootstrap(incoming) {
           ensureRoot();
           mountMedia(current.wallpaper);
           applyVariables(current.effects);
+          syncPlayback();
           applyShellOverrides();
           updateVisibilityHandler();
           startObserver();
+          return {
+            ok: true,
+            wallpaperId: payload?.wallpaper?.id || null,
+            domReady: Boolean(document.getElementById(ids.root) && document.getElementById(ids.media)),
+            mediaState: mediaState.state
+          };
         };
-        if (document.body) run(); else addEventListener("DOMContentLoaded", run, { once: true });
-        return { ok: true, wallpaperId: payload?.wallpaper?.id || null };
+        if (document.body) return run();
+        addEventListener("DOMContentLoaded", run, { once: true });
+        return { ok: true, pendingDom: true, wallpaperId: payload?.wallpaper?.id || null };
       };
 
       const restore = () => {
@@ -547,13 +601,6 @@ function rendererBootstrap(incoming) {
         visibilityHandler = null;
         restoreShellOverrides();
         releaseMedia();
-        const registry = assetRegistry();
-        for (const asset of registry.values()) {
-          if (asset?.url) URL.revokeObjectURL(asset.url);
-        }
-        registry.clear();
-        try { delete globalThis[ASSETS_KEY]; } catch {}
-        try { delete globalThis[TRANSFER_KEY]; } catch {}
         document.getElementById(ids.root)?.remove();
         document.getElementById(ids.style)?.remove();
         document.documentElement.removeAttribute("data-codex-wallpaper-bridge");
@@ -569,7 +616,14 @@ function rendererBootstrap(incoming) {
         return { ok: true };
       };
 
-      return { apply, restore, ensureMounted, version: VERSION };
+      return {
+        apply,
+        restore,
+        ensureMounted,
+        status: () => ({ ...mediaState }),
+        ready: true,
+        version: VERSION
+      };
     };
 
     let runtime = globalThis[KEY];
@@ -578,7 +632,7 @@ function rendererBootstrap(incoming) {
       runtime = createRuntime();
       globalThis[KEY] = runtime;
     }
-    return runtime.apply(incoming);
+    return { ok: true, ready: runtime.ready === true, version: runtime.version };
 }
 
 /**
@@ -586,23 +640,38 @@ function rendererBootstrap(incoming) {
  * The script is deliberately self-contained: it must run inside Codex without
  * imports, Node globals, or access to this package's filesystem.
  */
+export function buildBootstrapScript() {
+  return `(${rendererBootstrap.toString()})()`;
+}
+
+export function buildApplyScript(payload = {}) {
+  return `(() => {
+    const runtime = globalThis[${JSON.stringify(GLOBAL_KEY)}];
+    if (!runtime?.ready || typeof runtime.apply !== "function") {
+      throw new Error("Codex wallpaper runtime is not ready");
+    }
+    const result = runtime.apply(${safePayload(payload)});
+    return {
+      ...result,
+      runtimeReady: true,
+      runtimeVersion: runtime.version,
+      domReady: Boolean(
+        document.getElementById("codex-wallpaper-bridge-root") &&
+        document.getElementById("codex-wallpaper-bridge-media")
+      ),
+      media: runtime.status?.() || null
+    };
+  })()`;
+}
+
 export function buildInjectionScript(payload = {}) {
-  return `(${rendererBootstrap.toString()})(${safePayload(payload)})`;
+  return `${buildBootstrapScript()};\n${buildApplyScript(payload)}`;
 }
 
 export function buildRestoreScript() {
   return `(() => {
     const runtime = globalThis[${JSON.stringify(GLOBAL_KEY)}];
     const result = runtime?.restore?.() || { ok: true, alreadyRestored: true };
-    const registry = globalThis[${JSON.stringify(TRANSFERRED_ASSETS_KEY)}];
-    if (registry instanceof Map) {
-      for (const asset of registry.values()) {
-        if (asset?.url) URL.revokeObjectURL(asset.url);
-      }
-      registry.clear();
-    }
-    try { delete globalThis[${JSON.stringify(TRANSFERRED_ASSETS_KEY)}]; } catch {}
-    try { delete globalThis[${JSON.stringify(ASSET_TRANSFER_KEY)}]; } catch {}
     try { delete globalThis[${JSON.stringify(GLOBAL_KEY)}]; } catch {}
     return result;
   })()`;

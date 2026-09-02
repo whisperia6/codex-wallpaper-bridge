@@ -19,7 +19,7 @@
         <div>
           <p class="eyebrow"><span></span> ELECTRON DESKTOP 0.5</p>
           <h1>壁纸设置、注入与托盘，一个窗口完成</h1>
-          <p class="hero__description">右侧直接选择动态壁纸；左侧会等设置保存完成后再注入，关闭或最小化窗口后驻留 Windows 托盘。</p>
+          <p class="hero__description">右侧直接选择动态壁纸；左侧会等设置保存完成后再快速注入，媒体通过本机流式读取，关闭或最小化窗口后驻留 Windows 托盘。</p>
         </div>
         <div class="status-pill" id="statusPill" data-tone="idle">
           <i aria-hidden="true"></i>
@@ -86,7 +86,7 @@
               </div>
               <span class="mode-tag">ONE SHOT</span>
             </div>
-            <p class="action-copy">重新注入也会先等待右侧设置保存，不再读取上一版参数。</p>
+            <p class="action-copy">重新注入只发送 Runtime 与配置，不传完整视频；动态壁纸播放期间请保持托盘运行。</p>
             <div class="action-grid">
               <button class="button button--secondary" id="injectButton" type="button">立即重新注入</button>
               <button class="button button--secondary" id="restoreButton" type="button">恢复官方外观</button>

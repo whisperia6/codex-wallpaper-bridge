@@ -3,7 +3,7 @@
   "source": "bundled standalone bridge runtime with Electron-only overrides",
   "bridgeVersion": "0.1.0",
   "overrides": [
-    "large-video-cdp-blob-transfer",
+    "one-second-range-streaming",
     "embedded-control-save-handshake"
   ]
 }

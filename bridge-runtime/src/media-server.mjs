@@ -720,8 +720,11 @@ export class MediaServer {
         config: normalizeConfig(await this.#configStore.get()),
       });
       json(response, 200, publicActionResult(result));
-    } catch {
-      json(response, 500, { ok: false, error: 'Action failed' });
+    } catch (error) {
+      const message = typeof error?.message === 'string' && error.message
+        ? error.message.slice(0, 500)
+        : 'Action failed';
+      json(response, 500, { ok: false, error: message });
     }
   }
 

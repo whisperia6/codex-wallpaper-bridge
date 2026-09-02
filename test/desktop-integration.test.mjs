@@ -36,9 +36,9 @@ test("desktop renderer embeds the control page and flushes it before both inject
   assert.match(renderer, /await prepareInjection\(\);\s+return api\.launchCodex/s);
   assert.match(renderer, /await prepareInjection\(\);\s+return api\.injectOnce/s);
   assert.match(renderer, /consumeTransferProgress/);
-  assert.match(renderer, /start\|progress\|fallback\|complete/);
-  assert.match(renderer, /视频注入/);
-  assert.match(renderer, /兼容模式/);
+  assert.match(renderer, /injection-ready/);
+  assert.match(renderer, /快速注入完成/);
+  assert.match(renderer, /媒体流请求失败/);
 });
 
 test("main process owns one BrowserWindow and redirects tray actions to the shared renderer flow", async () => {
@@ -48,6 +48,8 @@ test("main process owns one BrowserWindow and redirects tray actions to the shar
   assert.match(main, /window\.on\("minimize", hideToTray\)/);
   assert.match(main, /window\.on\("close", hideToTray\)/);
   assert.match(main, /sendTrayAction\("launch"\)/);
+  assert.match(main, /invokeBridgeAction/);
+  assert.match(main, /action: "inject"/);
   assert.match(main, /requestSingleInstanceLock/);
   assert.doesNotMatch(main, /previewWindow/);
 });

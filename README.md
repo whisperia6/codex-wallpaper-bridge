@@ -1,6 +1,8 @@
 # Codex Wallpaper Desktop
 
-Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper Engine 项目作为 Codex 的窗口背景，并在一个界面里完成壁纸选择、实时预览、显示效果调整、Codex 调试启动、一次性注入和官方外观恢复。
+> 当前分支是 `0.6.0-alpha.1` 的 **1 秒级流式注入实验版**。稳定版仍为 v0.5.1；架构取舍和限制见 [实验说明](docs/one-second-injection-experiment.md)。
+
+Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper Engine 项目作为 Codex 的窗口背景，并在一个界面里完成壁纸选择、实时预览、显示效果调整、Codex 调试启动、快速流式注入和官方外观恢复。
 
 它同时适配 Microsoft Store 版 Codex 和用户选择的本地 `ChatGPT.exe`，不会替换或修改 Codex 安装目录中的文件。项目可以独立克隆、运行和打包；仓库已经包含所需的 `bridge-runtime/`，不依赖仓库外的父目录。
 
@@ -9,20 +11,20 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 - 扫描本机 Wallpaper Engine 项目，支持图片、视频、网页和场景壁纸的选择与预览。
 - 自动发现 Store 版 Codex，也可手动选择其他目录中的本地 EXE。
 - 以独立 profile 和仅监听 `127.0.0.1` 的 CDP 端口启动 Codex，不改官方配置文件。
-- 把壁纸、亮度、暗化遮罩、模糊、饱和度和适配方式一次性注入当前 Codex renderer。
+- 把轻量 Runtime 和壁纸配置注入当前 Codex renderer，不再通过 CDP 传输完整媒体文件。
 - 自动清理 Store/本地不同构建中的不透明背景和大型模糊壳层，让壁纸保持清晰可见。
-- 大视频使用 8 MiB 分块和最多 3 路流水传输；高速路径失败时自动切换兼容模式并显示进度。
-- 关闭或最小化控制窗口后驻留 Windows 托盘；也可完全退出，当前 Codex 窗口中的已注入效果仍会保留。
+- 大视频通过随机 token 保护的本机 HTTP Range 服务按需读取，文件大小不再进入注入 payload。
+- 关闭或最小化控制窗口后驻留 Windows 托盘，维持媒体流、页面重载恢复和新 renderer 自动接入。
 - 随时执行“恢复官方外观”，清理壁纸节点、透明兼容样式和运行时状态。
 
-简单来说，它不是修改 Codex 安装包的“永久补丁”，而是一个可恢复的桌面注入控制器。Codex 重启、硬刷新或 renderer 重建后需要重新注入。
+简单来说，它不是修改 Codex 安装包的“永久补丁”，而是一个可恢复的桌面注入控制器。只要实验版仍驻留托盘，Codex 硬刷新或 renderer 重建后会自动恢复；完全退出实验版后，本机媒体流会停止。
 
 ## 工作方式
 
 1. 在右侧壁纸面板选择本地 Wallpaper Engine 壁纸并调整显示参数。
 2. 在左侧选择 Store 或本地 Codex；如果目标正在普通模式运行，软件会先询问是否关闭。
-3. 软件等待壁纸设置保存完成，再以隔离调试 profile 启动 Codex 并执行一次性注入。
-4. 注入结束后无需保持注入进程运行；需要修改、恢复或重新注入时再打开本软件。
+3. 软件等待壁纸设置保存完成，再以隔离调试 profile 启动 Codex，注入轻量 Runtime 和配置。
+4. Runtime 在 Codex 背景层创建一个轻量 `srcdoc` 媒体子页面；图片、视频和网页资源由该子页面从常驻托盘进程的 loopback 服务按需读取。
 
 ## 运行效果
 
@@ -32,11 +34,11 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 
 ![Codex Wallpaper Desktop 一体化控制台](docs/images/desktop-overview.png)
 
-### Codex 启动与一次性注入
+### Codex 启动与快速流式注入
 
 选择 Store/本地 EXE、设置 CDP 端口和透明兼容模式，然后保存设置并自动启动注入。
 
-![Codex 启动与一次性注入流程](docs/images/launcher-workflow.png)
+![Codex 启动与快速注入流程](docs/images/launcher-workflow.png)
 
 ### 壁纸库、实时预览与显示设置
 
@@ -46,7 +48,7 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases/latest) 下载 `CodexWallpaperDesktop.exe`，无需安装，双击即可运行。
+GitHub Release 目前仍是稳定版 v0.5.1，不包含本实验架构。实验版请在当前分支执行 `npm ci`、`npm start`；验证完成后再单独生成 alpha EXE。
 
 ## 首次安装依赖
 
@@ -70,23 +72,23 @@ npm start
 2. 直接在同一窗口右侧选择壁纸并调参数，不再打开第二个窗口。
 3. 点“保存后启动调试并注入”。左侧会等待右侧最近一次选择和效果参数写入完成，避免拿到旧配置或静态预览。
 4. 如果选定 Codex 正在普通模式运行，桌面版会先询问是否关闭；请保存尚未发送的输入，再选“关闭并继续”。取消弹窗不会关闭任何进程。
-5. 桌面版按所选可执行文件的完整路径关闭对应 Codex、以调试模式重新启动，并在 CDP 就绪后自动完成一次性注入。
+5. 桌面版按所选可执行文件的完整路径关闭对应 Codex、以调试模式重新启动，并在 CDP 就绪后自动完成快速流式注入。
 6. 最小化或关闭主窗口后应用驻留 Windows 右下角托盘；双击托盘图标可恢复窗口，右键可打开设置、注入、恢复或彻底退出。
-7. Codex 重启、renderer 重建或硬刷新后需要重新注入；点“恢复官方外观”可完整清理。
+7. 托盘仍运行时，Codex renderer 重建或硬刷新会自动恢复；点“恢复官方外观”可完整清理。
 
-## 托盘与一次性注入的关系
+## 托盘与流式注入的关系
 
-- 托盘驻留的是 Electron 控制器和右侧本地设置页，用于随时调整或再次注入。
-- 壁纸注入本身仍是一次性的：注入命令结束后，当前 Codex renderer 不依赖桥接注入进程。
-- 从托盘选择“退出”后，当前 Codex 窗口的皮肤仍会保留；下次想修改时再启动本软件即可。
-- 只有 Codex 重启、硬刷新或 renderer 重建才需要重新注入。
+- 托盘驻留 Electron 控制器、本机媒体服务和 CDP session，用于 Range 流式播放、设置同步与自动恢复。
+- “注入完成”只表示 Runtime 和背景 DOM 已就绪；视频首帧仍受磁盘、编码和关键帧位置影响。
+- 最小化或关闭主窗口不会中断播放；从托盘彻底退出会停止本机媒体服务，动态壁纸将无法继续请求新数据。
+- 不使用实验版时，建议先点“恢复官方外观”再退出。
 
 ## 两种版本如何适配
 
 - 安装层：Store 版通过 `Get-AppxPackage -Name OpenAI.Codex` 发现，本地版支持运行进程发现和手动选择 EXE。
 - 启动层：两者都以 `127.0.0.1` CDP 端口和各自独立 profile 启动，不修改安装目录。
 - 展示层：先运行现有壁纸桥，再按 renderer 的语义 `data-*`、旧/新哈希类名和受限几何特征安装兼容透明层，因此不依赖“Store / EXE”标签硬编码样式。Store 新壳层即使背景本身透明、只通过 `backdrop-filter` 模糊壁纸，也会被自适应层识别并清除滤镜。
-- 大视频层：32 MiB 以上、512 MiB 以内的视频默认采用 8 MiB、最多 3 路 CDP 流水传输；高速路径失败会自动清理并退回 2 MiB 串行模式，顶部状态会显示 MiB 与百分比进度。Codex renderer 组装出 `blob:` URL 后无需保持桥接进程运行。
+- 大视频层：CDP 仅发送小于 100 KiB 的 Runtime 和小于 10 KiB 的配置；受控 `srcdoc` 子页面直接读取随机 token 保护的 `127.0.0.1` Range 服务，不设置 512 MiB 上限。
 - 同步层：内嵌控制页会跟踪配置写入；启动和重新注入前必须收到“设置已同步”，保存失败会阻止注入。
 - 桌面层：控制页与启动器合并为一个窗口；关闭或最小化后驻留系统托盘。
 - 诊断层：另一台 Store 电脑可点“导出 JSON”。报告不采集对话正文，只记录版本、选择器命中、大型表面背景/滤镜摘要，以及壁纸媒体的标签、来源类型、分辨率、播放状态和实际滤镜。
@@ -111,4 +113,4 @@ npm run make
 npm test
 ```
 
-测试覆盖安装归一化、端口校验、运行中取消/确认关闭、保存握手、同窗控制页、托盘菜单与生命周期、大视频 Blob 传输、自动注入顺序、兼容层安装/恢复和现有 CLI 契约。
+测试覆盖安装归一化、端口校验、运行中取消/确认关闭、保存握手、同窗控制页、托盘生命周期、Runtime/apply 拆分、子页面媒体桥与 URL 边界、HTTP Range 206/416、媒体大小无关 payload、自动注入顺序和兼容层恢复。性能基准可执行 `npm run benchmark:injection`。
