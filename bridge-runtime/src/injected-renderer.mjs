@@ -6,7 +6,7 @@ function safePayload(payload) {
 
 function rendererBootstrap() {
     const KEY = "__codexWallpaperBridgeRuntime";
-    const VERSION = "0.3.0-stream";
+    const VERSION = "0.4.0-theme";
 
     const createRuntime = () => {
       const ids = {
@@ -22,6 +22,293 @@ function rendererBootstrap() {
       let mediaState = { state: "idle", at: performance.now() };
       let mediaMessageHandler = null;
       const shellInlineState = new Map();
+      const themeStorageKey = "__codexWallpaperBridgeOriginalThemeV1";
+      const allowedThemes = new Set(["system", "light", "dark"]);
+      let themeActivationPromise = null;
+      let themeState = "idle";
+      let fallbackThemeClasses = null;
+
+      const createChunkAssembler = () => {
+        const unset = Symbol("unset");
+        let root = unset;
+        let stringChunks = null;
+        let stringTarget = null;
+        const stack = [];
+
+        const setKey = (key) => {
+          const target = stack.at(-1);
+          if (target?.type !== "object" || target.key !== null) {
+            throw new Error("Invalid chunked message key");
+          }
+          target.key = key;
+        };
+        const saveValue = (value) => {
+          const target = stack.at(-1);
+          if (!target) {
+            if (root !== unset) throw new Error("Chunked message has multiple roots");
+            root = value;
+            return;
+          }
+          if (target.type === "array") {
+            target.value.push(value);
+            return;
+          }
+          if (target.key === null) throw new Error("Chunked message object value has no key");
+          Object.defineProperty(target.value, target.key, {
+            configurable: true,
+            enumerable: true,
+            value,
+            writable: true
+          });
+          target.key = null;
+        };
+
+        return {
+          consume(tokens) {
+            for (const token of tokens) {
+              switch (token?.type) {
+                case "array-start": {
+                  const value = [];
+                  saveValue(value);
+                  stack.push({ type: "array", value });
+                  break;
+                }
+                case "object-start": {
+                  const value = {};
+                  saveValue(value);
+                  stack.push({ type: "object", value, key: null });
+                  break;
+                }
+                case "container-end":
+                  if (!stack.pop()) throw new Error("Unmatched chunked message container end");
+                  break;
+                case "key":
+                  setKey(token.value);
+                  break;
+                case "value":
+                  saveValue(token.value);
+                  break;
+                case "string-start":
+                  if (stringChunks !== null) throw new Error("Nested chunked message string");
+                  stringChunks = [];
+                  stringTarget = token.target;
+                  break;
+                case "string-chunk":
+                  if (stringChunks === null) throw new Error("Chunked string has no start");
+                  stringChunks.push(token.value);
+                  break;
+                case "string-end": {
+                  if (stringChunks === null || stringTarget === null) {
+                    throw new Error("Chunked string has no start");
+                  }
+                  const value = stringChunks.join("");
+                  const target = stringTarget;
+                  stringChunks = null;
+                  stringTarget = null;
+                  if (target === "key") setKey(value);
+                  else saveValue(value);
+                  break;
+                }
+              }
+            }
+          },
+          finish() {
+            if (root === unset || stack.length || stringChunks !== null) {
+              throw new Error("Incomplete chunked message");
+            }
+            return root;
+          }
+        };
+      };
+
+      const receiveChunk = (transfers, message) => {
+        if (message?.marker !== "codex-host-chunked-message-v1") return message;
+        const bridge = globalThis.electronBridge;
+        try { bridge?.acknowledgeChunkedMessage?.(message.transferId, message.sequence); } catch {}
+        if (message.kind === "start") {
+          transfers.clear();
+          transfers.set(message.transferId, {
+            assembler: createChunkAssembler(),
+            nextSequence: message.sequence + 1
+          });
+          return null;
+        }
+        const transfer = transfers.get(message.transferId);
+        if (!transfer || message.sequence !== transfer.nextSequence) {
+          transfers.delete(message.transferId);
+          return null;
+        }
+        transfer.nextSequence += 1;
+        if (message.kind === "chunk") {
+          transfer.assembler.consume(message.tokens || []);
+          return null;
+        }
+        transfers.delete(message.transferId);
+        return transfer.assembler.finish();
+      };
+
+      const requestHostSetting = (operation, params, timeoutMs = 4_000) => {
+        const bridge = globalThis.electronBridge;
+        if (typeof bridge?.sendMessageFromView !== "function") {
+          return Promise.reject(new Error("Codex host bridge is unavailable"));
+        }
+        const requestId = globalThis.crypto?.randomUUID?.() ||
+          `cwb-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const transfers = new Map();
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            removeEventListener("message", onMessage);
+            callback(value);
+          };
+          const onMessage = (event) => {
+            let message;
+            try { message = receiveChunk(transfers, event.data); }
+            catch (error) { finish(reject, error); return; }
+            if (!message || message.type !== "fetch-response" || message.requestId !== requestId) return;
+            if (message.responseType === "error") {
+              finish(reject, new Error(message.error || `Codex setting request failed (${message.status})`));
+              return;
+            }
+            try {
+              const body = Object.hasOwn(message, "body")
+                ? message.body
+                : JSON.parse(message.bodyJsonString || "null");
+              finish(resolve, body);
+            } catch (error) {
+              finish(reject, error);
+            }
+          };
+          const timer = setTimeout(
+            () => finish(reject, new Error(`Codex ${operation} request timed out`)),
+            timeoutMs
+          );
+          addEventListener("message", onMessage);
+          Promise.resolve(bridge.sendMessageFromView({
+            type: "fetch",
+            requestId,
+            method: "POST",
+            url: `vscode://codex/${operation}`,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(params)
+          })).catch((error) => finish(reject, error));
+        });
+      };
+
+      const effectiveTheme = () => document.documentElement.classList.contains("electron-dark")
+        ? "dark"
+        : "light";
+
+      const readSavedTheme = () => {
+        try {
+          const saved = JSON.parse(localStorage.getItem(themeStorageKey) || "null");
+          return saved && allowedThemes.has(saved.originalTheme) ? saved : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const saveOriginalTheme = (record) => {
+        try { localStorage.setItem(themeStorageKey, JSON.stringify(record)); } catch {}
+      };
+
+      const removeSavedTheme = () => {
+        try { localStorage.removeItem(themeStorageKey); } catch {}
+      };
+
+      const applyFallbackTheme = (theme) => {
+        const html = document.documentElement;
+        if (!fallbackThemeClasses) {
+          fallbackThemeClasses = {
+            dark: html.classList.contains("electron-dark"),
+            light: html.classList.contains("electron-light")
+          };
+        }
+        html.classList.toggle("electron-dark", theme === "dark");
+        html.classList.toggle("electron-light", theme !== "dark");
+      };
+
+      const restoreFallbackTheme = () => {
+        if (!fallbackThemeClasses) return;
+        const html = document.documentElement;
+        html.classList.toggle("electron-dark", fallbackThemeClasses.dark);
+        html.classList.toggle("electron-light", fallbackThemeClasses.light);
+        fallbackThemeClasses = null;
+      };
+
+      const waitForThemePaint = () => new Promise((resolve) => setTimeout(resolve, 80));
+
+      const ensureDarkTheme = () => {
+        if (themeActivationPromise) return themeActivationPromise;
+        themeActivationPromise = (async () => {
+          themeState = "reading";
+          let saved = readSavedTheme();
+          if (!saved) {
+            let originalTheme;
+            try {
+              const result = await requestHostSetting("get-setting", { key: "appearanceTheme" });
+              originalTheme = allowedThemes.has(result?.value) ? result.value : effectiveTheme();
+            } catch {
+              originalTheme = effectiveTheme();
+            }
+            saved = { originalTheme, effectiveTheme: effectiveTheme() };
+            saveOriginalTheme(saved);
+          }
+          try {
+            themeState = "switching";
+            await requestHostSetting("set-setting", { key: "appearanceTheme", value: "dark" });
+            restoreFallbackTheme();
+            await waitForThemePaint();
+            if (effectiveTheme() === "dark") themeState = "dark";
+            else themeState = "dark-reload-required";
+          } catch {
+            applyFallbackTheme("dark");
+            themeState = "dark-fallback";
+          }
+          return {
+            state: themeState,
+            originalTheme: saved.originalTheme,
+            reloadRequired: themeState === "dark-reload-required"
+          };
+        })();
+        return themeActivationPromise;
+      };
+
+      const restoreOriginalTheme = async () => {
+        try { await themeActivationPromise; } catch {}
+        const saved = readSavedTheme();
+        if (!saved) {
+          restoreFallbackTheme();
+          themeState = "restored";
+          return { state: themeState, originalTheme: null, reloadRequired: false };
+        }
+        try {
+          themeState = "restoring";
+          await requestHostSetting("set-setting", {
+            key: "appearanceTheme",
+            value: saved.originalTheme
+          });
+          restoreFallbackTheme();
+          removeSavedTheme();
+          await waitForThemePaint();
+          const expectedTheme = saved.originalTheme === "system"
+            ? (globalThis.electronBridge?.getSystemThemeVariant?.() || saved.effectiveTheme || "light")
+            : saved.originalTheme;
+          if (effectiveTheme() === expectedTheme) themeState = "restored";
+          else themeState = "restore-reload-required";
+        } catch {
+          applyFallbackTheme(saved.effectiveTheme === "dark" ? "dark" : "light");
+          themeState = "restore-fallback";
+        }
+        return {
+          state: themeState,
+          originalTheme: saved.originalTheme,
+          reloadRequired: themeState === "restore-reload-required"
+        };
+      };
 
       const shellSelectors = {
         sidebar: 'aside:is(.app-shell-left-panel, [data-app-shell-left-panel-appearance], [data-ds-part="sidebar"])',
@@ -572,7 +859,8 @@ function rendererBootstrap() {
           wallpaper: payload?.wallpaper || null,
           effects: normalizeEffects(payload?.config?.effects || payload?.effects || {})
         };
-        const run = () => {
+        const themePromise = ensureDarkTheme();
+        const run = async () => {
           document.documentElement.dataset.codexWallpaperBridge = "active";
           ensureStyle();
           ensureRoot();
@@ -582,19 +870,24 @@ function rendererBootstrap() {
           applyShellOverrides();
           updateVisibilityHandler();
           startObserver();
+          const theme = await themePromise;
           return {
             ok: true,
             wallpaperId: payload?.wallpaper?.id || null,
             domReady: Boolean(document.getElementById(ids.root) && document.getElementById(ids.media)),
-            mediaState: mediaState.state
+            mediaState: mediaState.state,
+            theme
           };
         };
         if (document.body) return run();
-        addEventListener("DOMContentLoaded", run, { once: true });
+        addEventListener("DOMContentLoaded", () => { void run(); }, { once: true });
         return { ok: true, pendingDom: true, wallpaperId: payload?.wallpaper?.id || null };
       };
 
-      const restore = () => {
+      const restore = async (options = {}) => {
+        const theme = options.preserveTheme
+          ? { state: themeState, preserved: true, reloadRequired: false }
+          : await restoreOriginalTheme();
         observer?.disconnect();
         observer = null;
         if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
@@ -613,14 +906,15 @@ function rendererBootstrap() {
         document.documentElement.style.removeProperty("--cwb-shell-sheen-top");
         document.documentElement.style.removeProperty("--cwb-shell-sheen-bottom");
         current = null;
-        return { ok: true };
+        themeActivationPromise = null;
+        return { ok: true, theme };
       };
 
       return {
         apply,
         restore,
         ensureMounted,
-        status: () => ({ ...mediaState }),
+        status: () => ({ ...mediaState, theme: themeState }),
         ready: true,
         version: VERSION
       };
@@ -628,7 +922,7 @@ function rendererBootstrap() {
 
     let runtime = globalThis[KEY];
     if (!runtime || runtime.version !== VERSION) {
-      try { runtime?.restore?.(); } catch {}
+      try { Promise.resolve(runtime?.restore?.({ preserveTheme: true })).catch(() => {}); } catch {}
       runtime = createRuntime();
       globalThis[KEY] = runtime;
     }
@@ -645,12 +939,12 @@ export function buildBootstrapScript() {
 }
 
 export function buildApplyScript(payload = {}) {
-  return `(() => {
+  return `(async () => {
     const runtime = globalThis[${JSON.stringify(GLOBAL_KEY)}];
     if (!runtime?.ready || typeof runtime.apply !== "function") {
       throw new Error("Codex wallpaper runtime is not ready");
     }
-    const result = runtime.apply(${safePayload(payload)});
+    const result = await runtime.apply(${safePayload(payload)});
     return {
       ...result,
       runtimeReady: true,
@@ -669,9 +963,9 @@ export function buildInjectionScript(payload = {}) {
 }
 
 export function buildRestoreScript() {
-  return `(() => {
+  return `(async () => {
     const runtime = globalThis[${JSON.stringify(GLOBAL_KEY)}];
-    const result = runtime?.restore?.() || { ok: true, alreadyRestored: true };
+    const result = await (runtime?.restore?.() || { ok: true, alreadyRestored: true });
     try { delete globalThis[${JSON.stringify(GLOBAL_KEY)}]; } catch {}
     return result;
   })()`;

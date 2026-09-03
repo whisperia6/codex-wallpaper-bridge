@@ -62,6 +62,42 @@ test("normalizeInstallations accepts and de-duplicates manually selected executa
   assert.equal(installations[0].isRunning, false);
 });
 
+test("normalizeInstallations includes a registered local build without manual selection", () => {
+  const installations = normalizeInstallations({
+    localInstallations: [{
+      ExecutablePath: "D:\\codex\\ChatGPT.exe",
+      ProductVersion: "151.0.7922.170",
+    }],
+  });
+
+  assert.equal(installations.length, 1);
+  assert.equal(installations[0].kind, "local");
+  assert.equal(installations[0].label, "本地 EXE 版（自动发现）");
+  assert.equal(installations[0].path, "D:\\codex\\ChatGPT.exe");
+  assert.equal(installations[0].version, "151.0.7922.170");
+  assert.equal(installations[0].isRunning, false);
+});
+
+test("a running process is merged into an automatically discovered local build", () => {
+  const installations = normalizeInstallations({
+    localInstallations: [{
+      ExecutablePath: "D:\\codex\\ChatGPT.exe",
+      ProductVersion: "151.0.7922.170",
+    }],
+    runningProcesses: [{
+      ExecutablePath: "d:\\CODEX\\chatgpt.exe",
+      ProductVersion: "151.0.7922.170",
+      ProcessId: 4242,
+    }],
+    manualExecutables: ["D:\\Codex\\ChatGPT.exe"],
+  });
+
+  assert.equal(installations.length, 1);
+  assert.equal(installations[0].label, "本地 EXE 版（自动发现）");
+  assert.equal(installations[0].isRunning, true);
+  assert.deepEqual(installations[0].processIds, [4242]);
+});
+
 test("validateCdpPort accepts the supported range and rejects unsafe values", () => {
   assert.equal(validateCdpPort(9335), 9335);
   assert.equal(validateCdpPort("9446"), 9446);

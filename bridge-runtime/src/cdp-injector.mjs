@@ -7,6 +7,22 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForPageLoad(socket, timeoutMs = 8_000) {
+  if (typeof socket?.onEvent !== "function") return delay(250);
+  return new Promise((resolve) => {
+    let remove = () => {};
+    const timer = setTimeout(() => {
+      remove();
+      resolve();
+    }, timeoutMs);
+    remove = socket.onEvent("Page.loadEventFired", () => {
+      clearTimeout(timer);
+      remove();
+      resolve();
+    });
+  });
+}
+
 function normalizeInjection(value) {
   if (typeof value === "string") {
     return { bootstrapScript: "", applyScript: value };
@@ -161,6 +177,7 @@ export class CdpWallpaperInjector {
         socket,
         newDocumentId: null,
         rehydrating: null,
+        themeReloading: false,
         runtimeInstalled: false,
         removeLoadListener: null
       };
@@ -201,7 +218,10 @@ export class CdpWallpaperInjector {
     return runtimeValue(result);
   }
 
-  async installScript(session, injectionValue, { updateReloadHook = true } = {}) {
+  async installScript(session, injectionValue, {
+    updateReloadHook = true,
+    allowThemeReload = true
+  } = {}) {
     const injection = normalizeInjection(injectionValue);
     if (!injection.bootstrapScript && !injection.applyScript) return null;
     const startedAt = performance.now();
@@ -230,6 +250,25 @@ export class CdpWallpaperInjector {
       if (apply?.ok !== true || apply.runtimeReady !== true || apply.domReady !== true) {
         throw new Error("Renderer DOM application verification failed");
       }
+      if (allowThemeReload && apply.theme?.reloadRequired === true) {
+        session.themeReloading = true;
+        try {
+          const loaded = waitForPageLoad(session.socket);
+          await session.socket.call("Page.reload", { ignoreCache: false }, SCRIPT_TIMEOUT_MS);
+          await loaded;
+          // Page.enable can leave a late load event queued for the document we
+          // are replacing. Give the reload time to install its new execution
+          // context before evaluating the bootstrap again.
+          await delay(350);
+          session.runtimeInstalled = false;
+          return await this.installScript(session, injection, {
+            updateReloadHook: false,
+            allowThemeReload: false
+          });
+        } finally {
+          session.themeReloading = false;
+        }
+      }
     }
     const detail = {
       targetId: session.target.id,
@@ -244,7 +283,7 @@ export class CdpWallpaperInjector {
   }
 
   async rehydrateSession(session) {
-    if (!this.running || !this.sessions.has(session.target.id) || session.rehydrating) return;
+    if (!this.running || !this.sessions.has(session.target.id) || session.rehydrating || session.themeReloading) return;
     session.runtimeInstalled = false;
     session.rehydrating = this.installScript(
       session,
@@ -328,11 +367,24 @@ export class CdpWallpaperInjector {
         }).catch(() => {});
         session.newDocumentId = null;
       }
-      await session.socket.call("Runtime.evaluate", {
+      const evaluated = await session.socket.call("Runtime.evaluate", {
         expression: restoreScript,
         awaitPromise: true,
         returnByValue: true
-      }).catch(() => {});
+      }).catch(() => null);
+      const restored = evaluated ? runtimeValue(evaluated) : null;
+      if (restored?.theme?.reloadRequired === true) {
+        session.themeReloading = true;
+        try {
+          const loaded = waitForPageLoad(session.socket);
+          await session.socket.call("Page.reload", { ignoreCache: false }, SCRIPT_TIMEOUT_MS);
+          await loaded;
+          await delay(350);
+          session.runtimeInstalled = false;
+        } finally {
+          session.themeReloading = false;
+        }
+      }
       await session.socket.call("Page.setBypassCSP", { enabled: false }).catch(() => {});
     }));
     this.status("restored", { sessions: this.sessions.size });

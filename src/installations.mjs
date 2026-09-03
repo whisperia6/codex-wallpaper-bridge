@@ -6,6 +6,78 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const STORE_PACKAGE_NAME = "OpenAI.Codex";
+const LOCAL_INSTALLATION_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$candidatePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+function Add-CodexCandidate([string]$candidatePath) {
+  if ([string]::IsNullOrWhiteSpace($candidatePath)) { return }
+  $expandedPath = [Environment]::ExpandEnvironmentVariables($candidatePath.Trim().Trim('"'))
+  if ([IO.Path]::GetFileName($expandedPath) -ieq 'Codex.exe') {
+    $chatGptPath = Join-Path ([IO.Path]::GetDirectoryName($expandedPath)) 'ChatGPT.exe'
+    if (Test-Path -LiteralPath $chatGptPath -PathType Leaf) { $expandedPath = $chatGptPath }
+  }
+  if ([IO.Path]::GetFileName($expandedPath) -ine 'ChatGPT.exe') { return }
+  if (Test-Path -LiteralPath $expandedPath -PathType Leaf) {
+    [void]$candidatePaths.Add([IO.Path]::GetFullPath($expandedPath))
+  }
+}
+
+function Add-InstallLocation([string]$installLocation) {
+  if ([string]::IsNullOrWhiteSpace($installLocation)) { return }
+  Add-CodexCandidate (Join-Path $installLocation.Trim().Trim('"') 'ChatGPT.exe')
+}
+
+$uninstallRoots = @(
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+Get-ItemProperty -Path $uninstallRoots | Where-Object {
+  [string]$_.DisplayName -match '^(OpenAI\s+)?Codex(?:\s+(Desktop|App))?$'
+} | ForEach-Object {
+  Add-InstallLocation ([string]$_.InstallLocation)
+  $displayIcon = ([string]$_.DisplayIcon).Trim()
+  if ($displayIcon -match '^"([^"]+\.exe)"') {
+    Add-CodexCandidate $Matches[1]
+  } elseif ($displayIcon -match '^(.+?\.exe)(?:,\d+)?$') {
+    Add-CodexCandidate $Matches[1]
+  }
+}
+
+$knownDirectories = @(
+  (Join-Path $env:LOCALAPPDATA 'Programs\Codex'),
+  (Join-Path $env:LOCALAPPDATA 'Programs\OpenAI Codex'),
+  (Join-Path $env:LOCALAPPDATA 'Codex'),
+  (Join-Path $env:ProgramFiles 'Codex'),
+  (Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Codex')
+)
+$knownDirectories | ForEach-Object { Add-InstallLocation $_ }
+
+$startMenuRoots = @(
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+  (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs')
+)
+$shell = $null
+try { $shell = New-Object -ComObject WScript.Shell } catch {}
+if ($shell) {
+  Get-ChildItem -Path $startMenuRoots -Filter '*Codex*.lnk' -File -Recurse | ForEach-Object {
+    try { Add-CodexCandidate $shell.CreateShortcut($_.FullName).TargetPath } catch {}
+  }
+}
+
+@($candidatePaths | ForEach-Object {
+  $item = Get-Item -LiteralPath $_
+  $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
+  if ($identity -match '(?i)\bCodex\b') {
+    [pscustomobject]@{
+      ExecutablePath = $item.FullName
+      ProductVersion = $item.VersionInfo.ProductVersion
+    }
+  }
+}) | ConvertTo-Json -Compress
+`;
 
 function asArray(value) {
   if (value === null || value === undefined) return [];
@@ -44,6 +116,7 @@ export function validateCdpPort(value) {
 
 export function normalizeInstallations({
   storePackages = [],
+  localInstallations = [],
   runningProcesses = [],
   manualExecutables = [],
 } = {}) {
@@ -58,6 +131,22 @@ export function normalizeInstallations({
       label: "Microsoft Store 版",
       path: executablePath,
       version: String(storePackage.Version || "未知"),
+      isRunning: false,
+      processIds: [],
+    });
+  }
+
+  for (const localInstallation of asArray(localInstallations)) {
+    const executablePath = String(localInstallation?.ExecutablePath || "").trim();
+    if (!executablePath) continue;
+    const key = normalizedPathKey(executablePath);
+    if (installations.has(key)) continue;
+    installations.set(key, {
+      id: localInstallationId(executablePath),
+      kind: "local",
+      label: "本地 EXE 版（自动发现）",
+      path: executablePath,
+      version: String(localInstallation.ProductVersion || "未知"),
       isRunning: false,
       processIds: [],
     });
@@ -133,9 +222,15 @@ export async function detectInstallations({ manualExecutables = [] } = {}) {
   const outputSetup = "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);";
   const storeScript = `${outputSetup} @(Get-AppxPackage -Name '${STORE_PACKAGE_NAME}' -ErrorAction SilentlyContinue | Select-Object Name,Version,InstallLocation,PackageFamilyName,SignatureKind) | ConvertTo-Json -Compress`;
   const processScript = `${outputSetup} @(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object { $item=Get-Item -LiteralPath $_.ExecutablePath -ErrorAction SilentlyContinue; [pscustomobject]@{ ProcessId=$_.ProcessId; ExecutablePath=$_.ExecutablePath; ProductVersion=$item.VersionInfo.ProductVersion } }) | ConvertTo-Json -Compress`;
-  const [storePackages, runningProcesses] = await Promise.all([
+  const [storePackages, localInstallations, runningProcesses] = await Promise.all([
     runPowerShellJson(storeScript).catch(() => []),
+    runPowerShellJson(LOCAL_INSTALLATION_SCRIPT).catch(() => []),
     runPowerShellJson(processScript).catch(() => []),
   ]);
-  return normalizeInstallations({ storePackages, runningProcesses, manualExecutables });
+  return normalizeInstallations({
+    storePackages,
+    localInstallations,
+    runningProcesses,
+    manualExecutables,
+  });
 }

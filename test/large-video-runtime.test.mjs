@@ -45,6 +45,7 @@ function injection(id = "large-video") {
 
 function fakeSession() {
   const calls = [];
+  const eventHandlers = new Map();
   const session = {
     target: { id: "target-1" },
     newDocumentId: null,
@@ -52,6 +53,12 @@ function fakeSession() {
     socket: {
       async call(method, params = {}) {
         calls.push({ method, params });
+        if (method === "Page.reload") {
+          queueMicrotask(() => {
+            for (const handler of eventHandlers.get("Page.loadEventFired") || []) handler({});
+          });
+          return {};
+        }
         if (method === "Page.addScriptToEvaluateOnNewDocument") {
           return { identifier: "bootstrap-1" };
         }
@@ -71,6 +78,12 @@ function fakeSession() {
           return { result: { value: { ok: true, ready: true, version: "0.3.0-stream" } } };
         }
         return {};
+      },
+      onEvent(method, handler) {
+        const handlers = eventHandlers.get(method) || new Set();
+        handlers.add(handler);
+        eventHandlers.set(method, handlers);
+        return () => handlers.delete(handler);
       },
     },
   };
@@ -174,6 +187,63 @@ test("renderer verification failures reject the injection instead of reporting s
   await assert.rejects(injector.installScript(session, injection()), /DOM application verification failed/);
 });
 
+test("injector reloads and reapplies once when the official theme needs rehydration", async () => {
+  const injector = new CdpWallpaperInjector();
+  const { session, calls } = fakeSession();
+  const originalCall = session.socket.call;
+  let applyCount = 0;
+  session.socket.call = async (method, params = {}) => {
+    if (method === "Runtime.evaluate" && params.expression.includes("runtime.apply")) {
+      calls.push({ method, params });
+      applyCount += 1;
+      return {
+        result: {
+          value: {
+            ok: true,
+            runtimeReady: true,
+            domReady: true,
+            theme: { reloadRequired: applyCount === 1 },
+            media: { state: "loading" },
+          },
+        },
+      };
+    }
+    return originalCall(method, params);
+  };
+
+  await injector.installScript(session, injection());
+
+  assert.equal(calls.filter(({ method }) => method === "Page.reload").length, 1);
+  assert.equal(calls.filter(({ method, params }) =>
+    method === "Runtime.evaluate" && params.expression.includes("runtime.apply")).length, 2);
+});
+
+test("restore reloads Codex when returning to the original theme requires it", async () => {
+  const injector = new CdpWallpaperInjector();
+  const { session, calls } = fakeSession();
+  const originalCall = session.socket.call;
+  session.socket.call = async (method, params = {}) => {
+    if (method === "Runtime.evaluate" && params.expression.includes("runtime?.restore")) {
+      calls.push({ method, params });
+      return {
+        result: {
+          value: {
+            ok: true,
+            theme: { originalTheme: "light", reloadRequired: true },
+          },
+        },
+      };
+    }
+    return originalCall(method, params);
+  };
+  injector.sessions.set(session.target.id, session);
+
+  await injector.restore();
+
+  assert.equal(calls.filter(({ method }) => method === "Page.reload").length, 1);
+  assert.equal(calls.filter(({ method }) => method === "Page.setBypassCSP").length, 1);
+});
+
 test("media server supports HEAD, byte ranges, and rejects invalid ranges", async (context) => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "cwb-range-"));
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
@@ -237,12 +307,21 @@ test("resident action endpoint preserves renderer verification failures", async 
   });
 });
 
-test("restore removes the streaming runtime without Blob transfer cleanup", () => {
+test("runtime switches to dark and restores the saved Codex appearance theme", () => {
   const bootstrap = buildBootstrapScript();
   const apply = buildApplyScript({ wallpaper: null });
   const restore = buildRestoreScript();
-  assert.match(bootstrap, /0\.3\.0-stream/);
+  assert.match(bootstrap, /0\.4\.0-theme/);
+  assert.match(bootstrap, /vscode:\/\/codex\/\$\{operation\}/);
+  assert.match(bootstrap, /get-setting/);
+  assert.match(bootstrap, /set-setting/);
+  assert.match(bootstrap, /appearanceTheme/);
+  assert.match(bootstrap, /__codexWallpaperBridgeOriginalThemeV1/);
+  assert.match(bootstrap, /dark-reload-required/);
+  assert.match(bootstrap, /restore-reload-required/);
   assert.match(apply, /runtime\.apply/);
+  assert.match(apply, /await runtime\.apply/);
   assert.match(restore, /runtime\?\.restore/);
+  assert.match(restore, /await \(runtime\?\.restore/);
   assert.doesNotMatch(`${bootstrap}\n${apply}\n${restore}`, /AssetTransfer|createObjectURL|;base64,|Fetch\.enable/i);
 });
