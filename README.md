@@ -32,19 +32,11 @@ Codex Wallpaper Desktop 是一个 Windows 桌面工具：它把本机 Wallpaper 
 
 目标选择、注入操作、壁纸库和显示设置集中在同一个窗口。
 
-![Codex Wallpaper Desktop 一体化控制台](docs/images/desktop-overview.png)
+![Codex Wallpaper Desktop 一体化控制台](docs/images/控制台.png)
 
-### 顶部 Codex 应用栏
+### 实际展示效果
 
-目标、CDP 端口、透明兼容、恢复和“应用到 Codex”全部集成在壁纸工作台顶部，不再保留单独的启动/重新注入面板。
-
-![紧凑窗口下的顶部 Codex 应用栏](docs/images/desktop-compact.png)
-
-### 壁纸库、实时预览与显示设置
-
-直接浏览本地壁纸、预览动态效果，并调整亮度、暗化、模糊、饱和度和适配方式。
-
-![壁纸库与实时显示设置](docs/images/wallpaper-library.png)
+![实际效果图](docs/images/效果图.png)
 
 ## 下载
 
