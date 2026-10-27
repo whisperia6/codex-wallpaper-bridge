@@ -32,6 +32,15 @@ test('M1 numeric effects are clamped and unknown fields are discarded', () => {
   assert.equal(Object.hasOwn(effects, 'malicious'), false);
 });
 
+test('Web single-loop hold is off by default and clamped to 0–3600 seconds', () => {
+  assert.equal(normalizeConfig().effects.webLoopHoldSeconds, 0);
+  assert.equal(normalizeConfig({ effects: { webLoopHoldSeconds: -5 } }).effects.webLoopHoldSeconds, 0);
+  assert.equal(normalizeConfig({ effects: { webLoopHoldSeconds: 9999 } }).effects.webLoopHoldSeconds, 3600);
+  assert.equal(normalizeConfig({ effects: { webLoopHoldSeconds: 12.6 } }).effects.webLoopHoldSeconds, 13);
+  assert.equal(normalizeConfig().effects.webForceSingleLoop, false);
+  assert.equal(normalizeConfig({ effects: { webForceSingleLoop: true } }).effects.webForceSingleLoop, true);
+  assert.equal(normalizeConfig({ effects: { webForceSingleLoop: 'yes' } }).effects.webForceSingleLoop, false);
+});
 test('position migration and patches preserve the untouched axis', () => {
   const before = normalizeConfig({ effects: { position: '20% 70%' } });
   assert.deepEqual([before.effects.positionX, before.effects.positionY], [20, 70]);
@@ -50,9 +59,9 @@ test('disabling audio retains volume and unrelated effect patches retain playbac
 test('playback fields and zero opacity reach the lightweight injection payload', () => {
   const input = normalizeConfig({ effects: { positionX: 17, positionY: 81, zoom: 123,
     playbackRate: 2, mirror: true, audioEnabled: true, volume: 29, contrast: 180, opacity: 0,
-    glassOpacity: 0, glassBlur: 0 } });
+    glassOpacity: 0, glassBlur: 0, webLoopHoldSeconds: 12, webForceSingleLoop: true } });
   const result = rendererEffects(input);
-  for (const key of ['position', 'zoom', 'playbackRate', 'mirror', 'audioEnabled', 'volume', 'contrast', 'opacity', 'glassOpacity', 'glassBlur']) {
+  for (const key of ['position', 'zoom', 'playbackRate', 'mirror', 'audioEnabled', 'volume', 'contrast', 'opacity', 'glassOpacity', 'glassBlur', 'webLoopHoldSeconds', 'webForceSingleLoop']) {
     assert.equal(result[key], input.effects[key], key);
   }
 });

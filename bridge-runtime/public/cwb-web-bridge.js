@@ -57,6 +57,9 @@
       () => config?.resourceBase ?? `${window.location?.origin}/${token}/files/project`));
   }
   let nextScheduleId = 0, pointerDown = false, pauseStarted = 0, pausedTime = 0, started = false;
+  let webLoopHoldMs = 0, webLoopHoldTimer = null;
+  let forceSingleLoop = false, singleLoopTimer = null;
+  let singleLoopAttempts = 0;
   const propertyCall = (name, ...args) => {
     const listener = window.wallpaperPropertyListener;
     if (typeof listener?.[name] === 'function') invoke(() => listener[name](...args));
@@ -251,6 +254,45 @@
       resumeMedia.clear();
     }
   }
+  // Optional dwell after a Web wallpaper's own single-loop clip ends. The page
+  // must expose `body[data-playback-mode="single"]`; other pages are untouched.
+  const onMediaEnded = (event) => {
+    const media = event.target;
+    if (media?.tagName !== 'VIDEO' || event.__cwbLoopHoldBypass === true || webLoopHoldMs <= 0
+      || phase !== 'renderable' || document.body?.dataset.playbackMode !== 'single') return;
+    event.stopImmediatePropagation();
+    if (webLoopHoldTimer !== null) nativeClearTimeout(webLoopHoldTimer);
+    webLoopHoldTimer = nativeTimeout(() => {
+      webLoopHoldTimer = null;
+      if (phase === 'released' || phase === 'failed') return;
+      const replay = new Event('ended');
+      Object.defineProperty(replay, '__cwbLoopHoldBypass', { value: true });
+      media.dispatchEvent(replay);
+    }, webLoopHoldMs);
+  };
+  window.addEventListener('ended', onMediaEnded, true);
+  const enforceSingleLoop = () => {
+    if (!forceSingleLoop || paused || phase !== 'renderable') return;
+    if (document.body?.dataset.playbackMode === 'single') { singleLoopAttempts = 0; return; }
+    const option = document.querySelector('[data-playback="single"]');
+    if (!option || option.disabled || option.getAttribute('aria-disabled') === 'true') return;
+    const button = document.getElementById('modeButton');
+    if (button && button.getAttribute('aria-expanded') !== 'true') button.click();
+    option.click();
+    singleLoopAttempts++;
+    if (singleLoopAttempts % 10 === 0 && document.body?.dataset.playbackMode !== 'single') {
+      nativeClearInterval(singleLoopTimer); singleLoopTimer = null;
+    }
+  };
+  const syncForceSingleLoop = () => {
+    if (!forceSingleLoop) {
+      if (singleLoopTimer !== null) { nativeClearInterval(singleLoopTimer); singleLoopTimer = null; }
+      singleLoopAttempts = 0;
+      return;
+    }
+    if (singleLoopTimer === null) singleLoopTimer = nativeInterval(enforceSingleLoop, 1000);
+    nativeTimeout(enforceSingleLoop, 0);
+  };
   const invoke = (callback, value) => { try { if (typeof callback === 'function') callback(value); } catch { callbackErrors = Math.min(1e6, callbackErrors + 1); } };
   const propertyInput = (values) => Object.fromEntries(Object.entries(
     typeof window.__cwbMapFileProperties === 'function'
@@ -264,7 +306,7 @@
   const publish = (propertyRequest) => {
     const message = { source: 'cwb-web', channel: config.channel, sequence: ++sequence, phase,
       width: Math.min(16384, Math.max(0, window.innerWidth || 0)), height: Math.min(16384, Math.max(0, window.innerHeight || 0)),
-      properties: { ...properties }, propertiesSupported: Object.values(config.authorProperties.schema).every(spec =>
+      properties: { ...properties }, webLoopHoldSeconds: webLoopHoldMs / 1000, forceSingleLoop, propertiesSupported: Object.values(config.authorProperties.schema).every(spec =>
         typeof window.wallpaperPropertyListener?.[spec.type === 'directory' && spec.mode === 'fetchall'
           ? 'userDirectoryFilesAddedOrChanged' : 'applyUserProperties'] === 'function'),
       propertyRevision, pausedRequested: paused, callbackErrors, paintFrames, animationFrames, volume, directoryStatus: directoryStatus() };
@@ -303,6 +345,9 @@
     frames.clear(); tasks.clear(); resumeMedia.clear();
     for (const restore of patches) restore();
     window.removeEventListener('message', onMessage); window.removeEventListener('load', onLoad);
+    window.removeEventListener('ended', onMediaEnded, true);
+    if (webLoopHoldTimer !== null) { nativeClearTimeout(webLoopHoldTimer); webLoopHoldTimer = null; }
+    if (singleLoopTimer !== null) { nativeClearInterval(singleLoopTimer); singleLoopTimer = null; }
     for (const media of document.querySelectorAll('audio,video')) { media.pause(); media.removeAttribute('src'); media.load(); }
   };
   const onMessage = (event) => {
@@ -338,6 +383,17 @@
       if (!paused) { flushMedia(); for (const key of directories.keys()) notifyDirectory(key); flushRandom(); }
       // Functional author timers/rAF and HTML media are suspended. Workers and
       // legacy string timers are not silently advertised as whole-process suspension.
+    } else if (message.op === 'loopHold') {
+      const seconds = Number(message.value);
+      if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) return;
+      webLoopHoldMs = Math.round(seconds) * 1000;
+      publish();
+      return;
+    } else if (message.op === 'forceSingleLoop') {
+      forceSingleLoop = message.value === true;
+      syncForceSingleLoop();
+      publish();
+      return;
     } else if (message.op === 'volume') {
       if (typeof message.value !== 'number' || !Number.isFinite(message.value) || message.value < 0 || message.value > 1) return;
       volume = message.value;

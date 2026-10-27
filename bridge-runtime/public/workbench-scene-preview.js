@@ -196,6 +196,8 @@ var cwbScenePreview = (() => {
       const fit = ["cover", "contain", "fill"].includes(effects.fit) ? effects.fit : "cover";
       send("fit", { value: fit });
       send("volume", { value: playing && effects.audioEnabled === true ? Math.max(0, Math.min(100, Number(effects.volume) || 0)) / 100 : 0 });
+      send("loopHold", { value: Math.max(0, Math.min(3600, Math.round(Number(effects.webLoopHoldSeconds) || 0))) });
+      send("forceSingleLoop", { value: effects.webForceSingleLoop === true });
       send(playing ? "resume" : "pause");
     };
     const onVisibility = () => {

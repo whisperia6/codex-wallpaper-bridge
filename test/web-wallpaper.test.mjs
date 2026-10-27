@@ -43,21 +43,51 @@ test('web entry traversal, external URL and non-HTML entry fail before listening
 
 const bridge = await readFile(new URL('../bridge-runtime/public/cwb-web-bridge.js', import.meta.url), 'utf8');
 async function browserFixture(properties = { schema: { enabled: { type: 'bool' } }, values: { enabled: true } }, directoryFetch = async () => ({ files: [] })) {
-  const events = new Map(), messages = [], callbacks = [], media = [], parent = { postMessage: (v) => messages.push(v) };
+  const events = new Map(), messages = [], callbacks = [], media = [], clicks = [], parent = { postMessage: (v) => messages.push(v) };
+  const singleOption = { disabled: false, getAttribute: () => null, click: () => { document.body.dataset.playbackMode = 'single'; clicks.push('single'); } };
+  const modeButton = { getAttribute: () => null, click: () => clicks.push('mode') };
   const window = { parent, innerWidth: 800, innerHeight: 450, __cwbValidateProperties: validateAuthorPropertyPatch, __cwbMapFileProperties: mapAuthorFileProperties,
     __cwbValidateWebInput: validateWebWallpaperInput,
     wallpaperPropertyListener: { applyUserProperties: (v) => callbacks.push(['props', v]), applyGeneralProperties: (v) => callbacks.push(['general', v]) },
-    addEventListener: (k, fn) => events.set(k, fn), removeEventListener: (k) => events.delete(k) };
+    addEventListener: (k, fn) => events.set(k, fn), removeEventListener: (k) => events.delete(k),
+    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
   let ticks = 0, clears = 0;
-  vm.runInNewContext(bridge, { window, document: { querySelector: () => ({ content: 'a'.repeat(32) }), querySelectorAll: () => media },
+  const document = { body: { dataset: {} }, querySelector: (selector) => selector === '[data-playback="single"]' ? singleOption : ({ content: 'a'.repeat(32) }), getElementById: (id) => id === 'modeButton' ? modeButton : null, querySelectorAll: () => media };
+  vm.runInNewContext(bridge, { window, document, Event,
     AbortController, URL, performance: { now: () => 0 }, requestAnimationFrame: (fn) => fn(), setInterval: (fn) => { ticks++; return ticks; }, clearInterval: () => clears++,
     fetch: async (url, options) => url.includes('/author-directory/') ? { ok: true, json: () => directoryFetch(url, options) } : ({ ok: true, json: async () => ({ parentOrigin: 'http://127.0.0.1:41234', channel: 'trusted',
       resourceBase: 'http://127.0.0.1:42342/' + 'a'.repeat(32) + '/files/project', authorProperties: properties }) }) });
   await new Promise((resolve) => setImmediate(resolve)); events.get('load')(); await new Promise(resolve => setImmediate(resolve));
   const send = (op, patch = {}, extra = {}) => events.get('message')?.({ source: parent, origin: 'http://127.0.0.1:41234',
     data: { source: 'cwb-web-control', channel: 'trusted', op, ...patch }, ...extra });
-  return { window, events, messages, callbacks, media, send, clears: () => clears };
+  return { window, document, events, messages, callbacks, media, clicks, send, clears: () => clears };
 }
+test('Web single-loop hold delays the author ended event by the configured dwell', async () => {
+  const f = await browserFixture();
+  assert.equal(f.window.__cwbWeb.phase, 'renderable');
+  f.document.body.dataset.playbackMode = 'single';
+  f.send('loopHold', { value: 1 });
+  assert.equal(f.window.__cwbWeb.webLoopHoldSeconds, 1);
+  let stopped = false; const dispatched = [];
+  const media = { tagName: 'VIDEO', dispatchEvent: (event) => dispatched.push(event) };
+  f.events.get('ended')({ target: media, stopImmediatePropagation: () => { stopped = true; } });
+  assert.equal(stopped, true);
+  assert.equal(dispatched.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].type, 'ended');
+  assert.equal(dispatched[0].__cwbLoopHoldBypass, true);
+});
+test('Web single-loop forcing restores single mode without pointer input', async () => {
+  const f = await browserFixture();
+  f.document.body.dataset.playbackMode = 'freeze';
+  f.send('forceSingleLoop', { value: true });
+  assert.equal(f.window.__cwbWeb.forceSingleLoop, true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(f.document.body.dataset.playbackMode, 'single');
+  assert.deepEqual(f.clicks, ['mode', 'single']);
+});
+
 test('Web shim readiness is only renderable, never author-reported first-frame proof', async () => {
   const f = await browserFixture(); assert.equal(f.window.__cwbWeb.phase, 'renderable');
   assert.equal(f.window.require, undefined); assert.equal(typeof f.window.wallpaperRequestRandomFileForProperty, 'function');
