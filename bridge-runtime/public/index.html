@@ -325,6 +325,8 @@
             <label class="effect-check"><span>水平镜像</span><input id="mirrorInput" data-effect="mirror" type="checkbox" /></label>
             <label class="effect-check"><span>播放壁纸声音<small>默认静音，开启后使用下方音量</small></span><input id="audioEnabledInput" data-effect="audioEnabled" type="checkbox" /></label>
             <div class="effect-row"><label for="volumeNumber">音量 %</label><input class="range" data-effect="volume" type="range" min="0" max="100" step="1" aria-label="音量" /><input id="volumeNumber" data-effect="volume" type="number" min="0" max="100" step="1" /></div>
+            <label class="effect-field" for="webLoopHoldNumber"><span>Web 单套循环停留<small>播完停 N 秒再继续；0 关闭。仅对支持单套循环的 Web 壁纸生效。</small></span><input id="webLoopHoldNumber" data-effect="webLoopHoldSeconds" type="number" min="0" max="3600" step="1" /></label>
+            <label class="effect-check"><span>Web 壁纸自动单套循环<small>切换穿搭或重新加载后自动恢复，不需要点击壁纸内的按钮</small></span><input id="webForceSingleLoopInput" data-effect="webForceSingleLoop" type="checkbox" /></label>
             <label class="effect-check"><span>窗口隐藏时自动暂停</span><input id="pauseWhenHiddenInput" data-effect="pauseWhenHidden" type="checkbox" /></label>
             <label class="effect-check"><span>使用电池时自动暂停<small>保留你的手动播放状态</small></span><input id="pauseOnBatteryInput" data-effect="pauseOnBattery" type="checkbox" /></label>
             <output id="playbackPolicyStatus" aria-live="polite"></output>

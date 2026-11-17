@@ -7,6 +7,8 @@
     blur: 0,
     saturation: 100,
     fit: "cover",
+    webLoopHoldSeconds: 0,
+    webForceSingleLoop: false,
     playing: true,
     pauseWhenHidden: true,
     pauseOnBattery: false,
@@ -196,6 +198,8 @@
       blur: Math.round(clamp(raw.blur ?? raw.blurPx, 0, 40, DEFAULT_EFFECTS.blur)),
       saturation: Math.round(percentLike(raw.saturation, DEFAULT_EFFECTS.saturation, 240)),
       fit,
+      webLoopHoldSeconds: Math.round(clamp(raw.webLoopHoldSeconds, 0, 3600, DEFAULT_EFFECTS.webLoopHoldSeconds)),
+      webForceSingleLoop: raw.webForceSingleLoop === true,
       playing: raw.playing ?? raw.autoplay ?? raw.playback ?? DEFAULT_EFFECTS.playing,
     };
   }

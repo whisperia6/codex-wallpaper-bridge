@@ -385,6 +385,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         dim: number(value.dim, defaults.dim, 0, 90),
         glassOpacity: number(value.glassOpacity, defaults.glassOpacity, 0, 100),
         glassBlur: number(value.glassBlur, defaults.glassBlur, 0, 60),
+        webLoopHoldSeconds: number(value.webLoopHoldSeconds, 0, 0, 3600),
+        webForceSingleLoop: value.webForceSingleLoop === true,
         pauseWhenHidden: value.pauseWhenHidden !== false,
         pauseOnBattery: value.pauseOnBattery === true,
         onBattery: power.onBattery,

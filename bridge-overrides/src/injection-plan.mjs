@@ -56,6 +56,8 @@ export function rendererEffects(config) {
     pauseOnBattery: effects.pauseOnBattery === true,
     glassOpacity: effects.glassOpacity ?? 62,
     glassBlur: effects.glassBlur ?? 18,
+    webLoopHoldSeconds: Math.max(0, Math.min(3600, Math.round(Number(effects.webLoopHoldSeconds) || 0))),
+    webForceSingleLoop: effects.webForceSingleLoop === true,
     transition: effects.transition ?? "cut",
     transitionDirection: effects.transitionDirection ?? "left",
     transitionDurationMs: effects.transitionDurationMs ?? 600,
