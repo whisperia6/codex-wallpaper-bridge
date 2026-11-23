@@ -13,7 +13,7 @@
     current = value;
     document.documentElement.dataset.workbenchTheme = value;
     document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", value);
-    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", value === "light" ? "#edf3fa" : "#11120f");
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", value === "light" ? "#f4f5f7" : "#0c0d10");
     for (const button of document.querySelectorAll("[data-theme-choice]")) {
       button.setAttribute("aria-pressed", String(button.dataset.themeChoice === value));
     }

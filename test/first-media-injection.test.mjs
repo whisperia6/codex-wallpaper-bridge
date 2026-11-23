@@ -183,3 +183,9 @@ test('composer body uses the native composer surface for one uniform tone', () =
 test('user message bubbles keep their native surface', () => {
   assert.doesNotMatch(source, /\[data-user-message-bubble\]\s*,/);
 });
+test('fallback dark theme updates data-theme for modern Codex builds and clears content fade', () => {
+  assert.match(source, /getAttribute\?\.\("data-theme"\)/);
+  assert.match(source, /setAttribute\?\.\("data-theme",\s*desired\)/);
+  assert.match(source, /--app-shell-content-fade:\s*none !important/);
+  assert.match(source, /\[class\*="app-shell-content-fade"\]/);
+});

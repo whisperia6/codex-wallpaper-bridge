@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#11120f" />
+    <meta name="theme-color" content="#0c0d10" />
     <title>Codex Wallpaper Bridge</title>
     <script src="workbench-theme.js"></script>
     <link rel="stylesheet" href="styles.css" />
@@ -81,7 +81,7 @@
         <div class="search-box">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.35-4.35m2.35-5.15A7.5 7.5 0 1 1 4 11.5a7.5 7.5 0 0 1 15 0Z"/></svg>
           <input id="searchInput" type="search" autocomplete="off" placeholder="搜索本机壁纸…" aria-label="搜索壁纸" />
-          <kbd>⌘ K</kbd>
+          <kbd>Ctrl K</kbd>
         </div>
 
         <nav class="type-filters" id="typeFilters" aria-label="按类型筛选">
@@ -93,9 +93,12 @@
         </nav>
 
         <div class="library-actions">
-          <button class="text-button" id="importWallpapersButton" type="button">导入 JPG / PNG / MP4</button>
+          <button class="text-button" id="importWallpapersButton" type="button">+ 导入壁纸</button>
           <input id="importWallpapersInput" type="file" accept=".jpg,.jpeg,.png,.mp4" multiple hidden />
-          <label><input id="hiddenViewInput" type="checkbox" /> 已隐藏</label>
+          <div class="library-actions__right">
+            <button class="chip-toggle" id="batchManageToggle" type="button" aria-pressed="false" title="显示每张壁纸的勾选与分级栏">批量管理</button>
+            <label class="hidden-toggle"><input id="hiddenViewInput" type="checkbox" /> 已隐藏</label>
+          </div>
         </div>
         <details class="library-manager" id="libraryTools">
           <summary>库管理与内容规则</summary>
@@ -210,9 +213,30 @@
         </header>
 
         <section class="preview-canvas" aria-label="壁纸实时预览">
-          <div class="preview-label">
-            <span class="preview-label__live"><i></i> LIVE PREVIEW</span>
-            <span>所有视觉调节都会同步到 Codex</span>
+          <div class="preview-stage-bar">
+            <div class="preview-label">
+              <span class="preview-label__live"><i></i> LIVE PREVIEW</span>
+              <span>所有视觉调节都会同步到 Codex</span>
+            </div>
+            <div class="preview-mode-switch" id="previewModeSwitch" role="group" aria-label="预览视图模式">
+              <button type="button" data-preview-mode="pure" aria-pressed="true">纯壁纸</button>
+              <button type="button" data-preview-mode="codex" aria-pressed="false">Codex 叠加预览</button>
+            </div>
+          </div>
+
+          <div class="codex-overlay-preview" id="codexOverlayPreview" aria-hidden="true" hidden>
+            <div class="codex-overlay__sidebar">
+              <div class="codex-overlay__item is-active">+ 新对话</div>
+              <div class="codex-overlay__label">最近线程</div>
+              <div class="codex-overlay__item">调整壁纸亮度与遮罩对比度</div>
+              <div class="codex-overlay__item">检查代码文本可读性</div>
+              <div class="codex-overlay__item">同步系统音乐与歌词联动</div>
+            </div>
+            <div class="codex-overlay__main">
+              <div class="codex-overlay__bubble is-user">当前亮度和暗化遮罩下，文字和代码块的对比度够清晰吗？</div>
+              <div class="codex-overlay__bubble is-ai">拖动右侧「亮度」「暗化遮罩」或「背景模糊」会实时作用于背后壁纸，方便直接评估 <code>Codex</code> 实际阅读体验。</div>
+              <div class="codex-overlay__composer"><span>向 Codex 提问，@ 引用文件…</span><i>↑</i></div>
+            </div>
           </div>
 
           <div class="welcome-card glass-card" id="welcomeCard">
@@ -238,7 +262,7 @@
           </div>
         </section>
 
-        <aside class="settings glass-panel" aria-label="壁纸显示设置">
+        <aside class="settings glass-panel" id="settingsPanel" aria-label="壁纸显示设置">
           <header class="settings-header">
             <div>
               <p>APPEARANCE</p>
@@ -246,7 +270,7 @@
             </div>
             <div class="settings-header-actions">
               <div class="theme-switcher" role="group" aria-label="工作台主题">
-                <button type="button" data-theme-choice="light" aria-label="浅色主题" aria-pressed="false" title="浅色主题 · 淡蓝"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg></button>
+                <button type="button" data-theme-choice="light" aria-label="浅色主题" aria-pressed="false" title="浅色主题"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg></button>
                 <button type="button" data-theme-choice="dark" aria-label="深色主题" aria-pressed="true" title="深色主题"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"/></svg></button>
               </div>
               <button class="icon-button" id="resetEffectsButton" type="button" title="重置显示设置" aria-label="重置显示设置">
@@ -255,7 +279,15 @@
             </div>
           </header>
 
-          <div class="setting-group">
+          <nav class="settings-tabs" id="settingsTabs" role="tablist" aria-label="设置分类">
+            <button type="button" role="tab" data-settings-tab-trigger="appearance" aria-selected="true">画面</button>
+            <button type="button" role="tab" data-settings-tab-trigger="author" aria-selected="false">作者<i class="tab-dot" id="authorTabDot" hidden></i></button>
+            <button type="button" role="tab" data-settings-tab-trigger="transition" aria-selected="false">过场</button>
+            <button type="button" role="tab" data-settings-tab-trigger="music" aria-selected="false">音乐</button>
+            <button type="button" role="tab" data-settings-tab-trigger="video" aria-selected="false">视频</button>
+          </nav>
+
+          <div class="setting-group" data-settings-tab="appearance">
             <label class="setting-label" for="brightnessRange">
               <span><svg viewBox="0 0 24 24"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg>亮度</span>
               <output id="brightnessValue">72%</output>
@@ -263,7 +295,7 @@
             <input class="range" id="brightnessRange" type="range" min="10" max="160" step="1" value="72" />
           </div>
 
-          <div class="setting-group">
+          <div class="setting-group" data-settings-tab="appearance">
             <label class="setting-label" for="darknessRange">
               <span><svg viewBox="0 0 24 24"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"/></svg>暗化遮罩</span>
               <output id="darknessValue">22%</output>
@@ -271,7 +303,7 @@
             <input class="range" id="darknessRange" type="range" min="0" max="90" step="1" value="22" />
           </div>
 
-          <div class="setting-group">
+          <div class="setting-group" data-settings-tab="appearance">
             <label class="setting-label" for="blurRange">
               <span><svg viewBox="0 0 24 24"><path d="M7 5h10M5 9h14M7 13h10M9 17h6M11 21h2"/></svg>背景模糊</span>
               <output id="blurValue">0px</output>
@@ -279,7 +311,7 @@
             <input class="range" id="blurRange" type="range" min="0" max="40" step="1" value="0" />
           </div>
 
-          <div class="setting-group">
+          <div class="setting-group" data-settings-tab="appearance">
             <label class="setting-label" for="saturationRange">
               <span><svg viewBox="0 0 24 24"><path d="M12 3s7 7.2 7 12a7 7 0 0 1-14 0c0-4.8 7-12 7-12Zm0 0v19"/></svg>色彩饱和度</span>
               <output id="saturationValue">100%</output>
@@ -287,9 +319,9 @@
             <input class="range range--spectrum" id="saturationRange" type="range" min="0" max="240" step="1" value="100" />
           </div>
 
-          <div class="settings-divider"></div>
+          <div class="settings-divider" data-settings-tab="appearance"></div>
 
-          <div class="select-setting">
+          <div class="select-setting" data-settings-tab="appearance">
             <label for="fitSelect">
               <span><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>背景适配</span>
               <small>画面如何填充 Codex 窗口</small>
@@ -304,7 +336,7 @@
             </div>
           </div>
 
-          <div class="toggle-setting">
+          <div class="toggle-setting" data-settings-tab="appearance">
             <label for="playbackToggle">
               <span><svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5V7Z"/></svg>视频自动播放</span>
               <small>切换壁纸后立即播放</small>
@@ -313,7 +345,7 @@
             <span class="switch" aria-hidden="true"></span>
           </div>
 
-          <details class="effect-advanced" open>
+          <details class="effect-advanced" id="framingTools" data-settings-tab="appearance" open>
             <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M9 8l7 4-7 4V8Z"/></svg><span>取景、播放与声音</span></summary>
             <p class="effect-hint">支持直接输入数值；“重置”恢复服务端默认值。镜像、倍速和声音只更新当前媒体。</p>
             <div class="effect-row"><label for="positionXNumber">水平位置 %</label><input class="range" data-effect="positionX" type="range" min="0" max="100" step="1" aria-label="水平位置" /><input id="positionXNumber" data-effect="positionX" type="number" min="0" max="100" step="1" /></div>
@@ -332,7 +364,7 @@
             <output id="playbackPolicyStatus" aria-live="polite"></output>
           </details>
 
-          <details class="effect-advanced" id="transitionTools" open>
+          <details class="effect-advanced" id="transitionTools" data-settings-tab="transition" open>
             <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>切换过场</span></summary>
             <p class="effect-hint">手动选择和轮播共用过场；新媒体就绪后切换。系统减少动态效果时自动硬切。</p>
             <label class="effect-field" for="transitionSelect"><span>过场效果</span><select id="transitionSelect" data-effect="transition"><option value="cut">硬切</option><option value="fade">淡化</option><option value="push">推移</option><option value="wipe">擦除</option><option value="iris">光圈</option><option value="zoom">缩放</option><option value="stripes">条带</option></select></label>
@@ -340,7 +372,7 @@
             <div class="effect-row"><label for="transitionDurationNumber">时长 ms</label><input class="range" data-effect="transitionDurationMs" type="range" min="100" max="3000" step="50" aria-label="过场时长" /><input id="transitionDurationNumber" data-effect="transitionDurationMs" type="number" min="100" max="3000" step="50" /></div>
             <label class="effect-check"><span>减少动态效果<small>关闭过场动画，直接切换壁纸</small></span><input id="reduceMotionInput" data-effect="reduceMotion" type="checkbox" /></label>
           </details>
-          <details class="effect-advanced" id="systemMediaPanel">
+          <details class="effect-advanced" id="systemMediaPanel" data-settings-tab="music">
             <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13M9 8l11-2M9 18a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Zm11-2a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Z"/></svg><span>系统音乐联动</span><span class="settings-badge">Windows</span></summary>
             <label class="effect-check"><span>系统音频频谱<small>采集系统输出，不使用麦克风</small></span><input data-media="captureAudio" type="checkbox" /></label>
             <label class="effect-check"><span>读取当前歌曲<small>同步歌名、封面与播放时间线</small></span><input data-media="nowPlaying" type="checkbox" /></label>
@@ -363,7 +395,7 @@
             <label class="effect-field effect-field--stacked" for="systemLyricsInput"><span>导入本地歌词<small>LRC 格式 · 最大 128 KiB · 应用到当前歌曲</small></span><input id="systemLyricsInput" type="file" accept=".lrc,text/plain" /></label>
           </details>
 
-          <details class="effect-advanced" id="videoOptimizationPanel">
+          <details class="effect-advanced" id="videoOptimizationPanel" data-settings-tab="video">
             <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h12v14H4V5Zm12 5 5-3v10l-5-3M8 9h4m-4 4h4"/></svg><span>视频优化与缓存</span></summary>
             <p class="effect-hint">转码期间继续播放原片；完成后由你应用优化版。Faststart 使用虚拟布局，不复制整份原片，也不保证任意视频一秒首帧。</p>
             <label class="effect-check"><span>Faststart 虚拟前置<small>不支持的 MP4 布局保留原样</small></span><input data-video="faststart" type="checkbox" /></label>
@@ -382,7 +414,11 @@
             <progress id="cacheJobProgress" max="1" value="0" aria-label="缓存迁移进度"></progress><p id="cacheJobStatus" role="status">没有缓存迁移任务</p>
           </details>
 
-          <details class="effect-advanced" id="authorPropertiesPanel" hidden open></details>
+          <details class="effect-advanced" id="authorPropertiesPanel" data-settings-tab="author" hidden open></details>
+          <div class="author-empty-note" id="authorEmptyState" data-settings-tab="author" hidden>
+            <strong>当前壁纸无作者属性</strong>
+            <p>支持自定义参数的 Wallpaper Engine 场景或网页壁纸会在这里显示专属调节项。</p>
+          </div>
 
           <div class="settings-note">
             <svg viewBox="0 0 24 24"><path d="M12 8v4m0 4h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z"/></svg>

@@ -176,7 +176,7 @@ async function main() {
     await new Promise(resolve=>setTimeout(resolve,220));
     await settle();
     assert.equal(await evaluate(`getComputedStyle(document.querySelector('#engineFallbackSelect')).appearance`),'none');
-    assert.equal(await evaluate(`getComputedStyle(document.querySelector('.switch')).backgroundColor`),'rgb(169, 211, 250)');
+    assert.equal(await evaluate(`getComputedStyle(document.querySelector('.switch')).backgroundColor`),'rgb(24, 26, 31)');
     await fs.writeFile(path.join(root,'workbench-light.png'),(await win.webContents.capturePage()).toPNG());
     await capture('settings-light');
     await evaluate(`document.querySelector('#transitionTools').scrollIntoView({block:'start'})`);
@@ -254,16 +254,16 @@ async function main() {
     await new Promise(resolve=>setTimeout(resolve,50));
     assert.equal(await frame.executeJavaScript(`document.documentElement.dataset.workbenchTheme`),'light');
     const switchColor=await frame.executeJavaScript(`getComputedStyle(document.querySelector('.switch')).backgroundColor`);
-    if(switchColor!=='rgb(169, 211, 250)') report.themeDiagnostics=await frame.executeJavaScript(`({
+    if(switchColor!=='rgb(24, 26, 31)') report.themeDiagnostics=await frame.executeJavaScript(`({
       theme:document.documentElement.dataset.workbenchTheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--accent'),
       switchAccent:getComputedStyle(document.querySelector('.switch')).getPropertyValue('--accent'),
       animations:document.getAnimations().map(a=>({state:a.playState,time:a.currentTime,pending:a.pending}))})`);
-    assert.equal(switchColor,'rgb(169, 211, 250)');
+    assert.equal(switchColor,'rgb(24, 26, 31)');
     await frame.executeJavaScript(`document.querySelector('#engineFallbackControl').hidden=false;document.querySelector('#engineRetryButton').hidden=false;
       document.querySelector('#backgroundPlaceholder').classList.add('is-visible');
       document.querySelector('#statusTitle').textContent='隔离界面预览';document.querySelector('#statusDetail').textContent='未启动生产桥接服务'`);
     assert.equal(await evaluate(`document.documentElement.dataset.workbenchTheme`),'light');
-    assert.equal(await evaluate(`getComputedStyle(document.body).backgroundColor`),'rgb(237, 243, 250)');
+    assert.equal(await evaluate(`getComputedStyle(document.body).backgroundColor`),'rgb(244, 245, 247)');
     await settle();
     await frame.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     await win.webContents.capturePage();

@@ -614,7 +614,7 @@ export class CdpWallpaperInjector {
           session.runtimeInstalled = false; return;
         }
       } catch {}
-      await delay(100);
+      await delay(35);
     }
     throw new Error("GPU Scene document initialization failed");
   }
@@ -1034,7 +1034,8 @@ export class CdpWallpaperInjector {
     const failureDetails = results.flatMap((result, targetIndex) => result.status === "rejected"
       ? [injectionFailureDetail(result.reason, targetIndex)] : []).slice(0, 8);
     for (const detail of failureDetails) this.status("injection-failed", { message: JSON.stringify(detail) });
-    const deferredCount = results.filter(result => result.status === "fulfilled" && result.value?.deferred === true).length;
+    const deferredCount = results.filter(result => result.status === "fulfilled" && result.value?.deferred === true).length
+      || (this.sessions.size === 0 ? this.lastScanDeferred : 0);
     const timings = results
       .filter((result) => result.status === "fulfilled" && result.value && !result.value.deferred)
       .map((result) => result.value);

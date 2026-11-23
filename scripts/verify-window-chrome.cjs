@@ -54,7 +54,7 @@ app.whenReady().then(async () => {
     register(name, () => { proof.blocked.push(name); throw Error('fixture_forbids_real_actions'); });
   }
   win = new BrowserWindow({ show: false, width: 1100, height: 800, minWidth: 1040, minHeight: 700,
-    backgroundColor: '#0b0d0b', ...desktopWindowChromeOptions(), webPreferences: {
+    backgroundColor: '#0c0d10', ...desktopWindowChromeOptions(), webPreferences: {
       preload: compiled ? path.join(compiled, 'preload.cjs') : path.join(repo, 'src/preload.cjs'),
       sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
@@ -83,15 +83,15 @@ app.whenReady().then(async () => {
     s.workbenchTheme = await workbench.executeJavaScript('document.documentElement.dataset.workbenchTheme');
     s.workbenchBackground = await workbench.executeJavaScript('getComputedStyle(document.body).backgroundColor');
     assert.equal(s.workbenchTheme, theme);
-    assert.equal(s.workbenchBackground, theme === 'dark' ? 'rgb(11, 13, 11)' : 'rgb(237, 243, 250)');
+    assert.equal(s.workbenchBackground, theme === 'dark' ? 'rgb(12, 13, 16)' : 'rgb(244, 245, 247)');
     assert.equal(s.visible, true); assert.equal(s.theme, theme); assert.equal(s.header.drag, 'drag');
     assert.equal(s.frame.drag, 'no-drag'); assert.equal(s.connection, 'connected'); assert.equal(s.onlyOneFrame, true);
     assert.equal(s.pageOverflow, false); assert.ok(s.header.height >= 40 && s.header.height <= 48);
     assert.ok(s.area.width < s.width - 100); assert.ok(s.brandRight < s.area.width);
     assert.equal(Math.round(s.frame.top), Math.round(s.header.height));
     assert.equal(Math.round(s.frame.height + s.header.height), s.height);
-    assert.equal(s.header.bg, theme === 'dark' ? 'rgb(11, 13, 11)' : 'rgb(237, 243, 250)');
-    assert.equal(s.header.markColor, theme === 'dark' ? 'rgb(217, 255, 114)' : 'rgb(50, 107, 156)');
+    assert.equal(s.header.bg, theme === 'dark' ? 'rgb(12, 13, 16)' : 'rgb(244, 245, 247)');
+    assert.equal(s.header.markColor, theme === 'dark' ? 'rgb(243, 244, 246)' : 'rgb(24, 26, 31)');
     proof.themes.push(s);
     if (!await fs.stat(path.join(output, theme + '.png')).catch(() => null)) {
       await workbench.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');

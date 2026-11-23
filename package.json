@@ -31,6 +31,10 @@
     "appId": "com.local.codex-wallpaper-desktop",
     "productName": "Codex Wallpaper Desktop",
     "compression": "normal",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "npmRebuild": false,
     "asar": true,
     "asarUnpack": [
@@ -38,7 +42,7 @@
       "dist/bridge-runtime/**/*"
     ],
     "directories": {
-      "output": "out/.portable-build"
+      "output": "out/.nsis-build"
     },
     "files": [
       "dist/**/*"
@@ -58,14 +62,30 @@
       "requestedExecutionLevel": "asInvoker",
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
       "executableName": "CodexWallpaperDesktop",
-      "artifactName": "CodexWallpaperDesktop-${version}.${ext}"
+      "artifactName": "CodexWallpaperDesktop-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Codex Wallpaper Desktop",
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN",
+        "en_US"
+      ],
+      "language": "2052",
+      "unicode": true
     }
   }
 }

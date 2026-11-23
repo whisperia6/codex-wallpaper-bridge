@@ -48,6 +48,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       let themeActivationPromise = null;
       let themeState = "idle";
       let fallbackThemeClasses = null;
+      let themeObserver = null;
 
       const createChunkAssembler = () => {
         const unset = Symbol("unset");
@@ -168,7 +169,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         return transfer.assembler.finish();
       };
 
-      const requestHostSetting = (operation, params, timeoutMs = 4_000) => {
+      const requestHostSetting = (operation, params, timeoutMs = 1_500) => {
         const bridge = globalThis.electronBridge;
         if (typeof bridge?.sendMessageFromView !== "function") {
           return Promise.reject(new Error("Codex host bridge is unavailable"));
@@ -219,9 +220,12 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         });
       };
 
-      const effectiveTheme = () => document.documentElement.classList.contains("electron-dark")
-        ? "dark"
-        : "light";
+      const effectiveTheme = () => {
+        const html = document.documentElement;
+        const dataTheme = html.getAttribute?.("data-theme");
+        if (dataTheme === "dark" || dataTheme === "light") return dataTheme;
+        return html.classList.contains("electron-dark") ? "dark" : "light";
+      };
 
       const readSavedTheme = () => {
         try {
@@ -240,27 +244,63 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         try { localStorage.removeItem(themeStorageKey); } catch {}
       };
 
+      const stopThemeObserver = () => {
+        themeObserver?.disconnect();
+        themeObserver = null;
+      };
+
+      const syncFallbackThemeDom = (theme) => {
+        const html = document.documentElement;
+        const isDark = theme === "dark";
+        const desired = isDark ? "dark" : "light";
+        if (html.classList.contains("electron-dark") !== isDark) html.classList.toggle("electron-dark", isDark);
+        if (html.classList.contains("electron-light") !== !isDark) html.classList.toggle("electron-light", !isDark);
+        if (html.getAttribute?.("data-theme") !== desired) html.setAttribute?.("data-theme", desired);
+        if (html.style?.getPropertyValue("color-scheme") !== desired) html.style?.setProperty("color-scheme", desired);
+      };
+
       const applyFallbackTheme = (theme) => {
         const html = document.documentElement;
         if (!fallbackThemeClasses) {
           fallbackThemeClasses = {
             dark: html.classList.contains("electron-dark"),
-            light: html.classList.contains("electron-light")
+            light: html.classList.contains("electron-light"),
+            hasDataTheme: Boolean(html.hasAttribute?.("data-theme")),
+            dataTheme: html.getAttribute?.("data-theme") ?? null,
+            colorScheme: html.style?.getPropertyValue("color-scheme") || "",
+            colorSchemePriority: html.style?.getPropertyPriority("color-scheme") || ""
           };
         }
-        html.classList.toggle("electron-dark", theme === "dark");
-        html.classList.toggle("electron-light", theme !== "dark");
+        syncFallbackThemeDom(theme);
+        stopThemeObserver();
+        if (theme === "dark" && typeof MutationObserver === "function") {
+          themeObserver = new MutationObserver(() => {
+            if (fallbackThemeClasses) syncFallbackThemeDom("dark");
+          });
+          themeObserver.observe(html, { attributes: true, attributeFilter: ["data-theme", "class"] });
+        }
       };
 
       const restoreFallbackTheme = () => {
+        stopThemeObserver();
         if (!fallbackThemeClasses) return;
         const html = document.documentElement;
         html.classList.toggle("electron-dark", fallbackThemeClasses.dark);
         html.classList.toggle("electron-light", fallbackThemeClasses.light);
+        if (fallbackThemeClasses.hasDataTheme && fallbackThemeClasses.dataTheme !== null) {
+          html.setAttribute?.("data-theme", fallbackThemeClasses.dataTheme);
+        } else {
+          html.removeAttribute?.("data-theme");
+        }
+        if (fallbackThemeClasses.colorScheme) {
+          html.style?.setProperty("color-scheme", fallbackThemeClasses.colorScheme, fallbackThemeClasses.colorSchemePriority);
+        } else {
+          html.style?.removeProperty("color-scheme");
+        }
         fallbackThemeClasses = null;
       };
 
-      const waitForThemePaint = () => new Promise((resolve) => setTimeout(resolve, 80));
+      const waitForThemePaint = () => new Promise((resolve) => setTimeout(resolve, 35));
 
       const ensureDarkTheme = () => {
         if (themeActivationPromise) return themeActivationPromise;
@@ -282,7 +322,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             themeState = "switching";
             await requestHostSetting("set-setting", { key: "appearanceTheme", value: "dark" });
             restoreFallbackTheme();
-            await waitForThemePaint();
+            if (effectiveTheme() !== "dark") await waitForThemePaint();
             if (effectiveTheme() === "dark") themeState = "dark";
             else themeState = "dark-reload-required";
           } catch {
@@ -321,7 +361,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           if (effectiveTheme() === expectedTheme) themeState = "restored";
           else themeState = "restore-reload-required";
         } catch {
-          applyFallbackTheme(saved.effectiveTheme === "dark" ? "dark" : "light");
+          if (fallbackThemeClasses) restoreFallbackTheme();
+          else applyFallbackTheme(saved.effectiveTheme === "dark" ? "dark" : "light");
           themeState = "restore-fallback";
         }
         return {
@@ -460,10 +501,25 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               border: 0;
               pointer-events: none;
             }
+            #${ids.root} > [data-cwb-renderer="direct-gpu"] {
+              opacity: var(--cwb-opacity, 1);
+              pointer-events: none;
+            }
+            #${ids.root} > [data-cwb-renderer="direct-gpu"] > iframe {
+              inset: calc(var(--cwb-blur, 0px) * -1.2) !important;
+              width: calc(100% + var(--cwb-blur, 0px) * 2.4) !important;
+              height: calc(100% + var(--cwb-blur, 0px) * 2.4) !important;
+              filter: brightness(var(--cwb-brightness, .82)) saturate(var(--cwb-saturation, 1.05)) contrast(var(--cwb-contrast, 1)) blur(var(--cwb-blur, 0px));
+            }
             #${ids.root} > [data-cwb-native], #${ids.root} > video, #${ids.root} > img {
               filter: brightness(var(--cwb-brightness, .82)) saturate(var(--cwb-saturation, 1.05)) contrast(var(--cwb-contrast, 1)) blur(var(--cwb-blur, 0px));
               opacity: var(--cwb-opacity, 1);
               pointer-events: none;
+            }
+            #${ids.root} > video, #${ids.root} > img {
+              inset: calc(var(--cwb-blur, 0px) * -1.2) !important;
+              width: calc(100% + var(--cwb-blur, 0px) * 2.4) !important;
+              height: calc(100% + var(--cwb-blur, 0px) * 2.4) !important;
             }
             #${ids.scrim} {
               position: absolute;
@@ -535,6 +591,23 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               + [data-pip-obstacle="thread-footer"]
             ),
             html[data-codex-wallpaper-bridge="active"] [data-above-composer-portal] [class*="bg-gradient-to-t"][class*="from-surface"],
+            html[data-codex-wallpaper-bridge="active"] :is(
+              div:has(> [data-thread-scroll-footer]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop])
+            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *),
+            html[data-codex-wallpaper-bridge="active"] :is(
+              div:has(> [data-thread-scroll-footer]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop]),
+              [data-thread-scroll-footer]
+            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *)::before,
+            html[data-codex-wallpaper-bridge="active"] :is(
+              div:has(> [data-thread-scroll-footer]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
+              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop]),
+              [data-thread-scroll-footer]
+            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *)::after,
             html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] :is(
               .composer-surface-chrome,
               [class*="_ComposerLayoutRoot_"],
@@ -546,6 +619,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               [data-composer-surface-variant][data-composer-radius-variant]
             )::after {
               background: transparent !important;
+              background-color: transparent !important;
               background-image: none !important;
               border-color: transparent !important;
               box-shadow: none !important;
@@ -563,9 +637,14 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               backdrop-filter: none !important;
               box-shadow: none !important;
             }
+            html[data-codex-wallpaper-bridge="active"] [data-app-shell-page-surface] {
+              --app-shell-content-fade: none !important;
+              --app-shell-content-fade-opacity: 0 !important;
+            }
             html[data-codex-wallpaper-bridge="active"] :is(
               [data-app-shell-main-content-top-fade],
-              [class*="_MainContentTopFade_"]
+              [class*="_MainContentTopFade_"],
+              [class*="app-shell-content-fade"]
             ) {
               background: transparent !important;
               background-color: transparent !important;

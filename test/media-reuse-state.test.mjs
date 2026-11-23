@@ -122,3 +122,9 @@ test('music toggles and repeated saves return HTTP 200 when the current wallpape
   }
   assert.equal(f.slots.length, 1);
 });
+
+test('direct-gpu renderer stylesheet applies blur/color filters, blur overscan and opacity to scene/web containers', () => {
+  assert.match(source, /#?\$\{ids\.root\}\s*>\s*\[data-cwb-renderer="direct-gpu"\]\s*\{[^}]*opacity:\s*var\(--cwb-opacity,\s*1\)/);
+  assert.match(source, /#?\$\{ids\.root\}\s*>\s*\[data-cwb-renderer="direct-gpu"\]\s*>\s*iframe\s*\{[^}]*filter:\s*brightness\(var\(--cwb-brightness,\s*\.82\)\)\s*saturate\(var\(--cwb-saturation,\s*1\.05\)\)\s*contrast\(var\(--cwb-contrast,\s*1\)\)\s*blur\(var\(--cwb-blur,\s*0px\)\)/);
+  assert.match(source, /#?\$\{ids\.root\}\s*>\s*\[data-cwb-renderer="direct-gpu"\]\s*>\s*iframe\s*\{[^}]*inset:\s*calc\(var\(--cwb-blur,\s*0px\)\s*\*\s*-1\.2\)/);
+});

@@ -8,6 +8,7 @@ import test from "node:test";
 import { resolveBridgeRoot, resolveBridgeUtilityPath } from "../src/bridge-runner.mjs";
 import { verifyCdpEndpointOwner } from "../src/cdp-owner.mjs";
 import { selectInstallationId, validateCdpPort } from "../src/installations.mjs";
+import { runCodexTakeoverFlow } from "../src/codex-takeover-flow.mjs";
 import { runLaunchAndInjectFlow } from "../src/launch-flow.mjs";
 import { dailyLogFilename, formatLogEntry, sanitizeLogText } from "../src/local-logging.mjs";
 import { createPreviewSession, stopPreviewProcess } from "../src/preview-session.mjs";
@@ -29,8 +30,8 @@ const installations = [
   { id: "store", kind: "store", path: "C:\\fixture-store\\ChatGPT.exe", label: "store", isRunning: true, processIds: [1002] },
 ];
 
-async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", messageBoxResponse = 0 } = {}) {
-  const calls = { order: [], forks: [], starts: [], actions: [], launch: [], close: [], owner: [], collect: [], expectedProcess: [], reads: [], writes: [], appends: [], dialogs: [], prevented: [], errors: [], detects: 0, trayDestroyed: 0, nativeHosts: [], nativePeers: [], nativeCloses: 0 };
+async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", messageBoxResponse = 0, takeoverProcesses = [], duringClose = null, duringWrite = null } = {}) {
+  const calls = { monitors: [], watchers: [], order: [], forks: [], starts: [], actions: [], launch: [], close: [], owner: [], collect: [], expectedProcess: [], reads: [], writes: [], appends: [], dialogs: [], prevented: [], errors: [], detects: 0, trayDestroyed: 0, nativeHosts: [], nativePeers: [], nativeCloses: 0 };
   const acceptanceRoot = path.join(root, "out", "live-acceptance", "main-flow-fixture");
   const acceptanceContext = acceptance ? {
     userData: path.join(acceptanceRoot, "desktop-user-data"),
@@ -98,7 +99,7 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
       } };
     },
     dialog: {
-      showMessageBox: async (...args) => { calls.dialogs.push(args); return { response: messageBoxResponse }; },
+      showMessageBox: async (...args) => { calls.dialogs.push(args); return { response: typeof messageBoxResponse === "function" ? await messageBoxResponse() : messageBoxResponse }; },
       showOpenDialog: async (...args) => { calls.dialogs.push(args); return { canceled: true, filePaths: [] }; },
       showErrorBox: (...args) => calls.errors.push(args),
     },
@@ -124,12 +125,22 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
         return child;
       },
     },
-    path, fileURLToPath, pathToFileURL, URL, performance,
+    path, fileURLToPath, pathToFileURL, URL, performance, AbortController,
+    runCodexTakeoverFlow,
+    listCodexProcesses: async () => takeoverProcesses,
+    startCodexProcessMonitor: (options) => {
+      const record = { options, stopped: false }; calls.monitors.push(record);
+      return { stop: () => { record.stopped = true; } };
+    },
+    createCodexTakeoverWatcher: (options) => {
+      const record = { options, stopped: false }; calls.watchers.push(record);
+      return { start() {}, stop: () => { record.stopped = true; } };
+    },
     process: { platform: "win32", execPath: "C:\\fixture-electron\\electron.exe", resourcesPath: path.join(root, "fixture-resources"), env: { LOCALAPPDATA: path.join(root, "daily-local-app-data"), KEEP_EXISTING: "kept" } },
     appendFile: async (filePath, content) => calls.appends.push({ filePath, content }),
     mkdir: async () => {},
     readFile: async (filePath) => { calls.reads.push(filePath); return JSON.stringify({ selectedId: savedSelectedId, port: 19335, adaptive: true }); },
-    writeFile: async (filePath, content) => calls.writes.push({ filePath, content }),
+    writeFile: async (filePath, content) => { calls.writes.push({ filePath, content }); await duringWrite?.(); },
     resolveBridgeRoot, resolveBridgeUtilityPath,
     invokeBridgeAction: async (options) => {
       calls.actions.push(copy(options));
@@ -145,9 +156,9 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
       return { child, url: controlUrl(options.port) };
     },
     collectCdpDiagnostics: async (port) => { calls.order.push("collect-diagnostics"); calls.collect.push(port); return diagnostics; },
-    isCdpEndpointReady: async () => endpointReady,
+    isCdpEndpointReady: async () => typeof endpointReady === "function" ? endpointReady() : endpointReady,
     waitForCodexTarget: async () => {},
-    closeCodexProcesses: async (options) => { calls.close.push(options); return { closedCount: 1 }; },
+    closeCodexProcesses: async (options) => { calls.close.push(options); await duringClose?.(); return { closedCount: 1 }; },
     launchCodex: async (options) => { calls.launch.push(options); return {}; },
     detectInstallations: async () => { calls.detects += 1; return detectedInstallations; },
     selectInstallationId, validateCdpPort, validateExecutable: async (value) => value, runLaunchAndInjectFlow,
@@ -189,7 +200,7 @@ test("native caption uses trusted theme-only IPC without persisting or starting 
   assert.equal(f.calls.windows[0].options.titleBarOverlay.height, 40);
   const writes = f.calls.writes.length;
   assert.equal((await f.ipc("cwb:set-workbench-theme", "light")).supported, true);
-  assert.equal(f.calls.overlays.at(-1).color, "#edf3fa");
+  assert.equal(f.calls.overlays.at(-1).color, "#f4f5f7");
   await assert.rejects(f.ipc("cwb:set-workbench-theme", "red"), /theme/i);
   await assert.rejects(f.ipc("cwb:set-workbench-theme", "dark", "http://127.0.0.1:12345/"), /IPC/);
   assert.equal(f.calls.overlays.length, 1);
@@ -498,4 +509,86 @@ test("failed apply diagnostics verify ownership again and save only probe metada
   assert.deepEqual(saved.targets[0].probe, { hasRoot: true, semanticHookCount: 4, composerHookCount: 2, descendantCount: 200 });
   assert.deepEqual(saved.targets[0].diagnostics.viewport, { width: 1040, height: 700 });
   assert.equal(path.dirname(records[0].filePath), fixture.acceptanceContext.logsRoot);
+});
+
+const takeoverOrdinary = { processId: 2001, commandLine: 'ChatGPT.exe', mainWindowHandle: 99 };
+test('restore cancels an in-flight takeover before launch and drains it before restoring', async context => {
+  let ready = true, releaseClose;
+  const f = await harness(context, { acceptance: false, endpointReady: () => ready,
+    takeoverProcesses: [takeoverOrdinary], duringClose: () => new Promise(r => { releaseClose = r; }) });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 });
+  ready = false;
+  const takeover = f.calls.watchers[0].options.onTakeover({ ordinary: [takeoverOrdinary] });
+  await turn(); assert.equal(f.calls.close.length, 1);
+  const restoring = f.ipc('cwb:restore', { installationId: 'local', port: 19335 });
+  await turn(); assert.equal(f.calls.watchers[0].stopped, true);
+  assert.equal(f.calls.actions.filter(a => a.action === 'restore').length, 0);
+  releaseClose(); await takeover; assert.equal((await restoring).ok, true);
+  assert.equal(f.calls.launch.length, 0);
+  assert.equal(f.calls.actions.filter(a => a.action === 'restore').length, 1);
+});
+test('quit cancels takeover and waits for an in-flight close without relaunching Codex', async context => {
+  let ready = true, releaseClose;
+  const f = await harness(context, { acceptance: false, endpointReady: () => ready,
+    takeoverProcesses: [takeoverOrdinary], duringClose: () => new Promise(r => { releaseClose = r; }) });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 }); ready = false;
+  const takeover = f.calls.watchers[0].options.onTakeover({ ordinary: [takeoverOrdinary] });
+  await turn(); f.app.quit(); await turn(); assert.equal(f.calls.trayDestroyed, 0);
+  releaseClose(); await takeover; await turn(); await turn();
+  assert.equal(f.calls.launch.length, 0); assert.equal(f.calls.trayDestroyed, 1);
+});
+test('canceled apply to another installation stops the old watcher and ignores late snapshots', async context => {
+  let ready = true;
+  const f = await harness(context, { acceptance: false, endpointReady: () => ready, messageBoxResponse: 1 });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 }); ready = false;
+  const old = f.calls.watchers[0];
+  const result = await f.ipc('cwb:apply-codex', { installationId: 'store', port: 19336 });
+  assert.equal(result.canceled, true); assert.equal(old.stopped, true);
+  f.calls.monitors[0].options.onSnapshot({ sequence: 99, capturedAt: Date.now(), processes: [takeoverOrdinary] });
+  assert.equal(await old.options.listProcesses(), null);
+  await old.options.onTakeover({ ordinary: [takeoverOrdinary] });
+  assert.equal(f.calls.close.length, 0); assert.equal(f.calls.launch.length, 0);
+});
+test('monitor failure stops takeover and discards its cached snapshot', async context => {
+  const f = await harness(context, { acceptance: false });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 });
+  const monitor = f.calls.monitors[0], watcher = f.calls.watchers[0];
+  monitor.options.onSnapshot({ sequence: 1, capturedAt: Date.now(), processes: [takeoverOrdinary] });
+  monitor.options.onError(new Error('monitor exited'));
+  assert.equal(monitor.stopped, true); assert.equal(watcher.stopped, true);
+  assert.equal(await watcher.options.listProcesses(), null);
+  await watcher.options.onTakeover({ ordinary: [takeoverOrdinary] });
+  assert.equal(f.calls.close.length, 0);
+});
+
+test('same port as string or omitted does not disable the active takeover monitor', async context => {
+  const f = await harness(context, { acceptance: false });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 });
+  assert.equal((await f.ipc('cwb:open-control-panel', { port: '19335' })).ok, true);
+  assert.equal((await f.ipc('cwb:open-control-panel', {})).ok, true);
+  assert.equal(f.calls.watchers[0].stopped, false);
+});
+test('busy apply and restore do not disable monitoring when a different operation owns the lock', async context => {
+  let block = false, releaseWrite;
+  const f = await harness(context, { acceptance: false,
+    duringWrite: () => block ? new Promise(r => { releaseWrite = r; }) : undefined });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 });
+  block = true; const panel = f.ipc('cwb:open-control-panel', { port: 19335 }); await turn();
+  for (const channel of ['cwb:apply-codex', 'cwb:restore']) {
+    const result = await f.ipc(channel, { installationId: 'local', port: 19335 });
+    assert.equal(result.ok, false); assert.match(result.message, /载入壁纸面板/);
+    assert.equal(f.calls.watchers[0].stopped, false);
+  }
+  block = false; releaseWrite(); assert.equal((await panel).ok, true);
+});
+test('opening a different panel port cancels and drains an active takeover', async context => {
+  let ready = true, releaseClose;
+  const f = await harness(context, { acceptance: false, endpointReady: () => ready,
+    takeoverProcesses: [takeoverOrdinary], duringClose: () => new Promise(r => { releaseClose = r; }) });
+  await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 }); ready = false;
+  const takeover = f.calls.watchers[0].options.onTakeover({ ordinary: [takeoverOrdinary] }); await turn();
+  const panel = f.ipc('cwb:open-control-panel', { port: '19336' }); await turn();
+  assert.equal(f.calls.watchers[0].stopped, true); assert.equal(f.calls.launch.length, 0);
+  releaseClose(); await takeover; assert.equal((await panel).ok, true);
+  assert.equal(f.calls.launch.length, 0); assert.equal(f.calls.starts.at(-1), 19336);
 });

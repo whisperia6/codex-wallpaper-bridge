@@ -119,4 +119,6 @@ test("composer input body is excluded from compatibility clearing", () => {
 
   assert.doesNotMatch(script, /\[data-composer-surface-variant\] > \[data-composer-body\]/);
   assert.match(script, /\[data-composer-body\]/);
+  assert.match(script, /div:has\(> \[data-thread-scroll-footer\]\)/);
+  assert.match(script, /data-thread-composer-backdrop/);
 });

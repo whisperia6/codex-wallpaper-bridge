@@ -1,14 +1,39 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { tryRunWinHelper } from "./win-helper.mjs";
 
 const execFileAsync = promisify(execFile);
 const STORE_PACKAGE_NAME = "OpenAI.Codex";
-const LOCAL_INSTALLATION_SCRIPT = String.raw`
+const STATIC_DISCOVERY_TTL_MS = 60_000;
+let staticDiscoveryCache = null;
+const STATIC_INSTALLATION_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
+$storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | ForEach-Object {
+  $appId = 'App'
+  try {
+    $m = Join-Path $_.InstallLocation 'AppxManifest.xml'
+    if (Test-Path -LiteralPath $m -PathType Leaf) {
+      [xml]$xml = Get-Content -LiteralPath $m -Raw
+      $node = @($xml.Package.Applications.Application | Where-Object { $_.Executable -match '(?i)(^|[\\/])ChatGPT\.exe$' }) | Select-Object -First 1
+      if ($node -and $node.Id) { $appId = [string]$node.Id }
+    }
+  } catch {}
+  [pscustomobject]@{
+    Name = $_.Name
+    Version = $_.Version
+    InstallLocation = $_.InstallLocation
+    PackageFamilyName = $_.PackageFamilyName
+    ApplicationId = $appId
+    SignatureKind = $_.SignatureKind
+  }
+})
+
 $candidatePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
 function Add-CodexCandidate([string]$candidatePath) {
@@ -67,7 +92,7 @@ if ($shell) {
   }
 }
 
-@($candidatePaths | ForEach-Object {
+$localInstallations = @($candidatePaths | ForEach-Object {
   $item = Get-Item -LiteralPath $_
   $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
   if ($identity -match '(?i)\bCodex\b') {
@@ -76,7 +101,12 @@ if ($shell) {
       ProductVersion = $item.VersionInfo.ProductVersion
     }
   }
-}) | ConvertTo-Json -Compress
+})
+
+[pscustomobject]@{
+  storePackages = $storePackages
+  localInstallations = $localInstallations
+} | ConvertTo-Json -Depth 4 -Compress
 `;
 
 function asArray(value) {
@@ -96,6 +126,14 @@ function localInstallationId(executablePath) {
 function storeExecutablePath(storePackage) {
   if (!storePackage?.InstallLocation) return null;
   return path.win32.join(String(storePackage.InstallLocation), "app", "ChatGPT.exe");
+}
+
+function storeAppUserModelId(storePackage) {
+  const familyName = String(storePackage?.PackageFamilyName || "").trim();
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(familyName)) return null;
+  const applicationId = String(storePackage?.ApplicationId || "App").trim();
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(applicationId)) return null;
+  return `${familyName}!${applicationId}`;
 }
 
 export function parsePowerShellJson(output) {
@@ -130,12 +168,14 @@ export function normalizeInstallations({
   for (const storePackage of asArray(storePackages)) {
     const executablePath = storeExecutablePath(storePackage);
     if (!executablePath) continue;
+    const appUserModelId = storeAppUserModelId(storePackage);
     installations.set(normalizedPathKey(executablePath), {
       id: `store:${String(storePackage.Name || STORE_PACKAGE_NAME).toLowerCase()}`,
       kind: "store",
       label: "Microsoft Store 版",
       path: executablePath,
       version: String(storePackage.Version || "未知"),
+      ...(appUserModelId ? { appUserModelId } : {}),
       isRunning: false,
       processIds: [],
     });
@@ -223,18 +263,70 @@ export async function validateExecutable(executablePath) {
   return resolvedPath;
 }
 
-export async function detectInstallations({ manualExecutables = [] } = {}) {
+export function clearInstallationDiscoveryCache() {
+  staticDiscoveryCache = null;
+}
+
+function isStaticDiscoveryCacheFresh() {
+  if (!staticDiscoveryCache) return false;
+  if (Date.now() - staticDiscoveryCache.at >= STATIC_DISCOVERY_TTL_MS) return false;
+  for (const pkg of staticDiscoveryCache.storePackages) {
+    const exePath = storeExecutablePath(pkg);
+    if (exePath && !existsSync(exePath)) return false;
+  }
+  for (const local of staticDiscoveryCache.localInstallations) {
+    const exePath = String(local?.ExecutablePath || "").trim();
+    if (exePath && !existsSync(exePath)) return false;
+  }
+  return true;
+}
+
+async function discoverStaticInstallations({ forceRefresh = false } = {}) {
+  if (!forceRefresh && isStaticDiscoveryCacheFresh()) {
+    return staticDiscoveryCache;
+  }
+  const { stdout } = await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", STATIC_INSTALLATION_SCRIPT],
+    {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 12_000,
+      windowsHide: true,
+    },
+  );
+  const text = String(stdout || "").replace(/^\uFEFF/, "").trim();
+  const parsed = text ? JSON.parse(text) : {};
+  const result = {
+    at: Date.now(),
+    storePackages: asArray(parsed?.storePackages),
+    localInstallations: asArray(parsed?.localInstallations),
+  };
+  staticDiscoveryCache = result;
+  return result;
+}
+
+async function discoverRunningProcesses() {
+  const helperResult = await tryRunWinHelper("list-running-codex", {
+    maxBuffer: 4 * 1024 * 1024,
+    timeout: 8_000,
+  });
+  if (helperResult) {
+    return parsePowerShellJson(helperResult.stdout);
+  }
   const outputSetup = "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);";
-  const storeScript = `${outputSetup} @(Get-AppxPackage -Name '${STORE_PACKAGE_NAME}' -ErrorAction SilentlyContinue | Select-Object Name,Version,InstallLocation,PackageFamilyName,SignatureKind) | ConvertTo-Json -Compress`;
   const processScript = `${outputSetup} @(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object { $item=Get-Item -LiteralPath $_.ExecutablePath -ErrorAction SilentlyContinue; [pscustomobject]@{ ProcessId=$_.ProcessId; ExecutablePath=$_.ExecutablePath; ProductVersion=$item.VersionInfo.ProductVersion } }) | ConvertTo-Json -Compress`;
-  const [storePackages, localInstallations, runningProcesses] = await Promise.all([
-    runPowerShellJson(storeScript).catch(() => []),
-    runPowerShellJson(LOCAL_INSTALLATION_SCRIPT).catch(() => []),
-    runPowerShellJson(processScript).catch(() => []),
+  return runPowerShellJson(processScript);
+}
+
+export async function detectInstallations({ manualExecutables = [], forceRefresh = false } = {}) {
+  const [staticResult, runningProcesses] = await Promise.all([
+    discoverStaticInstallations({ forceRefresh }).catch(() => ({ storePackages: [], localInstallations: [] })),
+    discoverRunningProcesses().catch(() => []),
   ]);
   return normalizeInstallations({
-    storePackages,
-    localInstallations,
+    storePackages: staticResult.storePackages,
+    localInstallations: staticResult.localInstallations,
     runningProcesses,
     manualExecutables,
   });

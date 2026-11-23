@@ -21,10 +21,10 @@ test("manual package paths stay inside the prototype output root", () => {
 
 test("Windows package names are stable and versioned", () => {
   assert.deepEqual(windowsArtifactNames("CodexWallpaperDesktop", "0.1.0"), {
-    builderArtifactName: "CodexWallpaperDesktop-0.1.0.exe",
-    portableName: "CodexWallpaperDesktop.exe",
+    builderArtifactName: "CodexWallpaperDesktop-0.1.0-Setup.exe",
+    installerName: "CodexWallpaperDesktop-0.1.0-Setup.exe",
     releaseDirectoryName: "release-0.1.0",
-    scratchDirectoryName: ".portable-build",
+    scratchDirectoryName: ".nsis-build",
     unpackedDirectoryName: "win-unpacked",
   });
 });

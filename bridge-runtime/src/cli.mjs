@@ -187,10 +187,12 @@ async function main() {
     if (!injector) return { ok: true, status: "preview-only" };
     const injection = await currentInjection();
     const result = await injector.update(injection);
-    if (result.sessions === 0 || result.failed > 0) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
+    if (result.failed > 0 || (result.sessions === 0 && !(result.deferred > 0))) {
+      throw new Error("一个或多个 Codex renderer 未能完成注入验证");
+    }
     return {
       ok: true,
-      status: `updated:${result.sessions}`,
+      status: result.sessions > 0 ? `updated:${result.sessions}` : `deferred:${result.deferred}`,
       deferred: result.deferred || 0,
       metrics: injection.metrics,
       timings: result.timings
@@ -223,7 +225,7 @@ async function main() {
         const result = await injector.start(injection);
         await injector.updatePower((await media.snapshot()).power);
         if (result.failed > 0) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
-        if (result.sessions === 0) {
+        if (result.sessions === 0 && !(result.deferred > 0)) {
           throw new Error(`没有在 127.0.0.1:${options.cdpPort} 找到 Codex renderer；可先使用预览页`);
         }
         return { injector, started: true, deferred: result.deferred || 0, metrics: injection.metrics, timings: result.timings };

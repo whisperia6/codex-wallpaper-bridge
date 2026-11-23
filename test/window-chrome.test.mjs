@@ -14,11 +14,11 @@ test("Windows hides only the native title text and keeps native caption controls
   assert.ok(chrome, "native window chrome module must exist");
   const options = chrome.desktopWindowChromeOptions("win32");
   assert.equal(options.titleBarStyle, "hidden");
-  assert.deepEqual(options.titleBarOverlay, { color: "#0b0d0b", symbolColor: "#f4f5f1", height: 40 });
+  assert.deepEqual(options.titleBarOverlay, { color: "#0c0d10", symbolColor: "#f3f4f6", height: 40 });
   assert.equal(Object.hasOwn(options, "frame"), false);
   assert.equal(Object.hasOwn(options, "transparent"), false);
   options.titleBarOverlay.color = "red";
-  assert.equal(chrome.desktopWindowChromeOptions("win32").titleBarOverlay.color, "#0b0d0b");
+  assert.equal(chrome.desktopWindowChromeOptions("win32").titleBarOverlay.color, "#0c0d10");
   for (const platform of ["darwin", "linux"]) assert.deepEqual(chrome.desktopWindowChromeOptions(platform), {});
 });
 
@@ -27,7 +27,7 @@ test("native caption theme uses a fixed palette and never accepts arbitrary styl
   const overlays = [], backgrounds = [];
   const win = { isDestroyed: () => false, setTitleBarOverlay: v => overlays.push(v), setBackgroundColor: v => backgrounds.push(v) };
   for (const theme of ["light", "dark", "light"]) assert.equal(chrome.setWindowChromeTheme(win, theme, "win32").supported, true);
-  assert.deepEqual(overlays.map(v => v.color), ["#edf3fa", "#0b0d0b", "#edf3fa"]);
+  assert.deepEqual(overlays.map(v => v.color), ["#f4f5f7", "#0c0d10", "#f4f5f7"]);
   assert.deepEqual(backgrounds, overlays.map(v => v.color));
   for (const value of [null, undefined, {}, [], "__proto__", "constructor", "red", "url(script)"]) {
     assert.throws(() => chrome.setWindowChromeTheme(win, value, "win32"), /theme/i);

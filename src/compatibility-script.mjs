@@ -7,6 +7,7 @@ const semanticSelector = `
   body,
   body > #root,
   [data-app-shell-root],
+  [data-app-shell-frame],
   [data-app-shell-window],
   [data-app-shell-main-surface],
   [data-app-shell-main-content],
@@ -51,6 +52,11 @@ const composerSpacerFadeSelector = `
   .thread-scroll-container [class~="pointer-events-none"][class~="sticky"][class~="bottom-0"] > div[class~="pointer-events-none"][class~="absolute"][class~="bg-gradient-to-t"][class~="from-surface"]
 `;
 const threadFooterSelector = `.thread-scroll-container > [data-thread-scroll-footer]`;
+const threadFooterBackdropSelector = `
+  div:has(> [data-thread-scroll-footer]),
+  div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
+  div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop])
+`;
 const nestedSurfaceSelector = `
   [data-app-shell-header-edge-scroll="true"] :is([data-app-shell-header-toolbar], [class*="_Toolbar_"]) > :not([data-app-shell-thread-content-overlap]),
   [data-app-shell-page-header],
@@ -59,6 +65,7 @@ const nestedSurfaceSelector = `
   :is(${inlinePageHeaderSelector}) > [class*="_content_"] > [class*="_headerRow_"],
   ${composerSpacerFadeSelector},
   ${threadFooterSelector},
+  ${threadFooterBackdropSelector},
   :is(${threadFooterSelector}) > div[class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"]:is([class~="bg-surface"], [class~="bg-surface-secondary"])
 `;
 const protectedSurfaceSelector = `
@@ -202,9 +209,14 @@ export function buildCompatibilityScript({ adaptive = true } = {}) {
         background-color: transparent !important;
         background-image: none !important;
       }
+      html[${ROOT_ATTRIBUTE}="active"] [data-app-shell-page-surface] {
+        --app-shell-content-fade: none !important;
+        --app-shell-content-fade-opacity: 0 !important;
+      }
       html[${ROOT_ATTRIBUTE}="active"] :is(
         [data-app-shell-main-content-top-fade],
         [class*="_MainContentTopFade_"],
+        [class*="app-shell-content-fade"],
         [data-above-composer-portal] [class*="gradient" i],
         [class*="_BottomFade_"],
         [class*="_TopFade_"]
@@ -212,14 +224,18 @@ export function buildCompatibilityScript({ adaptive = true } = {}) {
       html[${ROOT_ATTRIBUTE}="active"] :is(
         [data-app-shell-main-content-top-fade],
         [class*="_MainContentTopFade_"],
+        [class*="app-shell-content-fade"],
         [class*="_BottomFade_"],
-        [class*="_TopFade_"]
+        [class*="_TopFade_"],
+        :is([data-thread-scroll-footer], ${threadFooterBackdropSelector}):not(:is(${protectedSurfaceSelector})):not(:is(${protectedSurfaceSelector}) *)
       )::before,
       html[${ROOT_ATTRIBUTE}="active"] :is(
         [data-app-shell-main-content-top-fade],
         [class*="_MainContentTopFade_"],
+        [class*="app-shell-content-fade"],
         [class*="_BottomFade_"],
-        [class*="_TopFade_"]
+        [class*="_TopFade_"],
+        :is([data-thread-scroll-footer], ${threadFooterBackdropSelector}):not(:is(${protectedSurfaceSelector})):not(:is(${protectedSurfaceSelector}) *)
       )::after {
         background: transparent !important;
         background-color: transparent !important;

@@ -3,7 +3,7 @@ import path from "node:path";
 // Exact compiled/native/vendor allowlist. No source-tree wildcard and no WE assets.
 export const COMPILED_BRIDGE_UNPACKED_FILES = Object.freeze([
   "dist/bridge-utility-entry.mjs",
-  ...["windows-media.ps1", "windows-media.dll"].map(file => `dist/bridge-runtime/native/${file}`),
+  ...["windows-media.ps1", "windows-media.dll", "cwb-win-helper.exe"].map(file => `dist/bridge-runtime/native/${file}`),
   ...["app.js", "author-properties-panel.js", "cwb-scene-bridge.js", "cwb-verifier-probe.js", "cwb-web-bridge.js",
     "electron-host.js", "index.html", "media-switch.js", "workbench-scene-preview.js", "workbench-theme.js", "styles.css"].map((file) => `dist/bridge-runtime/public/${file}`),
   ...["cli.mjs", "desktop-engine-host.mjs", "engine-provider-rpc.mjs", "engine-renderer-owner.mjs", "engine-vp8-preload.cjs",
@@ -25,10 +25,10 @@ export function assertChildPath(parentPath, targetPath) {
 
 export function windowsArtifactNames(productName, version) {
   return {
-    builderArtifactName: `${productName}-${version}.exe`,
-    portableName: `${productName}.exe`,
+    builderArtifactName: `${productName}-${version}-Setup.exe`,
+    installerName: `${productName}-${version}-Setup.exe`,
     releaseDirectoryName: `release-${version}`,
-    scratchDirectoryName: ".portable-build",
+    scratchDirectoryName: ".nsis-build",
     unpackedDirectoryName: "win-unpacked",
   };
 }

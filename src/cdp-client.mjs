@@ -280,9 +280,10 @@ export async function isCdpEndpointReady(port) {
 
 export async function waitForCodexTarget(port, {
   timeoutMs = 30_000,
-  intervalMs = 500,
+  intervalMs = 150,
   inspectTargets = inspectCodexTargets,
   delayFn = delay,
+  signal,
 } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
     throw new Error("等待 Codex renderer 的超时时间无效");
@@ -293,12 +294,15 @@ export async function waitForCodexTarget(port, {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   do {
+    signal?.throwIfAborted();
     try {
       const targets = await inspectTargets(port);
+      signal?.throwIfAborted();
       if (targets.length > 0) return targets;
     } catch (error) {
       lastError = error;
     }
+    signal?.throwIfAborted();
     await delayFn(intervalMs);
   } while (Date.now() < deadline);
   const suffix = lastError?.message ? `：${lastError.message}` : "";

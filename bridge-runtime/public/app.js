@@ -1421,7 +1421,17 @@
       const preview = project.scenePreviewAvailable ? await showProjectMedia(project, { force: true }) : null;
       if (preview && !preview.ok) throw new Error("工作台 Scene 预览重试未就绪，已保留原画面。");
       // A local preview retry must not implicitly attach to an unrelated Codex.
-      const payload = state.injected ? await invokeAction("retry-engine", { projectId: project.id }) : null;
+      let payload = null;
+      if (state.injected) {
+        try { payload = await invokeAction("retry-engine", { projectId: project.id }); }
+        catch (error) {
+          if (error.message === "gpu_source_not_failed") {
+            toast("工作台场景已重新加载；Codex 当前场景未发生故障，无需重试");
+            return;
+          }
+          throw error;
+        }
+      }
       toast(responseMessage(payload, "工作台场景已重新加载；Codex 宿主状态单独验收"));
     } catch (error) { showError("场景重试未完成", error.message); }
     finally { setBusy(elements.engineRetryButton, false); }
@@ -1659,11 +1669,105 @@
       previewSwitcher.update();
       playVideoIfNeeded();
     });
+    window.addEventListener("cwb-desktop-injection-change", (event) => {
+      state.injected = event.detail?.injected === true;
+      const project = currentProject();
+      setConnection(
+        "connected",
+        state.injected ? "已注入 Codex" : "已恢复官方外观",
+        state.injected && project ? `${project.title} · 效果实时同步` : `${state.inventory.length} 张壁纸可用`,
+      );
+    });
     window.addEventListener("pagehide", () => {
       videoTasks.closed = true;
       systemMediaClosed = true;
       window.clearTimeout(scenePreloadTimer); forgetWorkbenchPreload(); previewSwitcher.close();
     });
+
+    // Progressive UI enhancements: batch management toggle, 5-tab settings inspector,
+    // double-click slider reset, and optional Codex readability overlay preview.
+    const libraryAside = $(".library");
+    const batchManageToggle = $("#batchManageToggle");
+    if (libraryAside && batchManageToggle) {
+      batchManageToggle.addEventListener("click", () => {
+        const next = !libraryAside.classList.contains("is-managing");
+        libraryAside.classList.toggle("is-managing", next);
+        batchManageToggle.setAttribute("aria-pressed", String(next));
+      });
+    }
+
+    const previewModeSwitch = $("#previewModeSwitch");
+    const codexOverlayPreview = $("#codexOverlayPreview");
+    if (previewModeSwitch && codexOverlayPreview) {
+      previewModeSwitch.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-preview-mode]");
+        if (!button) return;
+        const mode = button.dataset.previewMode;
+        codexOverlayPreview.hidden = mode !== "codex";
+        for (const item of previewModeSwitch.querySelectorAll("[data-preview-mode]")) {
+          item.setAttribute("aria-pressed", String(item === button));
+        }
+      });
+    }
+
+    const settingsPanel = $("#settingsPanel");
+    const settingsTabs = $("#settingsTabs");
+    const authorPanelNode = $("#authorPropertiesPanel");
+    const authorEmptyState = $("#authorEmptyState");
+    const authorTabDot = $("#authorTabDot");
+    if (settingsPanel && settingsTabs) {
+      const setActiveSettingsTab = (tabName, { scroll = true } = {}) => {
+        if (!tabName) return;
+        settingsPanel.dataset.activeTab = tabName;
+        for (const button of settingsTabs.querySelectorAll("[data-settings-tab-trigger]")) {
+          button.setAttribute("aria-selected", String(button.dataset.settingsTabTrigger === tabName));
+        }
+        for (const details of settingsPanel.querySelectorAll(`details[data-settings-tab="${tabName}"]`)) {
+          if (!details.hidden) details.open = true;
+        }
+        if (tabName === "video") void pollVideoTasks(true);
+        if (scroll) settingsPanel.scrollTop = 0;
+      };
+      const syncAuthorTabIndicator = () => {
+        const hasAuthor = Boolean(authorPanelNode && !authorPanelNode.hidden);
+        if (authorTabDot) authorTabDot.hidden = !hasAuthor;
+        if (authorEmptyState) authorEmptyState.hidden = hasAuthor;
+      };
+      settingsPanel.classList.add("has-tabs");
+      setActiveSettingsTab("appearance", { scroll: false });
+      syncAuthorTabIndicator();
+      settingsTabs.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-settings-tab-trigger]");
+        if (button) setActiveSettingsTab(button.dataset.settingsTabTrigger);
+      });
+      const revealControlTab = (event) => {
+        const owner = event.target instanceof Element ? event.target.closest("[data-settings-tab]") : null;
+        const tabName = owner?.dataset.settingsTab;
+        if (tabName && settingsPanel.dataset.activeTab !== tabName) {
+          setActiveSettingsTab(tabName, { scroll: false });
+        }
+      };
+      settingsPanel.addEventListener("input", revealControlTab, true);
+      settingsPanel.addEventListener("change", revealControlTab, true);
+      settingsPanel.addEventListener("focusin", revealControlTab, true);
+      if (authorPanelNode && typeof MutationObserver === "function") {
+        new MutationObserver(syncAuthorTabIndicator).observe(authorPanelNode, { attributes: true, attributeFilter: ["hidden"] });
+      }
+    }
+
+    for (const [input, key] of [
+      [elements.brightnessRange, "brightness"],
+      [elements.darknessRange, "darkness"],
+      [elements.blurRange, "blur"],
+      [elements.saturationRange, "saturation"],
+    ]) {
+      input?.addEventListener("dblclick", () => {
+        const fallback = state.defaultEffects[key] ?? DEFAULT_EFFECTS[key];
+        if (fallback === undefined) return;
+        input.value = String(fallback);
+        readEffectsFromControls();
+      });
+    }
   }
 
   elements.backgroundPlaceholder.classList.add("is-visible");

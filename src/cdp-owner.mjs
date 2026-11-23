@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { validateCdpPort } from "./installations.mjs";
 import { validateProcessCreation } from "./process-creation.mjs";
+import { tryRunWinHelper } from "./win-helper.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -279,30 +280,38 @@ export async function verifyCdpEndpointOwner({
   installation,
   port,
   expectedProcess,
-  processRunner = execFileAsync,
+  processRunner,
   platform = process.platform,
 }) {
   if (platform !== "win32") throw new Error("CDP 端口所有者核验仅支持 Windows");
   const normalizedPort = validateCdpPort(port);
   const expectedPath = normalizeExecutablePath(installation?.path);
   const expectedIdentity = validateExpectedProcess(expectedProcess);
+  const execOptions = {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024,
+    timeout: 12_000,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      CWB_CDP_OWNER_PORT: String(normalizedPort),
+      CWB_CDP_EXPECTED_PROCESS: expectedIdentity ? JSON.stringify(expectedIdentity) : "",
+    },
+  };
   let stdout;
   try {
-    ({ stdout } = await processRunner(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", CDP_OWNER_SCRIPT],
-      {
-        encoding: "utf8",
-        maxBuffer: 256 * 1024,
-        timeout: 12_000,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          CWB_CDP_OWNER_PORT: String(normalizedPort),
-          CWB_CDP_EXPECTED_PROCESS: expectedIdentity ? JSON.stringify(expectedIdentity) : "",
-        },
-      },
-    ));
+    const helperResult = processRunner === undefined
+      ? await tryRunWinHelper("verify-cdp-owner", execOptions, platform)
+      : null;
+    if (helperResult) {
+      ({ stdout } = helperResult);
+    } else {
+      ({ stdout } = await (processRunner ?? execFileAsync)(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", CDP_OWNER_SCRIPT],
+        execOptions,
+      ));
+    }
   } catch (cause) {
     // execFile errors may contain the script, stderr, or process metadata.
     if (cause?.code === "ENOENT") throw new Error("无法核验 CDP 端口所有者：PowerShell 不可用");

@@ -15,6 +15,20 @@ const currentTarget = {
   webSocketDebuggerUrl: "ws://127.0.0.1/current",
 };
 
+test('renderer wait stops on cancellation, including cancellation during inspection', async () => {
+  const controller = new AbortController(); let queries = 0;
+  await assert.rejects(waitForCodexTarget(9335, {
+    signal: controller.signal,
+    inspectTargets: async () => { queries++; controller.abort(); return [currentTarget]; },
+    delayFn: async () => { throw Error('must not delay'); },
+  }), { name: 'AbortError' });
+  assert.equal(queries, 1);
+  await assert.rejects(waitForCodexTarget(9335, {
+    signal: controller.signal, inspectTargets: async () => { queries++; return []; },
+  }), { name: 'AbortError' });
+  assert.equal(queries, 1);
+});
+
 test("auxiliary avatar, pet, and overlay pages are excluded", () => {
   assert.equal(isAuxiliaryTarget({ ...currentTarget, url: "app://-/index.html?initialRoute=pet" }), true);
   assert.equal(isAuxiliaryTarget({ ...currentTarget, url: "app://-/index.html?initialRoute=overlay" }), true);

@@ -1,19 +1,8 @@
 # Codex Wallpaper Desktop
 
-一个给 Codex 桌面版添加壁纸的 Windows 工具。可以用自己的图片、视频，也可以读取本机的 Wallpaper Engine 项目。选壁纸、看预览、调整画面和切换 Codex 版本，都在同一个工作台里完成。
+一个面向 Windows 的 **Codex 桌面版动态壁纸工作台**。支持导入本地图片、视频，或直接读取本机已有的 Wallpaper Engine 壁纸库（图片 / 视频 / Web / Scene 场景），在同一界面完成预览、调参、轮播与一键注入。
 
-目前面向 Microsoft Store 版和本地 EXE 版 Codex。程序不修改 Codex 的安装文件，不想用时可以恢复原来的外观。这是一个非官方项目，与 OpenAI 和 Wallpaper Engine 官方无关。
-
-**当前版本：`1.1.0`（正式版）。** 下文介绍本版提供的功能；旧版 EXE 不代表已包含全部更新。完整双版本兼容性和长期稳定性仍在验证，具体边界见[目前的限制](#目前的限制)。
-
-### 1.1.0 更新摘要
-
-- 修复首次选择视频时只切换主题、壁纸却未成功加载的问题；应用结果等待实际媒体就绪。
-- 改进 Codex 工具栏、空间/插件页面和聊天输入区的透明兼容，修复长聊天底部再次出现黑底。
-- 修复系统音乐选项被轮询刷回关闭，以及复用当前壁纸时重复保存/应用报错。
-- 工作台改为随深浅主题变化的融合顶栏，保留 Windows 原生窗口按钮，并显示本地服务连接状态。
-
-完整改动、验证与已知限制见 [1.1.0 版本说明](docs/RELEASE_1.1.0.md)。
+程序仅通过本机 Chrome DevTools Protocol（CDP）在运行时挂载背景层，**不修改 Codex 安装文件**，随时可一键恢复官方原貌。本项目为非官方工具，与 OpenAI 及 Wallpaper Engine 官方无关。
 
 ## 界面预览
 
@@ -21,100 +10,59 @@
 
 ![Codex 壁纸效果](docs/images/效果图.png)
 
-截图用于展示整体界面，近期新增的设置项以实际工作台为准。
+> 截图展示整体布局，最新新增选项以实际工作台为准。
 
-## 适合用在哪里
+---
 
-- 日常使用 Codex 桌面版，想把默认背景换成图片、视频或动态场景。
-- 已经有 Wallpaper Engine 本地壁纸库，想在 Codex 窗口里使用其中的资源。
-- 想整理自己的背景素材，按播放列表轮换，而不是每次手动换图。
-- 希望调整壁纸的位置、亮度、音量和动态效果，让背景与聊天、写代码的界面更合适。
+## 核心特性
 
-它只改变 **Codex 窗口内的背景**，不负责 Windows 桌面壁纸，也不适用于网页版 ChatGPT、命令行 Codex 或其他应用。只使用自己的图片和视频时，不需要安装 Wallpaper Engine。
+### 1. 多类型壁纸与 GPU 实时预览
 
-## 功能
-
-### 壁纸类型与实时预览
-
-| 类型 | 当前功能 |
+| 类型 | 支持能力 |
 | --- | --- |
-| 图片 | 导入 JPG、PNG，或读取本地壁纸项目中的图片；预览、取景、调整画面后应用到 Codex |
-| 视频 | 导入 MP4，或读取本地视频壁纸；按需读取文件，提供播放、暂停、倍速和声音设置 |
-| Web 壁纸 | 加载本地网页项目，接入作者属性、音频和媒体回调；具体效果取决于壁纸使用的接口 |
-| Scene 场景 | 通过 WebWallGL 渲染兼容的 Wallpaper Engine 场景，使用 GPU 实时预览和显示，而不只是展示封面 |
+| **图片** | 导入 JPG / PNG，或读取本地壁纸项目；实时取景与画面调校 |
+| **视频** | 导入 MP4 或读取本地视频壁纸；本机 HTTP Range 流式按需读取，支持倍速、暂停与音量控制 |
+| **Web 壁纸** | 加载本地网页项目，支持作者属性、系统频谱、媒体信息及扩展控制回调 |
+| **Scene 场景** | 基于 WebWallGL 的 GPU 实时渲染，支持作者属性、频谱响应及失败自动回退与手动重试 |
 
-Scene/Web 渲染失败时会标明状态，并提供预览图回退、静态回退图片和手动重试。**看到预览图不代表场景已经在动态运行**；项目也不承诺兼容所有 Wallpaper Engine 特效和脚本。
+### 2. 画面调节、过场与播放列表
+- **画面调校**：适配模式（填充 / 适应 / 拉伸）、焦距位置、缩放、水平镜像；亮度、暗化、背景模糊（含防边缘黑边过扫描）、饱和度、对比度与不透明度——图片、视频、Web 与 Scene 场景均生效。
+- **轮播与过场**：多播放列表、顺序 / 随机轮播、导入 Wallpaper Engine 播放列表 JSON；支持硬切、淡化、推移、擦除、光圈、缩放、条带 7 种过场动画，以及“减少动态效果”。
+- **智能暂停**：窗口隐藏或电池供电时自动暂停，与手动暂停状态互不覆盖。
+- **壁纸库管理**：按类型、关键词、分级（Everyone / PG13 / Mature / 未分级）筛选；支持批量隐藏与恢复、导入去重（单文件上限 20 GiB）、资源库无损迁移；Wallpaper Engine 原件始终只读。
 
-### 壁纸库与素材管理
+### 3. WE 作者属性与系统音乐联动
+- **WE 作者属性**：自动解析 Scene / Web 壁纸的颜色、开关、滑块、下拉、文本、文件与目录配置，按壁纸独立保存并支持一键重置。
+- **系统音乐联动（默认全部关闭）**：按需开启系统输出频谱（不经过麦克风）、正在播放信息（曲名 / 歌手 / 封面 / 进度）、本地 LRC 歌词与可选 LRCLIB 在线歌词、以及播放器反向控制。
 
-- 扫描本机 Wallpaper Engine 项目，按类型、关键词查找壁纸。
-- 导入自己的 JPG、PNG、MP4，显示进度，可取消；相同内容不会重复加入。
-- 单张或批量隐藏，不删除源文件；可以查看已隐藏项目并恢复。
-- 按 Everyone、PG13、Mature、未分级筛选，规则同时用于列表、选择和轮播。
-- 删除本程序导入的素材时，只处理索引和当前资源目录中的受管副本，不删除 Wallpaper Engine 原件。
-- 更换资源库位置时，先复制和校验，再切换目录；旧目录保留，方便回退。
+### 4. 视频优化与缓存管理
+- 支持 MP4 Faststart 虚拟前置，不改写原始视频文件。
+- 可选接入本机 `ffmpeg` / `ffprobe`，提供帧率上限、编码器选择、后台转码与取消/重试；转码期间继续播放原片。
+- 独立缓存目录管理，支持带校验的跨盘迁移。
 
-导入单文件上限为 20 GiB，资源索引最多 10,000 项。导入任务暂不支持断点续传；文件格式检查通过，也不代表其中的编码一定能被播放器解码。
+### 5. 双版本 Codex 兼容与极速注入
+- **版本支持**：自动发现 Microsoft Store 版与本地 EXE 版 Codex，并支持手动指定便携版 `ChatGPT.exe`。
+- **Store 单图标启动**：Microsoft Store 版通过 Windows COM `IApplicationActivationManager` 以原生 AUMID 身份启动，避免任务栏双图标。
+- **原生辅助程序加速**：内置构建期预编译的 `cwb-win-helper.exe`（调用 `iphlpapi` / `NtQueryInformationProcess` / `QueryFullProcessImageName`），端口身份核验与进程发现从数秒级降至 ~130 ms，热重注 1 秒左右完成，且保留全部端口与进程归属安全校验。
+- **新版界面适配**：使用语义 `:has()` 规则清除新版 Codex 顶栏、侧栏及底部输入框页脚伪元素深色遮罩，不影响输入框本体与弹窗。
+- **托盘常驻与安全接管**：关闭或最小化至系统托盘维持媒体服务；重新打开普通模式 Codex 时先弹窗确认再接管，随时支持“恢复官方外观”。
 
-### 画面、播放与轮播
+---
 
-- 工作台支持深、浅色主题切换，浅色以淡蓝为强调色，并保留上次选择；不改变壁纸参数或 Codex 自身主题。
-- 填充、适应、拉伸三种适配方式；调整水平/垂直位置、缩放和水平镜像。
-- 调整亮度、暗化、模糊、饱和度、对比度和壁纸不透明度。
-- 视频播放速度可设为 0.25–4 倍；壁纸声音默认关闭，可单独开启并调节音量。部分 Scene/Web 效果由作者实现决定。
-- 创建多个播放列表，设置间隔、顺序或随机播放，也可导入 Wallpaper Engine 播放列表 JSON，匹配已有本地项目。
-- 切换前先准备下一张壁纸；加载失败时保留旧画面，轮播会尝试其他可用项目。
-- 提供硬切、淡化、推移、擦除、光圈、缩放、条带七种过场，可调整方向和时长；启用“减少动态效果”后改为硬切。
-- 可按窗口隐藏或电池供电状态自动暂停。自动暂停与手动暂停分开处理，不会因为窗口恢复或接通电源就覆盖手动暂停状态。
+## 安装与使用
 
-### 壁纸作者属性
+### 环境要求
+- Windows 10 / 11（x64），已安装 Codex 桌面版（Microsoft Store 版或本地 EXE 版）。
+- 仅使用自有图片 / 视频时**不需要**安装 Wallpaper Engine。
+- 仅在使用视频转码优化时需要本机安装 `ffmpeg` 和 `ffprobe`。
 
-对提供设置项的 Scene/Web 壁纸，工作台会显示“WE 作者属性”面板。当前接入了颜色、开关、滑块、下拉选项、文本、文件和目录属性。
+### 方式一：使用 NSIS 安装包（推荐）
+从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载 `CodexWallpaperDesktop-<版本>-Setup.exe`：
+- 中文安装向导，支持自选安装路径（推荐安装到 D / F 盘）。
+- 安装后启动即秒开，无需每次向 C 盘 `Temp` 解压临时文件。
+- 卸载时默认保留个人壁纸设置。
 
-设置按壁纸分别保存，可以实时应用、清空文件选择或恢复作者默认值。文件和目录属性使用程序管理的副本，不改作者原始工程。属性能否产生预期效果，仍取决于壁纸本身及渲染器兼容情况。
-
-### 系统音乐联动
-
-Windows 下可分别开启以下功能，**默认全部关闭**：
-
-- **系统频谱**：读取系统输出声音的频谱，让支持音频响应的壁纸随音乐变化。不使用麦克风，也不保存原始音频。
-- **正在播放**：读取播放器提供的曲名、歌手、封面、播放状态和时间线，在工作台及受支持的 Web 壁纸中使用。
-- **歌词**：为当前歌曲导入本地 LRC；也可开启在线查询。本地歌词优先，在线查询使用 LRCLIB，会发送歌名、歌手、专辑和时长信息。
-- **播放器控制**：明确开启后，工作台及接入本项目扩展接口的 Web 壁纸可以发送播放、暂停、上一首、下一首指令；实际可用操作由播放器决定。
-
-这些功能依赖播放器向 Windows 提供媒体信息，并非所有播放器都支持。Scene 目前接入的是系统频谱，不包含完整的曲目信息、歌词和反向控制接口。
-
-### 视频优化与缓存
-
-- 大视频通过本机 HTTP Range 服务按需读取，不会把整段视频塞进注入数据。
-- 对支持的 MP4 布局提供 Faststart 虚拟前置，改善读取顺序，不改写原片。
-- 接入可选的 ffmpeg / ffprobe，提供转码帧率上限、编码器选择、进度、取消和重试；代码包含硬件编码失败后回退软件编码的处理。
-- 转码期间继续使用原片，完成校验后再由你应用优化版本，不自动打断当前播放。
-- 缓存可迁移到其他目录或磁盘，复制并校验成功后才切换；支持取消和中断恢复，保留源缓存及未知文件。
-
-ffmpeg 不随项目自动下载。没有安装时仍可直接播放原片。**转码流程已有源码和专项测试，真实转码、输出帧率及硬件回退尚未完成实际环境验证。** 缓存目录与素材库目录分别管理，迁移缓存不会顺带移动壁纸库或本地歌词。
-
-### Codex 版本选择与托盘
-
-- 自动查找 Store 版，以及已注册、带开始菜单快捷方式或位于常见安装目录的本地版；便携版可以手动选择 EXE。
-- 保留已选目标。应用前先等待设置保存完成，并核对调试端点所属的 Codex 版本，避免应用到其他安装。
-- 需要关闭重启目标，或在另一版本运行时另开所选版本，会先询问；取消后不执行启动或关闭。
-- 关闭或最小化工作台后驻留托盘。托盘菜单提供打开工作台、应用壁纸、恢复外观、查看日志和退出。
-- 运行期间维持媒体服务，并处理页面刷新、新窗口和 renderer 重建后的重新接入。
-- 应用壁纸后会监控所选 Codex；如果你关闭窗口后从开始菜单重新打开了普通模式实例，Bridge 会自动关闭它并用调试配置重启接管（通常等待 5–10 秒，会有短暂中断，未发送的输入请先保存）。
-
-“恢复官方外观”用于移除背景及兼容样式，不关闭 Codex。托盘退出流程也会尝试恢复外观并停止服务；退出后，动态壁纸不能继续依赖本程序读取媒体。这些生命周期功能的完整双版本验证仍未全部完成。
-
-## 开始使用
-
-### 环境
-
-- Windows x64，已安装 Codex 桌面版。
-- 运行源码需要 Node.js 和 npm，建议使用 Node.js 22。
-- 使用 Wallpaper Engine 资源时，需要先在本机准备好项目文件。仓库不附带壁纸，也不下载创意工坊内容。
-- 视频优化需要自行安装 ffmpeg 和 ffprobe；普通图片、视频播放不依赖它们。
-
-### 运行源码
+### 方式二：从源码运行（需 Node.js 22+）
 
 ```powershell
 git clone https://github.com/whisperia6/codex-wallpaper-bridge.git
@@ -123,101 +71,102 @@ npm ci
 npm start
 ```
 
-安装依赖后，也可以双击 `run-electron.cmd`。仓库已包含桥接运行时，不需要额外下载一个父项目。
+安装依赖后也可以直接双击根目录的 `run-electron.cmd`。
 
-### 第一次应用壁纸
+### 首次应用壁纸步骤
+1. 在工作台顶部选择目标 Codex 版本（未自动发现本地版时点击“选择本地 EXE”）。
+2. 扫描本机 Wallpaper Engine 目录，或直接导入自己的图片 / 视频，调整预览效果。
+3. 点击 **“应用到 Codex”**：若匹配端口已就绪将直接注入；若 Codex 正以普通模式运行，按提示确认重启进入调试模式（请先保存未发送输入）。
+4. 首次以独立调试 profile 启动 Codex 可能需要重新登录。不再使用时点击 **“恢复官方外观”** 或从托盘退出即可。
 
-1. 在顶部选择目标 Codex。没有找到本地版时，点击“选择本地 EXE”。
-2. 扫描本机壁纸库，或导入图片、视频。选择壁纸，在工作台预览并调整显示设置。
-3. 点击“应用到 Codex”。已有匹配的调试端点会直接复用；需要重新启动时，按提示确认。
-4. 新启动的目标使用独立调试 profile，可能需要重新登录。重启前保存尚未发送的输入。
-5. 应用壁纸后如果重新打开普通模式 Codex，Bridge 会自动接管；该操作会短暂关闭并重启 Codex。
-6. 工作台可以关到托盘；不再使用时，选择“恢复官方外观”或从托盘退出。
+### 可选环境变量
 
-一般不需要管理员权限。如果目标 Codex 本身以管理员身份运行，先手动退出它，再由本程序启动即可。
+| 变量名 | 说明 |
+| --- | --- |
+| `CWB_FFMPEG_PATH` / `CWB_FFPROBE_PATH` | 手动指定 `ffmpeg.exe` / `ffprobe.exe` 路径（未加入 `PATH` 时使用） |
+| `CWB_CACHE_ROOT` | 覆盖视频转码缓存目录 |
+| `CWB_BUILD_TEMP_ROOT` | 覆盖打包时的临时构建目录（Windows 下存在 `F:\` 时默认使用 `F:\.cwb-build-tmp`） |
 
-### 可选：指定 ffmpeg 路径
+---
 
-工具已加入 `PATH` 时，可以直接在“视频优化与缓存”中探测。也可以在启动前指定路径，下面的路径需替换为你的实际安装位置：
-
-```powershell
-$env:CWB_FFMPEG_PATH = 'C:\Tools\ffmpeg\bin\ffmpeg.exe'
-$env:CWB_FFPROBE_PATH = 'C:\Tools\ffmpeg\bin\ffprobe.exe'
-npm start
-```
-
-`CWB_CACHE_ROOT` 可覆盖缓存位置。启用环境变量覆盖后，工作台会显示实际路径，并禁用目录迁移，避免修改了设置却仍在使用另一处缓存。
-
-## 工作方式与本地数据
-
-程序通过本机调试接口（CDP）在所选 Codex 页面中加入背景层，再从本机媒体服务读取图片、视频或场景资源。它不是安装包补丁，也不会给 Codex 永久替换一套界面。
-
-媒体和控制服务只监听 `127.0.0.1`，使用随机令牌，并检查写请求来源。图片、视频及 GPU Scene/Web 媒体注入会临时调整目标页面的 CSP 限制，首次初始化可能需要刷新目标页面；恢复外观时会执行还原。网页壁纸包含作者脚本，适合加载你信任的本地项目，不能把它当成任意网页的安全运行环境。
-
-壁纸设置保存在本机；旧配置升级前会备份，损坏或版本过新的配置不会被静默覆盖。Wallpaper Engine 原件只读。运行日志默认位于 `%LOCALAPPDATA%\CodexWallpaperDesktop\logs`，可从托盘打开；日志中的会话 URL 会脱敏。
-
-## 目前的限制
-
-- 目前只面向 Windows 桌面版，macOS、Linux 暂未支持。Codex 更新可能改变界面结构，需要重新适配。
-- Web/Scene 不是 Wallpaper Engine 官方运行时的完整替代品，特殊脚本、插件和部分效果可能无法使用。
-- Store 与本地 EXE 的完整流程还没有全部验证完，包括部分可见首帧、最小化恢复、宿主内音乐联动及托盘退出场景。不能把工作台预览正常等同于两种 Codex 都已确认正常。
-- 物理音频设备切换、电源切换、真实 ffmpeg 转码和新发行包的完整回归仍待验证。
-- 长时间运行的资源占用仍需验证，部分场景已观察到内存增长。不承诺固定首帧时间、帧率或资源占用。
-- 导入任务不支持断点续传；资源库和缓存迁移会保留旧副本，需要额外磁盘空间。
-
-分区玻璃主题、字体与光标设置、壁纸配色联动、头像/桌宠和多语言属于后续计划，不包含在目前功能中。本版更新及验证范围见 [1.1.0 版本说明](docs/RELEASE_1.1.0.md)。
-
-## 下载与构建
-
-已发布的程序见 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases)。下载前请看对应版本说明，当前分支中的新功能不一定已经打包发布。
-
-**2026-10-16 构建的 `1.1.0` 正式版**：[下载单文件 EXE](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.1.0/CodexWallpaperDesktop.exe)（Windows x64，97.71 MiB）。成品仅通过 [Release 附件](https://github.com/whisperia6/codex-wallpaper-bridge/releases/tag/v1.1.0)分发，不提交到源码目录。功能与验证范围见 [1.1.0 版本说明](docs/RELEASE_1.1.0.md)和[目前的限制](#目前的限制)。
-
-SHA-256：`89EEEA59F315D322A59F94C6BEF4A48B305E33EC18BB97411121459478BEEF1E`（[校验文件](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.1.0/SHA256SUMS.txt)）。
-
-自行构建 Windows 单文件版：
+## 构建与打包
 
 ```powershell
 npm ci
-npm run make
+npm run package
 ```
 
-构建仅进行常规代码压缩，不再使用代码混淆。封装复用 npm 已安装且版本一致的 Electron，避免重复下载。ASAR 封装、主程序完整性校验及发布文件清单检查仍保留；构建日志会输出编译、封装和校验阶段的耗时。
+或安装依赖后双击 `make-electron.cmd`（等价于 `npm run make`）。
 
-也可以在依赖安装后双击 `make-electron.cmd`。构建产物位于：
+打包产物输出至：
 
 ```text
-out/release-<版本号>/CodexWallpaperDesktop.exe
+out/release-<版本号>/CodexWallpaperDesktop-<版本号>-Setup.exe
 ```
 
-EXE 无需安装，启动时会临时解包 Electron 运行组件。目前未配置代码签名，Windows 可能显示未知发布者提示。能完成构建不代表这一版本已经完成实际使用验证。
+打包流程说明：
+- 构建阶段会同步 `bridge-overrides/`、用 `esbuild` 压缩主程序与桥接运行时，并用系统 `.NET Framework` `csc.exe` 预编译 `windows-media.dll` 与 `cwb-win-helper.exe`。
+- 使用 `electron-builder` 生成 NSIS x64 安装包，仅保留 `zh-CN` / `en-US` 语言包，并启用 ASAR 封装、嵌入式 ASAR 完整性校验及 Electron Fuses。
+- 临时构建目录在 Windows 下优先使用 `F:\.cwb-build-tmp`（可通过 `CWB_BUILD_TEMP_ROOT` 覆盖，无 F 盘时自动回退到 `out/.nsis-build`），构建完成后自动清理。
 
-## 开发与反馈
+---
+
+## 项目目录结构
 
 ```text
-src/               Electron 桌面程序、目标发现和启动管理
-bridge-runtime/    壁纸服务、工作台、播放与媒体功能
-bridge-overrides/  部分桥接模块的维护源，同步到 runtime
-scripts/           同步、构建、打包和专项验证脚本
-test/              自动化测试
-docs/              公开接口文档、版本说明和截图
+codex-wallpaper-bridge/
+├── src/                      # Electron 主进程、IPC、目标发现、CDP 身份核验与渲染外壳
+│   ├── main.mjs              # Electron 入口、托盘与生命周期管理
+│   ├── cdp-owner.mjs         # CDP 监听端口与进程归属核验
+│   ├── codex-launcher.mjs    # Store AUMID 激活、进程关闭与调试模式启动
+│   ├── compatibility-script.mjs # Codex 界面透明与页脚遮罩兼容脚本
+│   ├── installations.mjs     # Codex 安装发现与缓存
+│   ├── win-helper.mjs        # 原生 Windows 辅助程序调用与安全回退
+│   └── renderer/             # 桌面外壳前端资源
+├── bridge-runtime/           # 内置壁纸服务、工作台 UI、媒体传输与原生组件源码
+│   ├── native/               # windows-media.cs / cwb-win-helper.cs
+│   ├── public/               # 壁纸工作台前端界面
+│   ├── src/                  # 本地媒体服务、场景服务、播放策略
+│   └── vendor/webwallgl/     # WebWallGL 场景渲染组件与开源许可声明
+├── bridge-overrides/         # Electron 桌面版对 bridge-runtime 的覆盖维护源
+├── scripts/                  # 同步、构建、原生编译、NSIS 打包与验收脚本
+├── test/                     # Node 自动化单元测试与浏览器渲染测试
+├── docs/                     # 公开文档（WEB_API、版本说明）与界面截图
+├── run-electron.cmd          # Windows 一键源码启动脚本
+└── make-electron.cmd         # Windows 一键打包脚本
 ```
 
-修改桥接代码时，若 `bridge-overrides/` 中有同名文件，应修改该文件并运行 `npm run sync:bridge`；其余 runtime 模块直接修改。不要手工编辑 `dist/` 或发布产物。
-
-`test/` 保留在源码仓库供开发者回归验证。`out/`、`dist/`、本机开发记录、日志和个人配置均不纳入版本跟踪；Release 中的 EXE 附件不附带测试与开发文档。
-
-测试按改动范围运行。例如，检查媒体进程恢复和工作台视频就绪逻辑：
+### 开发约定与测试
+- 修改桥接逻辑时，若 `bridge-overrides/` 中存在同名文件，请修改 `bridge-overrides/` 并运行 `npm run sync:bridge`；请勿直接手改 `dist/`。
+- 运行测试：
 
 ```powershell
 npm run sync:bridge
-node --test test/m3-provider-recovery.test.mjs test/m3-workbench-readiness.test.mjs
+npm run build:app
+npm test
 ```
 
-提交问题时，请附上 Codex 版本、Store/本地版、壁纸类型、复现步骤和相关错误信息。日志发出前请去掉聊天内容、账号信息及个人路径。项目配置、媒体素材、测试产物和本地工作记录不需要一起提交。
+或按模块定向运行，例如：
 
-更多文档：[运行时说明](bridge-runtime/README.md) · [Web 壁纸接口](docs/WEB_API.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
+```powershell
+node --test test/win-helper.test.mjs test/cdp-owner.test.mjs test/compatibility-surfaces.test.mjs
+```
 
-## 第三方组件
+---
 
-场景渲染使用 WebWallGL。仓库保留了所用渲染组件及其依赖的来源、版本和许可说明，见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。Wallpaper Engine 壁纸资源由使用者自行提供，不随本项目分发。
+## 数据、安全与已知限制
+
+- **本地数据与隐私**：所有壁纸配置均存放在本机；运行日志默认位于 `%LOCALAPPDATA%\CodexWallpaperDesktop\logs`（会话 URL 已脱敏）。本地媒体与控制服务仅监听 `127.0.0.1` 并校验随机令牌与请求来源。
+- **CSP 说明**：图片、视频及 GPU 场景注入会在目标页面临时放宽 CSP（首次可能需要自动刷新一次页面），恢复外观时会还原。网页壁纸包含作者脚本，请仅加载可信的本地项目。
+- **已知限制**：
+  - 仅支持 Windows x64；不支持 macOS / Linux，也不适用于网页版 ChatGPT 或命令行 Codex。
+  - Scene / Web 渲染并非 Wallpaper Engine 官方完整替代，部分高级脚本与插件特效可能不兼容。
+  - Codex 版本升级可能调整 DOM 结构，如出现界面遮挡或样式异常欢迎反馈。
+  - 当前未配置商业代码签名证书，安装或运行时 Windows SmartScreen 可能出现“未知发布者”提示。
+
+---
+
+## 更多文档与致谢
+
+- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
+- 场景渲染基于 WebWallGL，相关组件来源、版本与开源许可见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。

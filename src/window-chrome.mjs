@@ -1,7 +1,7 @@
 const HEIGHT = 40;
 const PALETTE = {
-  dark: { color: "#0b0d0b", symbolColor: "#f4f5f1" },
-  light: { color: "#edf3fa", symbolColor: "#24374c" },
+  dark: { color: "#0c0d10", symbolColor: "#f3f4f6" },
+  light: { color: "#f4f5f7", symbolColor: "#181a1f" },
 };
 
 export function desktopWindowChromeOptions(platform = process.platform) {

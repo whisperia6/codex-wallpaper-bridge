@@ -125,3 +125,26 @@ test("selection has deterministic fallbacks for no running installations, multip
   assert.equal(selectInstallationId([{ id: "store", isRunning: true }, { id: "local", isRunning: true }], null), "store");
   assert.equal(selectInstallationId([], "removed"), null);
 });
+
+test("normalizeInstallations exposes validated Store appUserModelId when PackageFamilyName is present", () => {
+  const installations = normalizeInstallations({
+    storePackages: [{
+      Name: "OpenAI.Codex",
+      Version: "26.1117.4957.0",
+      InstallLocation: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26",
+      PackageFamilyName: "OpenAI.Codex_2p2nqsd0c76g0",
+      ApplicationId: "App",
+    }],
+  });
+  assert.equal(installations[0].appUserModelId, "OpenAI.Codex_2p2nqsd0c76g0!App");
+
+  const unsafe = normalizeInstallations({
+    storePackages: [{
+      Name: "OpenAI.Codex",
+      Version: "26.1117.4957.0",
+      InstallLocation: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26",
+      PackageFamilyName: "bad family;name",
+    }],
+  });
+  assert.equal("appUserModelId" in unsafe[0], false);
+});

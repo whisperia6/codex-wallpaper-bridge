@@ -661,6 +661,23 @@ test("CLI configChange, rescan, play and pause propagate renderer update failure
   }
 });
 
+test("CLI configChange treats hidden GPU deferral without failures as saved instead of save error", async () => {
+  const { serverOptions } = await cliHarness({ updateResult: { sessions: 0, failed: 0, deferred: 1, timings: [] } });
+  await serverOptions.onAction("inject", { adaptive: false });
+  const result = await serverOptions.onConfigChange();
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "deferred:1");
+  assert.equal(result.deferred, 1);
+});
+
+test("CLI inject accepts an existing hidden Codex window whose first attach is deferred", async () => {
+  const { serverOptions } = await cliHarness({ startResult: { sessions: 0, failed: 0, deferred: 1, timings: [] } });
+  const result = await serverOptions.onAction("inject", { adaptive: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.deferredTargets, 1);
+  assert.match(result.message, /隐藏页面等待显示后自动应用/);
+});
+
 test("CLI shutdown waits for its owned native provider and closes it only once", async () => {
   const cleanup = gate();
   let closes = 0;

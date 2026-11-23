@@ -47,7 +47,7 @@
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (!target.closest(
-      ".wallpaper-card,.asset-controls,#libraryTools,#playlistTools,#authorPropertiesPanel,[data-effect],#importWallpapersButton,#importWallpapersInput,#brightnessRange,#darknessRange,#blurRange,#saturationRange,#fitSelect,#playbackToggle,#resetEffectsButton",
+      ".wallpaper-card,.asset-controls,#libraryTools,#playlistTools,#authorPropertiesPanel,[data-effect],[data-media],[data-video],#engineFallbackSelect,#importWallpapersButton,#importWallpapersInput,#brightnessRange,#darknessRange,#blurRange,#saturationRange,#fitSelect,#playbackToggle,#resetEffectsButton",
     )) return;
     lastMutationAt = Date.now();
     notify("dirty");
@@ -161,6 +161,11 @@
     try {
       const result = await requestDesktop(action, payload);
       if (!result?.ok && !result?.canceled) setStatus(result?.message || "操作失败", "error");
+      if (result?.ok && !result?.canceled && (action === "apply" || action === "restore")) {
+        window.dispatchEvent(new CustomEvent("cwb-desktop-injection-change", {
+          detail: { injected: action === "apply" },
+        }));
+      }
       return result;
     } catch (error) {
       setStatus(error.message, "error");

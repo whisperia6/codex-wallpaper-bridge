@@ -26,7 +26,8 @@ import {
   waitForCodexTarget,
 } from "./cdp-client.mjs";
 import { closeCodexProcesses, launchCodex } from "./codex-launcher.mjs";
-import { classifyCodexProcesses } from "./codex-processes.mjs";
+import { listCodexProcesses } from "./codex-processes.mjs";
+import { runCodexTakeoverFlow } from "./codex-takeover-flow.mjs";
 import { startCodexProcessMonitor } from "./codex-process-monitor.mjs";
 import { createCodexTakeoverWatcher } from "./codex-takeover.mjs";
 import { detectInstallations, selectInstallationId, validateCdpPort, validateExecutable } from "./installations.mjs";
@@ -74,8 +75,8 @@ let verifiedEndpointInstallation = null;
 let pendingOwnerCheck = null;
 let codexTakeover = null;
 let codexProcessMonitor = null;
-let latestCodexProcesses = [];
-let staleCleanupTimer = null;
+let latestCodexSnapshot = null;
+let takeoverTask = null;
 let takeoverContext = null;
 let takeoverRunning = false;
 const previewSession = createPreviewSession({
@@ -201,8 +202,11 @@ async function saveSettings() {
   await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
 }
 
-async function currentState() {
-  const installations = await detectInstallations({ manualExecutables: settings.manualExecutables });
+async function currentState({ forceRefresh = false } = {}) {
+  const installations = await detectInstallations({
+    manualExecutables: settings.manualExecutables,
+    forceRefresh,
+  });
   settings.selectedId = selectInstallationId(installations, settings.selectedId);
   return {
     installations,
@@ -308,11 +312,13 @@ async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
   return diagnosticPath;
 }
 
-async function injectOnceAtPort({ port, adaptive }) {
+async function injectOnceAtPort({ port, adaptive, signal }) {
+  signal?.throwIfAborted();
   assertNotQuitting();
   const startedAt = performance.now();
   const control = await measureStartupPhase("control", () => ensureControlPanel(port));
   assertNotQuitting();
+  signal?.throwIfAborted();
   const injection = await measureStartupPhase("apply", () => invokeBridgeAction({ controlUrl: control.url, action: "inject", adaptive: Boolean(adaptive) }));
   const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
   return {
@@ -362,7 +368,7 @@ function createMainWindow() {
     minWidth: 1040,
     minHeight: 700,
     show: false,
-    backgroundColor: "#0b0d0b",
+    backgroundColor: "#0c0d10",
     title: "Codex Wallpaper Desktop",
     ...desktopWindowChromeOptions(process.platform),
     webPreferences: {
@@ -483,111 +489,94 @@ function createApplicationTray() {
 }
 
 function stopCodexTakeover() {
+  takeoverContext?.controller.abort();
+  takeoverContext = null;
   codexTakeover?.stop();
   codexTakeover = null;
   codexProcessMonitor?.stop();
   codexProcessMonitor = null;
-  clearTimeout(staleCleanupTimer);
-  staleCleanupTimer = null;
-  latestCodexProcesses = [];
-  takeoverContext = null;
+  latestCodexSnapshot = null;
+}
+
+async function cancelCodexTakeover() {
+  stopCodexTakeover();
+  // Drain an already-started close/launch before restore changes its target.
+  await takeoverTask;
 }
 
 function startCodexTakeover({ installation, port, adaptive, baselineProcessIds = [] }) {
   stopCodexTakeover();
   if (acceptanceContext || shutdownRequested || !installation?.path) return;
-  takeoverContext = {
-    installation: { ...installation },
-    port: validateCdpPort(port),
-    adaptive: Boolean(adaptive),
-    baselineProcessIds: new Set((baselineProcessIds || []).map(Number).filter(Number.isInteger)),
+  const context = {
+    installation: { ...installation }, port: validateCdpPort(port),
+    adaptive: Boolean(adaptive), controller: new AbortController(),
+  };
+  takeoverContext = context;
+  const isCurrent = () => takeoverContext === context && !shutdownRequested && !isQuitting
+    && settings.selectedId === context.installation.id && settings.port === context.port;
+  const failClosed = (error) => {
+    if (takeoverContext !== context) return;
+    stopCodexTakeover();
+    log({ stream: "stderr", text: `[自动接管] 已暂停，请重新应用壁纸后再试：${error.message}\n` });
   };
   try {
     codexProcessMonitor = startCodexProcessMonitor({
-      executablePath: takeoverContext.installation.path,
-      port: takeoverContext.port,
-      intervalMs: 3_000,
-      onSnapshot: (processes) => { latestCodexProcesses = processes; },
-      onError: (error) => log({ stream: "stderr", text: `[自动接管] 进程监控失败：${error.message}\n` }),
+      executablePath: context.installation.path, port: context.port, intervalMs: 3_000,
+      onSnapshot: (snapshot) => { if (isCurrent()) latestCodexSnapshot = snapshot; },
+      onError: failClosed,
     });
-  } catch (error) {
-    log({ stream: "stderr", text: `[自动接管] 进程监控启动失败：${error.message}\n` });
-  }
-  codexTakeover = createCodexTakeoverWatcher({
-    port: takeoverContext.port,
-    intervalMs: 5_000,
-    isEnabled: () => !shutdownRequested && !isQuitting && !acceptanceContext,
-    isBusy: () => Boolean(activeOperation) || takeoverRunning,
-    ignoredProcessIds: takeoverContext.baselineProcessIds,
-    listProcesses: async () => latestCodexProcesses,
-    onTakeover: async ({ ordinary }) => {
-      if (takeoverRunning || shutdownRequested) return;
-      takeoverRunning = true;
-      const context = takeoverContext;
-      log({ stream: "system", text: `\n[自动接管] 检测到 Codex 以普通模式重新打开（${ordinary.length} 个窗口），正在恢复调试实例…\n` });
-      try {
-        const operation = await runOperation("自动接管 Codex", async () => {
-          const state = await currentState();
-          const selected = state.installations.find(({ id }) => id === context.installation.id)
-            || state.installations.find(({ path: executablePath }) => (
-              path.win32.normalize(String(executablePath || "")).toLowerCase()
-              === path.win32.normalize(String(context.installation.path || "")).toLowerCase()
-            ));
-          if (!selected) throw new Error("找不到目标 Codex 安装");
-          await closeCodexProcesses({ installation: selected, onLog: log });
-          await launchCodex({
-            installation: { ...selected, isRunning: false, processIds: [] },
-            port: context.port,
-            profileRoot: path.join(app.getPath("userData"), "codex-profiles"),
-            onLog: log,
+    if (!isCurrent()) { stopCodexTakeover(); return; }
+    codexTakeover = createCodexTakeoverWatcher({
+      port: context.port, intervalMs: 5_000,
+      isEnabled: isCurrent,
+      isBusy: () => Boolean(activeOperation) || takeoverRunning,
+      ignoredProcessIds: baselineProcessIds,
+      listProcesses: async () => latestCodexSnapshot,
+      onTakeover: ({ ordinary }) => {
+        if (!isCurrent() || takeoverRunning) return;
+        takeoverRunning = true;
+        const task = runOperation("自动接管 Codex", async () => {
+          const result = await runCodexTakeoverFlow({
+            installation: context.installation, port: context.port, adaptive: context.adaptive,
+            expectedProcesses: ordinary, signal: context.controller.signal, isCurrent,
+            listProcesses: (selected) => listCodexProcesses({ executablePath: selected.path, port: context.port }),
+            isEndpointReady: isCdpEndpointReady,
+            confirmClose: confirmCloseRunningCodex,
+            closeCodex: (selected, expectedProcesses) => closeCodexProcesses({
+              installation: selected, expectedProcesses, signal: context.controller.signal, onLog: log,
+            }),
+            launchCodex: (options) => launchCodex({
+              ...options, profileRoot: path.join(app.getPath("userData"), "codex-profiles"), onLog: log,
+            }),
+            waitForTarget: (selectedPort, signal) => waitForCodexTarget(selectedPort, { signal }),
+            verifyOwner: verifySelectedOwner,
+            injectOnce: injectOnceAtPort,
           });
-          await waitForCodexTarget(context.port);
-          await verifySelectedOwner(selected, context.port);
-          await injectOnceAtPort({ port: context.port, adaptive: context.adaptive });
-          return { restored: true };
+          if (result.canceled || result.skipped) stopCodexTakeover();
+          return result;
+        }).then((operation) => {
+          if (!operation.ok) failClosed(new Error(operation.message));
+          return operation;
+        }).finally(() => {
+          if (takeoverContext === context) latestCodexSnapshot = null;
+          takeoverRunning = false;
+          if (takeoverTask === task) takeoverTask = null;
         });
-        if (!operation.ok) {
-          log({ stream: "stderr", text: `[自动接管] 未完成：${operation.message}\n` });
-        } else {
-          log({ stream: "system", text: "[自动接管] 完成，壁纸已恢复到调试实例\n" });
-        }
-      } catch (error) {
-        log({ stream: "stderr", text: `[自动接管] 失败：${error.message}\n` });
-      } finally {
-        takeoverRunning = false;
-      }
-    },
-    onError: () => {},
-  });
-  codexTakeover.start();
-  const cleanStaleProcesses = () => {
-    if (shutdownRequested || !takeoverContext) return;
-    if (latestCodexProcesses.length === 0) {
-      staleCleanupTimer = setTimeout(cleanStaleProcesses, 3_000);
-      staleCleanupTimer.unref?.();
-      return;
-    }
-    const { ordinary } = classifyCodexProcesses(latestCodexProcesses, takeoverContext.port);
-    const stale = ordinary.filter((entry) => (
-      takeoverContext.baselineProcessIds.has(entry.processId) && entry.mainWindowHandle === 0
-    ));
-    for (const entry of stale) {
-      try {
-        process.kill(entry.processId);
-        log({ stream: "system", text: `[自动接管] 已清理后台普通 Codex 进程 ${entry.processId}\n` });
-      } catch {}
-    }
-  };
-  staleCleanupTimer = setTimeout(cleanStaleProcesses, 2_000);
-  staleCleanupTimer.unref?.();
-  log({ stream: "system", text: "[自动接管] 已启用：检测到普通模式 Codex 重开时会自动接管\n" });
+        takeoverTask = task;
+        return task;
+      },
+      onError: failClosed,
+    });
+    codexTakeover.start();
+    log({ stream: "system", text: "[自动接管] 已启用监控：普通实例重开后需确认才重启；取消或失败将暂停接管\n" });
+  } catch (error) { failClosed(error); }
 }
 
 function registerIpcHandlers() {
   registerHandler("cwb:get-state", () => currentState());
   registerHandler("cwb:set-workbench-theme", (theme) => setWindowChromeTheme(mainWindow, theme, process.platform));
   registerHandler("cwb:refresh-installations", async () => {
-    const state = await currentState();
+    const state = await currentState({ forceRefresh: true });
     await saveSettings();
     return state;
   });
@@ -598,20 +587,26 @@ function registerIpcHandlers() {
       filters: [{ name: "Windows 可执行文件", extensions: ["exe"] }],
     });
     if (result.canceled || !result.filePaths[0]) return currentState();
+    await cancelCodexTakeover();
+    assertNotQuitting();
+    if (activeOperation) throw new Error("壁纸操作进行中，请稍后切换目标");
     const executablePath = await validateExecutable(result.filePaths[0]);
     if (!settings.manualExecutables.some((entry) => entry.toLowerCase() === executablePath.toLowerCase())) {
       settings.manualExecutables.push(executablePath);
     }
-    const state = await currentState();
+    const state = await currentState({ forceRefresh: true });
     const selected = state.installations.find(({ path: entry }) => entry.toLowerCase() === executablePath.toLowerCase());
     settings.selectedId = selected?.id || settings.selectedId;
     await saveSettings();
     return currentState();
   });
-  registerHandler("cwb:apply-codex", ({ installationId, port, adaptive = true } = {}) => runOperation("应用到 Codex", async () => {
+  registerHandler("cwb:apply-codex", async ({ installationId, port, adaptive = true } = {}) => {
+    if (!activeOperation || takeoverRunning) await cancelCodexTakeover();
+    return runOperation("应用到 Codex", async () => {
     const operationStartedAt = performance.now();
     let completed = false;
     try {
+      stopCodexTakeover();
       await rememberOperationSettings({ port, adaptive });
       const snapshot = await measureStartupPhase("discovery", currentState);
       const installation = await resolveInstallation(installationId, snapshot);
@@ -684,9 +679,11 @@ function registerIpcHandlers() {
     } finally {
       logStartupPhase({ phase: "total", elapsedMs: performance.now() - operationStartedAt, ok: completed });
     }
-  }));
-  registerHandler("cwb:restore", ({ installationId, port } = {}) => runOperation("恢复官方外观", async () => {
-    stopCodexTakeover();
+    });
+  });
+  registerHandler("cwb:restore", async ({ installationId, port } = {}) => {
+    if (!activeOperation || takeoverRunning) await cancelCodexTakeover();
+    return runOperation("恢复官方外观", async () => {
     await rememberOperationSettings({ port });
     const normalizedPort = validateCdpPort(port);
     const installation = await resolveInstallation(installationId || settings.selectedId);
@@ -694,11 +691,18 @@ function registerIpcHandlers() {
     assertNotQuitting();
     const control = await ensureControlPanel(normalizedPort);
     return invokeBridgeAction({ controlUrl: control.url, action: "restore" });
-  }));
-  registerHandler("cwb:open-control-panel", ({ port } = {}) => runOperation("载入壁纸面板", async () => {
-    await rememberOperationSettings({ port });
-    return ensureControlPanel(port);
-  }));
+    });
+  });
+  registerHandler("cwb:open-control-panel", async ({ port } = {}) => {
+    const normalizedPort = validateCdpPort(port ?? settings.port);
+    if ((!activeOperation || takeoverRunning) && takeoverContext && normalizedPort !== takeoverContext.port) {
+      await cancelCodexTakeover();
+    }
+    return runOperation("载入壁纸面板", async () => {
+      await rememberOperationSettings({ port: normalizedPort });
+      return ensureControlPanel(normalizedPort);
+    });
+  });
 }
 
 if (!hasSingleInstanceLock) {
@@ -732,7 +736,8 @@ app.on("before-quit", (event) => {
   if (shutdownComplete) return;
   event.preventDefault();
   if (shutdownPromise) return;
-  shutdownPromise = previewSession.shutdown()
+  shutdownPromise = Promise.resolve(takeoverTask)
+    .then(() => previewSession.shutdown())
     .then(() => nativeEngineHost?.close())
     .then(() => logWriteQueue)
     .then(() => {
