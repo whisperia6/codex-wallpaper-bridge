@@ -39,11 +39,12 @@ $candidatePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::O
 function Add-CodexCandidate([string]$candidatePath) {
   if ([string]::IsNullOrWhiteSpace($candidatePath)) { return }
   $expandedPath = [Environment]::ExpandEnvironmentVariables($candidatePath.Trim().Trim('"'))
-  if ([IO.Path]::GetFileName($expandedPath) -ieq 'Codex.exe') {
+  $fileName = [IO.Path]::GetFileName($expandedPath)
+  if ($fileName -ieq 'Codex.exe') {
     $chatGptPath = Join-Path ([IO.Path]::GetDirectoryName($expandedPath)) 'ChatGPT.exe'
-    if (Test-Path -LiteralPath $chatGptPath -PathType Leaf) { $expandedPath = $chatGptPath }
+    if (Test-Path -LiteralPath $chatGptPath -PathType Leaf) { $expandedPath = $chatGptPath; $fileName = 'ChatGPT.exe' }
   }
-  if ([IO.Path]::GetFileName($expandedPath) -ine 'ChatGPT.exe') { return }
+  if ($fileName -ine 'ChatGPT.exe' -and $fileName -ine 'Codex.exe') { return }
   if (Test-Path -LiteralPath $expandedPath -PathType Leaf) {
     [void]$candidatePaths.Add([IO.Path]::GetFullPath($expandedPath))
   }
@@ -51,7 +52,13 @@ function Add-CodexCandidate([string]$candidatePath) {
 
 function Add-InstallLocation([string]$installLocation) {
   if ([string]::IsNullOrWhiteSpace($installLocation)) { return }
-  Add-CodexCandidate (Join-Path $installLocation.Trim().Trim('"') 'ChatGPT.exe')
+  $dir = $installLocation.Trim().Trim('"')
+  $chatGpt = Join-Path $dir 'ChatGPT.exe'
+  if (Test-Path -LiteralPath $chatGpt -PathType Leaf) {
+    Add-CodexCandidate $chatGpt
+    return
+  }
+  Add-CodexCandidate (Join-Path $dir 'Codex.exe')
 }
 
 $uninstallRoots = @(
@@ -240,7 +247,7 @@ export function normalizeInstallations({
   }));
 }
 
-async function runPowerShellJson(script) {
+async function runPowerShellJson(script, env = undefined) {
   const { stdout } = await execFileAsync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", script],
@@ -249,6 +256,7 @@ async function runPowerShellJson(script) {
       maxBuffer: 4 * 1024 * 1024,
       timeout: 12_000,
       windowsHide: true,
+      ...(env ? { env } : {}),
     },
   );
   return parsePowerShellJson(stdout);
@@ -306,23 +314,73 @@ async function discoverStaticInstallations({ forceRefresh = false } = {}) {
   return result;
 }
 
-async function discoverRunningProcesses() {
+const RUNNING_CODEX_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$extraPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+[void]$names.Add('ChatGPT.exe')
+[void]$names.Add('Codex.exe')
+if (-not [string]::IsNullOrWhiteSpace($env:CWB_EXTRA_EXE_PATHS)) {
+  try {
+    foreach ($entry in @($env:CWB_EXTRA_EXE_PATHS | ConvertFrom-Json)) {
+      if ([string]::IsNullOrWhiteSpace([string]$entry)) { continue }
+      try {
+        $full = [IO.Path]::GetFullPath([string]$entry)
+        [void]$extraPaths.Add($full)
+        $fileName = [IO.Path]::GetFileName($full)
+        if (-not [string]::IsNullOrWhiteSpace($fileName)) { [void]$names.Add($fileName) }
+      } catch {}
+    }
+  } catch {}
+}
+$clauses = @($names | ForEach-Object { "Name = '$($_.Replace('\', '\\').Replace("'", "\'"))'" })
+$filter = $clauses -join ' OR '
+$items = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object {
+  $execPath = [string]$_.ExecutablePath
+  $fullPath = $execPath
+  try { $fullPath = [IO.Path]::GetFullPath($execPath) } catch {}
+  $fileName = [IO.Path]::GetFileName($fullPath)
+  $item = Get-Item -LiteralPath $fullPath -ErrorAction SilentlyContinue
+  $include = $fileName -ieq 'ChatGPT.exe' -or $extraPaths.Contains($fullPath)
+  if (-not $include -and $fileName -ieq 'Codex.exe' -and $item) {
+    $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
+    if ($identity -match '(?i)\bCodex\b') { $include = $true }
+  }
+  if ($include) {
+    [pscustomobject]@{
+      ProcessId = [int]$_.ProcessId
+      ExecutablePath = $execPath
+      ProductVersion = if ($item) { [string]$item.VersionInfo.ProductVersion } else { '' }
+    }
+  }
+})
+$items | ConvertTo-Json -Compress
+`;
+
+async function discoverRunningProcesses(manualExecutables = []) {
+  const extraPaths = asArray(manualExecutables)
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
+  const env = {
+    ...process.env,
+    CWB_EXTRA_EXE_PATHS: extraPaths.length ? JSON.stringify(extraPaths) : "",
+  };
   const helperResult = await tryRunWinHelper("list-running-codex", {
     maxBuffer: 4 * 1024 * 1024,
     timeout: 8_000,
+    env,
   });
   if (helperResult) {
     return parsePowerShellJson(helperResult.stdout);
   }
-  const outputSetup = "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);";
-  const processScript = `${outputSetup} @(Get-CimInstance Win32_Process -Filter \"Name = 'ChatGPT.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object { $item=Get-Item -LiteralPath $_.ExecutablePath -ErrorAction SilentlyContinue; [pscustomobject]@{ ProcessId=$_.ProcessId; ExecutablePath=$_.ExecutablePath; ProductVersion=$item.VersionInfo.ProductVersion } }) | ConvertTo-Json -Compress`;
-  return runPowerShellJson(processScript);
+  return runPowerShellJson(RUNNING_CODEX_SCRIPT, env);
 }
 
 export async function detectInstallations({ manualExecutables = [], forceRefresh = false } = {}) {
   const [staticResult, runningProcesses] = await Promise.all([
     discoverStaticInstallations({ forceRefresh }).catch(() => ({ storePackages: [], localInstallations: [] })),
-    discoverRunningProcesses().catch(() => []),
+    discoverRunningProcesses(manualExecutables).catch(() => []),
   ]);
   return normalizeInstallations({
     storePackages: staticResult.storePackages,

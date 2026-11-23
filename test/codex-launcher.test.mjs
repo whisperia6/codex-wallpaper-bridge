@@ -93,6 +93,7 @@ test("closing Codex passes the selected executable through the environment and v
   assert.equal(calls[0].file, "powershell.exe");
   assert.equal(calls[0].options.env.CWB_TARGET_EXE, executablePath);
   assert.doesNotMatch(calls[0].args.join(" "), /D:\\\\Portable Apps\\\\Codex/);
+  assert.match(calls[0].args.at(-1), /GetFileName\(\$targetPath\)/);
 });
 
 test("closing Codex fails when the selected executable still has running processes", async () => {
@@ -107,6 +108,28 @@ test("closing Codex fails when the selected executable still has running process
     }),
     validateExecutableFn: async (value) => value,
   }), /仍有 1 个进程/);
+});
+
+test("closing Codex reports actionable permission guidance when remaining processes are access denied", async () => {
+  const logs = [];
+  await assert.rejects(() => closeCodexProcesses({
+    installation: {
+      path: "D:\\codex\\ChatGPT.exe",
+      isRunning: true,
+      processIds: [5100, 5101, 5102],
+    },
+    onLog: (entry) => logs.push(entry.text),
+    processRunner: async () => ({
+      stdout: JSON.stringify({
+        matchedProcessIds: [5100, 5101, 5102],
+        remainingProcessIds: [5100, 5101],
+        accessDeniedProcessIds: [5100, 5101],
+        killErrors: ["win32:5"],
+      }),
+    }),
+    validateExecutableFn: async (value) => value,
+  }), /2 个进程权限不足.*管理员身份/);
+  assert.ok(logs.some((line) => line.includes("win32:5")));
 });
 
 test("formatWindowsArgumentLine quotes spaces cleanly for Store activation", () => {

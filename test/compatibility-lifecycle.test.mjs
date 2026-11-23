@@ -480,10 +480,10 @@ async function cliHarness({ startResult = { sessions: 1, failed: 0, timings: [] 
         events.push(`start:${this.id}:end`);
         return startResult;
       }
-      async update(injection) {
+      async update(injection, options) {
         events.push(`update:${this.id}:begin`);
         injections.push(injection);
-        await onUpdate?.(this, injection);
+        await onUpdate?.(this, injection, options);
         events.push(`update:${this.id}:end`);
         return updateResult;
       }
@@ -709,4 +709,82 @@ test("CLI shutdown reports cleanup failures with a failing exit code and still c
     assert.ok(events.includes("server:closed"));
     assert.ok(errors.some((message) => message.includes(`${target} cleanup failed`)));
   }
+});
+
+test("re-inject with scan attaches a restarted Codex after the previous session closed", async (context) => {
+  const { injector, sockets, setTargets } = harness(context);
+  await injector.start(plan(true));
+  sockets.get("mock:main").close();
+  assert.equal(injector.sessions.size, 0);
+  setTargets([{ id: "restarted", url: "app://restarted", webSocketDebuggerUrl: "mock:restarted" }]);
+  const result = await injector.update(plan(false), { scan: true });
+  assert.equal(result.failed, 0);
+  assert.equal(result.sessions, 1);
+  assert.equal(result.timings.length, 1);
+  assert.equal(injector.sessions.has("restarted"), true);
+  assert.equal(evaluationCount(sockets.get("mock:restarted"), plan(false).compatibilityScript), 1);
+});
+
+test("re-inject with scan waits for an in-flight background attach instead of failing on empty sessions", async (context) => {
+  const attaching = gate();
+  const { injector, sockets, setTargets } = harness(context, {
+    onSocket(socket, url) {
+      if (url !== "mock:restarted") return;
+      const originalCall = socket.call;
+      socket.call = async (method, params = {}) => {
+        if (method === "Runtime.evaluate" && params.expression === "bootstrap-script") await attaching.wait();
+        return originalCall(method, params);
+      };
+    },
+  });
+  await injector.start(plan(true));
+  sockets.get("mock:main").close();
+  assert.equal(injector.sessions.size, 0);
+  setTargets([{ id: "restarted", url: "app://restarted", webSocketDebuggerUrl: "mock:restarted" }]);
+  const backgroundScan = injector.scanOnce();
+  await attaching.entered;
+  const reinject = injector.update(plan(false), { scan: true });
+  await Promise.resolve();
+  attaching.release();
+  const [, result] = await Promise.all([backgroundScan, reinject]);
+  assert.equal(result.failed, 0);
+  assert.equal(result.sessions, 1);
+  assert.equal(result.timings.length, 1);
+  assert.equal(injector.sessions.has("restarted"), true);
+  const restarted = sockets.get("mock:restarted");
+  const compatCalls = restarted.calls.filter(({ method, params }) => method === "Runtime.evaluate" && params.expression.includes("codex-wallpaper-electron-compat-style"));
+  assert.equal(compatCalls.at(-1).params.expression, plan(false).compatibilityScript);
+});
+
+test("CLI inject passes scan:true on reinject and configChange stays saved when Codex is temporarily detached", async () => {
+  const updateOptions = [];
+  const { serverOptions } = await cliHarness({
+    onUpdate: (_inst, _injection, options) => { updateOptions.push(options ? { scan: options.scan } : null); },
+    updateResult: { sessions: 0, failed: 0, deferred: 0, timings: [] },
+  });
+  await serverOptions.onAction("inject", { adaptive: true });
+  const saved = await serverOptions.onConfigChange();
+  assert.equal(saved.ok, true);
+  assert.equal(saved.status, "detached");
+  assert.deepEqual(updateOptions, [null]);
+  await assert.rejects(serverOptions.onAction("inject", { adaptive: true }), /未能完成注入验证/);
+  assert.deepEqual(updateOptions, [null, { scan: true }]);
+});
+
+test("close with allowEndpointUnavailable succeeds when Codex already exited and waiting status is deduplicated", async (context) => {
+  const { injector, sockets, statuses } = harness(context);
+  await injector.start(plan(true));
+  sockets.get("mock:main").close();
+  assert.equal(injector.sessions.size, 0);
+  injector.listTargets = async () => {
+    const error = new TypeError("fetch failed");
+    error.cause = { code: "ECONNREFUSED" };
+    throw error;
+  };
+  await injector.scanOnce();
+  await injector.scanOnce();
+  assert.equal(statuses.filter((status) => status.type === "waiting").length, 1);
+  await assert.rejects(injector.close({ restore: true }), /fetch failed/);
+  await injector.close({ restore: true, allowEndpointUnavailable: true });
+  assert.ok(statuses.some((status) => status.type === "restored" && status.endpointUnavailable === true));
 });

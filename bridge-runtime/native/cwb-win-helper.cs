@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -361,6 +362,10 @@ namespace CwbWinHelper {
       }
     }
 
+    private static string EscapeWqlLiteral(string value) {
+      return (value ?? "").Replace("\\", "\\\\").Replace("'", "\\'");
+    }
+
     private static int RunVerifyCdpOwner() {
       string queryStage = "initialize";
       try {
@@ -536,8 +541,10 @@ namespace CwbWinHelper {
     private static int RunListCodexProcesses() {
       string targetExe = Environment.GetEnvironmentVariable("CWB_TARGET_EXE");
       string targetPath = Path.GetFullPath(targetExe);
+      string targetFileName = Path.GetFileName(targetPath);
+      string targetProcName = Path.GetFileNameWithoutExtension(targetPath);
       var items = new List<Dictionary<string, object>>();
-      Process[] processes = Process.GetProcessesByName("ChatGPT");
+      Process[] processes = Process.GetProcessesByName(targetProcName);
       bool needWmiFallback = false;
       for (int i = 0; i < processes.Length; i++) {
         using (Process proc = processes[i]) {
@@ -566,7 +573,8 @@ namespace CwbWinHelper {
       if (needWmiFallback) {
         items.Clear();
         var scope = CreateWmiScope();
-        using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery("SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = 'ChatGPT.exe'"))) {
+        string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "'";
+        using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query))) {
           using (ManagementObjectCollection results = searcher.Get()) {
             foreach (ManagementObject mo in results) {
               using (mo) {
@@ -601,26 +609,78 @@ namespace CwbWinHelper {
 
     private static int RunListRunningCodex() {
       var items = new List<Dictionary<string, object>>();
+      var seenPids = new HashSet<int>();
       var versionCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-      Process[] processes = Process.GetProcessesByName("ChatGPT");
-      for (int i = 0; i < processes.Length; i++) {
-        using (Process proc = processes[i]) {
-          int pid = proc.Id;
-          string execPath = TryGetProcessImagePath(pid);
-          if (String.IsNullOrEmpty(execPath)) continue;
-          string version;
-          if (!versionCache.TryGetValue(execPath, out version)) {
-            version = "";
-            try {
-              version = FileVersionInfo.GetVersionInfo(execPath).ProductVersion ?? "";
-            } catch { }
-            versionCache[execPath] = version;
+      var identityCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+      var extraPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      var processNames = new List<string>();
+      var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      Action<string> addProcName = (name) => {
+        if (!String.IsNullOrWhiteSpace(name) && seenNames.Add(name)) processNames.Add(name);
+      };
+      addProcName("ChatGPT");
+      addProcName("Codex");
+
+      string rawExtraPaths = Environment.GetEnvironmentVariable("CWB_EXTRA_EXE_PATHS");
+      if (!String.IsNullOrWhiteSpace(rawExtraPaths)) {
+        try {
+          var parsed = Json.DeserializeObject(rawExtraPaths) as object[];
+          if (parsed != null) {
+            for (int i = 0; i < parsed.Length; i++) {
+              string rawPath = parsed[i] as string;
+              if (String.IsNullOrWhiteSpace(rawPath)) continue;
+              try {
+                string full = Path.GetFullPath(rawPath);
+                extraPaths.Add(full);
+                addProcName(Path.GetFileNameWithoutExtension(full));
+              } catch { }
+            }
           }
-          var entry = new Dictionary<string, object>();
-          entry["ProcessId"] = pid;
-          entry["ExecutablePath"] = execPath;
-          entry["ProductVersion"] = version;
-          items.Add(entry);
+        } catch { }
+      }
+
+      for (int n = 0; n < processNames.Count; n++) {
+        string procName = processNames[n];
+        Process[] processes = Process.GetProcessesByName(procName);
+        for (int i = 0; i < processes.Length; i++) {
+          using (Process proc = processes[i]) {
+            int pid = proc.Id;
+            if (!seenPids.Add(pid)) continue;
+            string execPath = TryGetProcessImagePath(pid);
+            if (String.IsNullOrEmpty(execPath)) continue;
+            string fullPath = execPath;
+            try { fullPath = Path.GetFullPath(execPath); } catch { }
+            string fileName = Path.GetFileName(fullPath);
+            bool include = String.Equals(fileName, "ChatGPT.exe", StringComparison.OrdinalIgnoreCase)
+              || extraPaths.Contains(fullPath);
+            if (!include && String.Equals(fileName, "Codex.exe", StringComparison.OrdinalIgnoreCase)) {
+              bool isCodex;
+              if (!identityCache.TryGetValue(fullPath, out isCodex)) {
+                isCodex = false;
+                try {
+                  FileVersionInfo info = FileVersionInfo.GetVersionInfo(fullPath);
+                  string identity = (info.ProductName ?? "") + " " + (info.FileDescription ?? "");
+                  isCodex = identity.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0;
+                } catch { }
+                identityCache[fullPath] = isCodex;
+              }
+              include = isCodex;
+            }
+            if (!include) continue;
+            string version;
+            if (!versionCache.TryGetValue(fullPath, out version)) {
+              version = "";
+              try {
+                version = FileVersionInfo.GetVersionInfo(fullPath).ProductVersion ?? "";
+              } catch { }
+              versionCache[fullPath] = version;
+            }
+            var entry = new Dictionary<string, object>();
+            entry["ProcessId"] = pid;
+            entry["ExecutablePath"] = execPath;
+            entry["ProductVersion"] = version;
+            items.Add(entry);
+          }
         }
       }
       Console.WriteLine(Json.Serialize(items));
@@ -632,9 +692,59 @@ namespace CwbWinHelper {
       public string CommandLine;
     }
 
-    private static List<CodexProcRow> FindTargetCodexProcesses(ref ManagementScope scope, string targetPath) {
-      var list = new List<CodexProcRow>();
-      Process[] processes = Process.GetProcessesByName("ChatGPT");
+    private static bool IsRootCodexProcess(CodexProcRow row) {
+      return row != null
+        && !String.IsNullOrEmpty(row.CommandLine)
+        && row.CommandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) < 0;
+    }
+
+    private static List<CodexProcRow> OrderRootsFirst(List<CodexProcRow> rows) {
+      var ordered = new List<CodexProcRow>(rows.Count);
+      for (int i = 0; i < rows.Count; i++) {
+        if (IsRootCodexProcess(rows[i])) ordered.Add(rows[i]);
+      }
+      for (int i = 0; i < rows.Count; i++) {
+        if (!IsRootCodexProcess(rows[i])) ordered.Add(rows[i]);
+      }
+      return ordered;
+    }
+
+    private static bool TryKillProcess(int pid, out bool accessDenied, out string errorDetail) {
+      accessDenied = false;
+      errorDetail = null;
+      try {
+        using (Process proc = Process.GetProcessById(pid)) {
+          proc.Kill();
+          return true;
+        }
+      } catch (ArgumentException) {
+        return true;
+      } catch (InvalidOperationException) {
+        return true;
+      } catch (UnauthorizedAccessException) {
+        accessDenied = true;
+        errorDetail = "access-denied";
+        return false;
+      } catch (Win32Exception ex) {
+        if (ex.NativeErrorCode == 5) {
+          accessDenied = true;
+          errorDetail = "win32:5";
+        } else {
+          errorDetail = "win32:" + ex.NativeErrorCode.ToString(CultureInfo.InvariantCulture);
+        }
+        return false;
+      } catch (Exception ex) {
+        errorDetail = ex.GetType().Name;
+        return false;
+      }
+    }
+
+    private static List<CodexProcRow> FindTargetCodexProcesses(ref ManagementScope scope, string targetPath, bool requireCommandLine) {
+      string targetFileName = Path.GetFileName(targetPath);
+      string targetProcName = Path.GetFileNameWithoutExtension(targetPath);
+      var nativeMatches = new List<CodexProcRow>();
+      var nativePids = new HashSet<int>();
+      Process[] processes = Process.GetProcessesByName(targetProcName);
       bool needWmiFallback = false;
       for (int i = 0; i < processes.Length; i++) {
         using (Process proc = processes[i]) {
@@ -643,32 +753,49 @@ namespace CwbWinHelper {
           if (String.IsNullOrEmpty(execPath)) { needWmiFallback = true; continue; }
           if (!PathMatches(execPath, targetPath)) continue;
           string commandLine = TryGetProcessCommandLine(pid);
-          if (commandLine == null) { needWmiFallback = true; continue; }
-          list.Add(new CodexProcRow {
-            ProcessId = pid,
-            CommandLine = commandLine
-          });
+          if (commandLine == null) {
+            if (requireCommandLine) { needWmiFallback = true; continue; }
+            commandLine = "";
+          }
+          if (nativePids.Add(pid)) {
+            nativeMatches.Add(new CodexProcRow {
+              ProcessId = pid,
+              CommandLine = commandLine
+            });
+          }
         }
       }
-      if (!needWmiFallback) return list;
+      if (!needWmiFallback) return nativeMatches;
 
-      list.Clear();
+      var merged = new List<CodexProcRow>();
+      var seenPids = new HashSet<int>();
       if (scope == null) scope = CreateWmiScope();
-      using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery("SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = 'ChatGPT.exe'"))) {
+      string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "'";
+      using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query))) {
         using (ManagementObjectCollection results = searcher.Get()) {
           foreach (ManagementObject mo in results) {
             using (mo) {
               string execPath = mo["ExecutablePath"] as string;
               if (!PathMatches(execPath, targetPath)) continue;
-              list.Add(new CodexProcRow {
-                ProcessId = Convert.ToInt32(mo["ProcessId"], CultureInfo.InvariantCulture),
-                CommandLine = mo["CommandLine"] as string ?? ""
-              });
+              int pid = Convert.ToInt32(mo["ProcessId"], CultureInfo.InvariantCulture);
+              if (seenPids.Add(pid)) {
+                merged.Add(new CodexProcRow {
+                  ProcessId = pid,
+                  CommandLine = mo["CommandLine"] as string ?? ""
+                });
+              }
             }
           }
         }
       }
-      return list;
+      if (!requireCommandLine) {
+        for (int i = 0; i < nativeMatches.Count; i++) {
+          if (seenPids.Add(nativeMatches[i].ProcessId)) {
+            merged.Add(nativeMatches[i]);
+          }
+        }
+      }
+      return merged;
     }
 
     private static int RunCloseCodexProcesses() {
@@ -680,16 +807,16 @@ namespace CwbWinHelper {
         closeTimeoutMs = Math.Max(1000, parsedTimeout);
       }
       string expectedJson = Environment.GetEnvironmentVariable("CWB_EXPECTED_PROCESSES");
+      bool strictTakeover = !String.IsNullOrEmpty(expectedJson);
       ManagementScope scope = null;
-      var matched = FindTargetCodexProcesses(ref scope, targetPath);
+      var matched = FindTargetCodexProcesses(ref scope, targetPath, strictTakeover);
 
-      if (!String.IsNullOrEmpty(expectedJson)) {
+      if (strictTakeover) {
         var expectedList = Json.DeserializeObject(expectedJson) as object[];
         if (expectedList == null) throw new InvalidOperationException("Invalid expected process list");
         var roots = new List<CodexProcRow>();
         for (int i = 0; i < matched.Count; i++) {
-          if (!String.IsNullOrEmpty(matched[i].CommandLine)
-            && matched[i].CommandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) < 0) {
+          if (IsRootCodexProcess(matched[i])) {
             roots.Add(matched[i]);
           }
         }
@@ -714,34 +841,140 @@ namespace CwbWinHelper {
           }
         }
         matched = roots;
+      } else {
+        matched = OrderRootsFirst(matched);
       }
 
       var matchedProcessIds = new List<int>();
+      var matchedSet = new HashSet<int>();
+      var accessDeniedSet = new HashSet<int>();
+      var killErrorMap = new Dictionary<int, string>();
       for (int i = 0; i < matched.Count; i++) {
-        matchedProcessIds.Add(matched[i].ProcessId);
+        int pid = matched[i].ProcessId;
+        if (matchedSet.Add(pid)) matchedProcessIds.Add(pid);
       }
       for (int i = 0; i < matchedProcessIds.Count; i++) {
-        try {
-          using (Process proc = Process.GetProcessById(matchedProcessIds[i])) {
-            proc.Kill();
-          }
-        } catch { }
+        int pid = matchedProcessIds[i];
+        bool denied;
+        string err;
+        if (!TryKillProcess(pid, out denied, out err)) {
+          if (denied) accessDeniedSet.Add(pid);
+          if (!String.IsNullOrEmpty(err)) killErrorMap[pid] = err;
+        }
       }
 
       DateTime deadline = DateTime.UtcNow.AddMilliseconds(closeTimeoutMs);
+      DateTime? allDeniedSince = null;
+      bool retriedDenied = false;
       List<CodexProcRow> remaining;
       while (true) {
-        remaining = FindTargetCodexProcesses(ref scope, targetPath);
+        remaining = FindTargetCodexProcesses(ref scope, targetPath, false);
         if (remaining.Count == 0 || DateTime.UtcNow >= deadline) break;
+
+        var liveSet = new HashSet<int>();
+        for (int i = 0; i < remaining.Count; i++) liveSet.Add(remaining[i].ProcessId);
+        accessDeniedSet.RemoveWhere(pid => !liveSet.Contains(pid));
+
+        if (!strictTakeover) {
+          var orderedRemaining = OrderRootsFirst(remaining);
+          bool killedAnyNew = false;
+          for (int i = 0; i < orderedRemaining.Count; i++) {
+            int pid = orderedRemaining[i].ProcessId;
+            if (accessDeniedSet.Contains(pid)) continue;
+            if (matchedSet.Add(pid)) matchedProcessIds.Add(pid);
+            bool denied;
+            string err;
+            if (TryKillProcess(pid, out denied, out err)) {
+              killedAnyNew = true;
+            } else {
+              if (denied) accessDeniedSet.Add(pid);
+              if (!String.IsNullOrEmpty(err)) killErrorMap[pid] = err;
+            }
+          }
+          if (killedAnyNew) {
+            allDeniedSince = null;
+            retriedDenied = false;
+          }
+        }
+
+        bool allBlockedByAccessDenied = false;
+        if (strictTakeover) {
+          int aliveConfirmed = 0;
+          int deniedConfirmed = 0;
+          for (int i = 0; i < matchedProcessIds.Count; i++) {
+            int pid = matchedProcessIds[i];
+            if (!liveSet.Contains(pid)) continue;
+            aliveConfirmed++;
+            if (accessDeniedSet.Contains(pid)) deniedConfirmed++;
+          }
+          allBlockedByAccessDenied = aliveConfirmed > 0 && aliveConfirmed == deniedConfirmed;
+        } else {
+          allBlockedByAccessDenied = remaining.Count > 0 && remaining.TrueForAll(row => accessDeniedSet.Contains(row.ProcessId));
+        }
+
+        if (allBlockedByAccessDenied) {
+          if (!allDeniedSince.HasValue) {
+            allDeniedSince = DateTime.UtcNow;
+          } else if ((DateTime.UtcNow - allDeniedSince.Value).TotalMilliseconds >= 600) {
+            if (!retriedDenied) {
+              retriedDenied = true;
+              var retryList = strictTakeover ? matchedProcessIds : new List<int>(liveSet);
+              for (int i = 0; i < retryList.Count; i++) {
+                int pid = retryList[i];
+                if (!liveSet.Contains(pid)) continue;
+                bool denied;
+                string err;
+                if (TryKillProcess(pid, out denied, out err)) {
+                  accessDeniedSet.Remove(pid);
+                  killErrorMap.Remove(pid);
+                } else {
+                  if (denied) accessDeniedSet.Add(pid);
+                  if (!String.IsNullOrEmpty(err)) killErrorMap[pid] = err;
+                }
+              }
+              Thread.Sleep(150);
+              remaining = FindTargetCodexProcesses(ref scope, targetPath, false);
+              if (remaining.Count == 0) break;
+              liveSet.Clear();
+              for (int i = 0; i < remaining.Count; i++) liveSet.Add(remaining[i].ProcessId);
+              accessDeniedSet.RemoveWhere(pid => !liveSet.Contains(pid));
+              bool stillBlocked = strictTakeover
+                ? matchedProcessIds.Exists(pid => liveSet.Contains(pid)) && matchedProcessIds.TrueForAll(pid => !liveSet.Contains(pid) || accessDeniedSet.Contains(pid))
+                : remaining.TrueForAll(row => accessDeniedSet.Contains(row.ProcessId));
+              if (stillBlocked) break;
+              allDeniedSince = null;
+            } else {
+              break;
+            }
+          }
+        } else {
+          allDeniedSince = null;
+        }
+
         Thread.Sleep(100);
       }
+
       var remainingProcessIds = new List<int>();
+      var remainingSet = new HashSet<int>();
       for (int i = 0; i < remaining.Count; i++) {
-        remainingProcessIds.Add(remaining[i].ProcessId);
+        int pid = remaining[i].ProcessId;
+        if (remainingSet.Add(pid)) remainingProcessIds.Add(pid);
+      }
+      var accessDeniedProcessIds = new List<int>();
+      var killErrors = new List<string>();
+      for (int i = 0; i < remainingProcessIds.Count; i++) {
+        int pid = remainingProcessIds[i];
+        if (accessDeniedSet.Contains(pid)) accessDeniedProcessIds.Add(pid);
+        string err;
+        if (killErrorMap.TryGetValue(pid, out err) && !String.IsNullOrEmpty(err) && !killErrors.Contains(err)) {
+          killErrors.Add(err);
+        }
       }
       var output = new Dictionary<string, object>();
       output["matchedProcessIds"] = matchedProcessIds;
       output["remainingProcessIds"] = remainingProcessIds;
+      output["accessDeniedProcessIds"] = accessDeniedProcessIds;
+      output["killErrors"] = killErrors;
       Console.WriteLine(Json.Serialize(output));
       return 0;
     }

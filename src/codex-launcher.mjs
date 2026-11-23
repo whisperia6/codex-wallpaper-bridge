@@ -54,10 +54,12 @@ const CLOSE_CODEX_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $targetPath = [IO.Path]::GetFullPath($env:CWB_TARGET_EXE)
+$targetName = [IO.Path]::GetFileName($targetPath)
+$wqlName = $targetName.Replace('\', '\\').Replace("'", "\'")
 $closeTimeoutMs = [Math]::Max(1000, [int]$env:CWB_CLOSE_TIMEOUT_MS)
 
 function Find-TargetCodexProcesses {
-  @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction Stop | Where-Object {
+  @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName'" -ErrorAction Stop | Where-Object {
     if (-not $_.ExecutablePath) { return $false }
     try {
       return [string]::Equals(
@@ -71,8 +73,32 @@ function Find-TargetCodexProcesses {
   })
 }
 
+function Order-RootsFirst($rows) {
+  $roots = @($rows | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
+  $children = @($rows | Where-Object { -not $_.CommandLine -or $_.CommandLine -match '--type=' })
+  @($roots + $children)
+}
+
+function Try-KillProcess([int]$processIdentifier, $deniedSet) {
+  try {
+    Stop-Process -Id $processIdentifier -Force -ErrorAction Stop
+    return $true
+  } catch {
+    $ex = $_.Exception
+    $inner = if ($ex.InnerException) { $ex.InnerException } else { $ex }
+    if ($ex -is [System.ArgumentException] -or $inner -is [System.ArgumentException] -or $_.CategoryInfo.Category -eq 'ObjectNotFound') {
+      return $true
+    }
+    if ($ex -is [System.UnauthorizedAccessException] -or $inner -is [System.UnauthorizedAccessException] -or ($inner -is [System.ComponentModel.Win32Exception] -and $inner.NativeErrorCode -eq 5) -or $_.CategoryInfo.Category -eq 'PermissionDenied') {
+      [void]$deniedSet.Add($processIdentifier)
+    }
+    return $false
+  }
+}
+
+$strictTakeover = -not [string]::IsNullOrEmpty($env:CWB_EXPECTED_PROCESSES)
 $matched = @(Find-TargetCodexProcesses)
-if ($env:CWB_EXPECTED_PROCESSES) {
+if ($strictTakeover) {
   $expected = @($env:CWB_EXPECTED_PROCESSES | ConvertFrom-Json)
   $roots = @($matched | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
   if ($roots.Count -ne $expected.Count) { throw 'Codex process set changed; takeover canceled' }
@@ -84,23 +110,86 @@ if ($env:CWB_EXPECTED_PROCESSES) {
   }
   # Automatic takeover closes only the explicitly confirmed parent PIDs.
   $matched = $roots
+} else {
+  $matched = @(Order-RootsFirst $matched)
 }
-$matchedProcessIds = @($matched | ForEach-Object { [int]$_.ProcessId })
+$matchedProcessIds = [Collections.Generic.List[int]]::new()
+$matchedSet = [Collections.Generic.HashSet[int]]::new()
+$accessDeniedSet = [Collections.Generic.HashSet[int]]::new()
+foreach ($row in $matched) {
+  $pidValue = [int]$row.ProcessId
+  if ($matchedSet.Add($pidValue)) { $matchedProcessIds.Add($pidValue) }
+}
 foreach ($processIdentifier in $matchedProcessIds) {
-  Stop-Process -Id $processIdentifier -Force -ErrorAction SilentlyContinue
+  [void](Try-KillProcess $processIdentifier $accessDeniedSet)
 }
 
 $deadline = [DateTime]::UtcNow.AddMilliseconds($closeTimeoutMs)
+$allDeniedSince = $null
+$retriedDenied = $false
 do {
   $remaining = @(Find-TargetCodexProcesses)
   if ($remaining.Count -eq 0) { break }
+  $liveSet = [Collections.Generic.HashSet[int]]::new()
+  foreach ($row in $remaining) { [void]$liveSet.Add([int]$row.ProcessId) }
+  foreach ($deniedPid in @($accessDeniedSet)) {
+    if (-not $liveSet.Contains($deniedPid)) { [void]$accessDeniedSet.Remove($deniedPid) }
+  }
+  if (-not $strictTakeover) {
+    $killedAnyNew = $false
+    foreach ($row in @(Order-RootsFirst $remaining)) {
+      $pidValue = [int]$row.ProcessId
+      if ($accessDeniedSet.Contains($pidValue)) { continue }
+      if ($matchedSet.Add($pidValue)) { $matchedProcessIds.Add($pidValue) }
+      if (Try-KillProcess $pidValue $accessDeniedSet) { $killedAnyNew = $true }
+    }
+    if ($killedAnyNew) { $allDeniedSince = $null; $retriedDenied = $false }
+  }
+  $allBlocked = if ($strictTakeover) {
+    $aliveConfirmed = @($matchedProcessIds | Where-Object { $liveSet.Contains($_) })
+    $aliveConfirmed.Count -gt 0 -and @($aliveConfirmed | Where-Object { -not $accessDeniedSet.Contains($_) }).Count -eq 0
+  } else {
+    $remaining.Count -gt 0 -and @($remaining | Where-Object { -not $accessDeniedSet.Contains([int]$_.ProcessId) }).Count -eq 0
+  }
+  if ($allBlocked) {
+    if ($null -eq $allDeniedSince) {
+      $allDeniedSince = [DateTime]::UtcNow
+    } elseif (([DateTime]::UtcNow - $allDeniedSince).TotalMilliseconds -ge 600) {
+      if (-not $retriedDenied) {
+        $retriedDenied = $true
+        $retryPids = if ($strictTakeover) { @($matchedProcessIds | Where-Object { $liveSet.Contains($_) }) } else { @($liveSet) }
+        foreach ($retryPid in $retryPids) {
+          if (Try-KillProcess $retryPid $accessDeniedSet) { [void]$accessDeniedSet.Remove($retryPid) }
+        }
+        Start-Sleep -Milliseconds 150
+        $remaining = @(Find-TargetCodexProcesses)
+        if ($remaining.Count -eq 0) { break }
+        $stillBlocked = if ($strictTakeover) {
+          $liveAfter = [Collections.Generic.HashSet[int]]::new()
+          foreach ($row in $remaining) { [void]$liveAfter.Add([int]$row.ProcessId) }
+          $aliveConfirmed = @($matchedProcessIds | Where-Object { $liveAfter.Contains($_) })
+          $aliveConfirmed.Count -gt 0 -and @($aliveConfirmed | Where-Object { -not $accessDeniedSet.Contains($_) }).Count -eq 0
+        } else {
+          @($remaining | Where-Object { -not $accessDeniedSet.Contains([int]$_.ProcessId) }).Count -eq 0
+        }
+        if ($stillBlocked) { break }
+        $allDeniedSince = $null
+      } else {
+        break
+      }
+    }
+  } else {
+    $allDeniedSince = $null
+  }
   Start-Sleep -Milliseconds 150
 } while ([DateTime]::UtcNow -lt $deadline)
 
 $remainingProcessIds = @($remaining | ForEach-Object { [int]$_.ProcessId })
+$accessDeniedProcessIds = @($remainingProcessIds | Where-Object { $accessDeniedSet.Contains($_) })
 [pscustomobject]@{
-  matchedProcessIds = $matchedProcessIds
+  matchedProcessIds = @($matchedProcessIds)
   remainingProcessIds = $remainingProcessIds
+  accessDeniedProcessIds = $accessDeniedProcessIds
 } | ConvertTo-Json -Compress
 `;
 
@@ -126,9 +215,15 @@ function parseCloseResult(output) {
   } catch {
     throw new Error("关闭 Codex 后的进程校验结果无效");
   }
+  const rawErrors = parsed?.killErrors;
+  const killErrors = (Array.isArray(rawErrors) ? rawErrors : rawErrors ? [rawErrors] : [])
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
   return {
     matchedProcessIds: normalizeProcessIds(parsed?.matchedProcessIds),
     remainingProcessIds: normalizeProcessIds(parsed?.remainingProcessIds),
+    accessDeniedProcessIds: normalizeProcessIds(parsed?.accessDeniedProcessIds),
+    killErrors,
   };
 }
 
@@ -238,6 +333,12 @@ export async function closeCodexProcesses({
   );
   const result = parseCloseResult(stdout);
   if (result.remainingProcessIds.length > 0) {
+    if (result.killErrors.length > 0) {
+      onLog({ stream: "system", text: `关闭 Codex 进程诊断：${result.killErrors.join("，")}\n` });
+    }
+    if (result.accessDeniedProcessIds.length > 0) {
+      throw new Error(`无法关闭选中版本的 Codex（${result.accessDeniedProcessIds.length} 个进程权限不足，可能以管理员身份运行）。请先手动退出 Codex，或以管理员身份运行桌面版后再试。`);
+    }
     throw new Error(`关闭超时：选中版本仍有 ${result.remainingProcessIds.length} 个进程在运行`);
   }
   onLog({ stream: "system", text: `已关闭选中版本的 ${result.matchedProcessIds.length} 个 Codex 进程。\n` });

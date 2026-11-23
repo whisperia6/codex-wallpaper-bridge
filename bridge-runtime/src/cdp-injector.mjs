@@ -80,6 +80,12 @@ function isTargetConnectionFailure(error) {
       'CDP socket closed', 'CDP socket is not connected'].includes(error?.message);
 }
 
+function isEndpointUnavailableError(error) {
+  const code = error?.cause?.code || error?.code;
+  if (["ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return true;
+  return error instanceof TypeError && /fetch failed/i.test(String(error.message || ""));
+}
+
 function injectionFailureDetail(error, targetIndex) {
   const message = typeof error?.message === "string" ? error.message : "";
   const cdpCode = Number.isInteger(error?.cdpCode) ? error.cdpCode : null;
@@ -274,6 +280,8 @@ export class CdpWallpaperInjector {
     this.lastScanTimings = [];
     this.sessions = new Map();
     this.disconnectedSessions = new Map();
+    this.scanning = null;
+    this.waitingMessage = null;
     this.timer = null;
   }
 
@@ -411,6 +419,7 @@ export class CdpWallpaperInjector {
           throw new Error("Renderer injection plan did not stabilize before timeout");
         }
       } while (appliedVersion !== this.planVersion);
+      session.appliedPlanVersion = appliedVersion;
       this.sessions.set(target.id, session);
       this.disconnectedSessions.delete(target.id);
       if (!this.restoring && this.installOnNewDocument && typeof socket.onEvent === "function") {
@@ -1005,7 +1014,7 @@ export class CdpWallpaperInjector {
     await Promise.allSettled([...this.sessions.values()].filter(session => session.runtimeInstalled).map(session => this.applyPower(session)));
   }
 
-  async update(injectionValue) {
+  async update(injectionValue, { scan = false } = {}) {
     if (this.restoring) throw new Error("Renderer restoration is in progress");
     const injection = normalizeInjection(injectionValue);
     this.bootstrapScript = injection.bootstrapScript || this.bootstrapScript;
@@ -1018,15 +1027,49 @@ export class CdpWallpaperInjector {
     this.directSceneId = injection.directSceneId;
     this.requiresMediaCsp = injection.requiresMediaCsp;
     this.fallbackScripts = injection.fallbackScripts;
-    this.planVersion += 1;
+    const targetPlanVersion = ++this.planVersion;
     this.scenePreloadVersion += 1;
     this.scenePreloadKey = null;
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
     this.sceneUpdateDepth += 1;
-    let results;
+    let results = [];
+    let scanFailures = 0;
+    let scanDeferred = 0;
+    let scannedTimings = [];
+    let alreadyAppliedCount = 0;
+    let alreadyDeferredCount = 0;
     try {
+      if (scan) {
+        if (this.scanning) await this.scanning.catch(() => {});
+        while (this.attachments.size > 0) {
+          await Promise.allSettled([...this.attachments]);
+        }
+        if (this.restoring) throw new Error("Renderer restoration is in progress");
+        await this.scanOnce();
+        if (this.restoring) throw new Error("Renderer restoration is in progress");
+        scanFailures = this.lastScanFailures;
+        scanDeferred = this.lastScanDeferred;
+        scannedTimings = [...this.lastScanTimings];
+      }
       await this.prepareScenePreloads(injection);
-      results = await Promise.allSettled([...this.sessions.values()].map((session) => this.installScript(session, injection)));
+      const sessionsToUpdate = [];
+      for (const session of this.sessions.values()) {
+        if (scan && session.appliedPlanVersion === targetPlanVersion) {
+          if (session.deferred) alreadyDeferredCount += 1;
+          else {
+            alreadyAppliedCount += 1;
+            if (session.lastInjection && !scannedTimings.includes(session.lastInjection)) {
+              scannedTimings.push(session.lastInjection);
+            }
+          }
+        } else {
+          sessionsToUpdate.push(session);
+        }
+      }
+      results = await Promise.allSettled(sessionsToUpdate.map((session) => this.installScript(session, injection).then((value) => {
+        session.appliedPlanVersion = targetPlanVersion;
+        return value;
+      })));
     } finally { this.sceneUpdateDepth -= 1; }
     const failed = results.filter((result) => result.status === "rejected");
     // Ordinal and fixed enums only: renderer exception text, target identities,
@@ -1034,16 +1077,38 @@ export class CdpWallpaperInjector {
     const failureDetails = results.flatMap((result, targetIndex) => result.status === "rejected"
       ? [injectionFailureDetail(result.reason, targetIndex)] : []).slice(0, 8);
     for (const detail of failureDetails) this.status("injection-failed", { message: JSON.stringify(detail) });
-    const deferredCount = results.filter(result => result.status === "fulfilled" && result.value?.deferred === true).length
-      || (this.sessions.size === 0 ? this.lastScanDeferred : 0);
-    const timings = results
-      .filter((result) => result.status === "fulfilled" && result.value && !result.value.deferred)
-      .map((result) => result.value);
-    this.status("updated", { sessions: results.length, failed: failed.length, timings });
-    return { sessions: results.length - deferredCount, failed: failed.length, deferred: deferredCount, timings, failureDetails };
+    const updatedDeferred = results.filter((result) => result.status === "fulfilled" && result.value?.deferred === true).length;
+    let deferredCount;
+    if (scan) {
+      const attachedDeferred = [...this.sessions.values()].filter((session) => session.deferred === true).length;
+      const unattachedDeferred = Math.max(0, scanDeferred - attachedDeferred);
+      deferredCount = updatedDeferred + alreadyDeferredCount + unattachedDeferred;
+    } else {
+      deferredCount = updatedDeferred || (this.sessions.size === 0 ? this.lastScanDeferred : 0);
+    }
+    const timings = [
+      ...scannedTimings,
+      ...results
+        .filter((result) => result.status === "fulfilled" && result.value && !result.value.deferred)
+        .map((result) => result.value),
+    ];
+    const totalFailed = failed.length + scanFailures;
+    const totalSessions = (results.length - updatedDeferred) + alreadyAppliedCount;
+    this.status("updated", { sessions: results.length + alreadyAppliedCount + alreadyDeferredCount, failed: totalFailed, timings });
+    return { sessions: totalSessions, failed: totalFailed, deferred: deferredCount, timings, failureDetails };
   }
 
-  async scanOnce() {
+  scanOnce() {
+    if (this.restoring) return Promise.resolve(0);
+    if (this.scanning) return this.scanning;
+    const operation = this.scanOnceInternal().finally(() => {
+      if (this.scanning === operation) this.scanning = null;
+    });
+    this.scanning = operation;
+    return operation;
+  }
+
+  async scanOnceInternal() {
     if (this.restoring) return 0;
     const lifecycleVersion = this.lifecycleVersion;
     this.lastScanFailures = 0;
@@ -1052,8 +1117,13 @@ export class CdpWallpaperInjector {
     let targets;
     try {
       targets = await this.listTargets();
+      this.waitingMessage = null;
     } catch (error) {
-      this.status("waiting", { message: error.message, endpoint: this.endpoint });
+      const message = String(error?.message || error || "");
+      if (this.waitingMessage !== message) {
+        this.waitingMessage = message;
+        this.status("waiting", { message, endpoint: this.endpoint });
+      }
       return 0;
     }
     if (this.restoring || lifecycleVersion !== this.lifecycleVersion) return 0;
@@ -1066,9 +1136,22 @@ export class CdpWallpaperInjector {
         this.sessions.delete(id);
       } else if (session.deferred && session.deferredInjection && !session.rehydrating) {
         try {
-          const result = await this.installScript(session, session.deferredInjection);
+          const planVersion = this.planVersion;
+          const result = await this.installScript(session, {
+            bootstrapScript: this.bootstrapScript,
+            applyScript: this.applyScript,
+            compatibilityScript: this.compatibilityScript,
+            compatibilityRestoreScript: this.compatibilityRestoreScript,
+            nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId,
+            directSceneEnabled: this.directSceneEnabled, directSceneId: this.directSceneId, fallbackScripts: this.fallbackScripts,
+            requiresMediaCsp: this.requiresMediaCsp,
+          });
+          if (planVersion === this.planVersion) session.appliedPlanVersion = planVersion;
           if (result?.deferred) this.lastScanDeferred += 1;
-          else if (result) this.lastScanTimings.push(result);
+          else if (result) {
+            session.lastInjection = result;
+            this.lastScanTimings.push(result);
+          }
         } catch (error) {
           this.lastScanFailures += 1;
           this.status("attach-error", { targetId: id, message: error.message });
@@ -1139,6 +1222,7 @@ export class CdpWallpaperInjector {
       this.planVersion += 1;
     }
     if (this.running) return;
+    this.waitingMessage = null;
     this.running = true;
     await this.scanOnce();
     const tick = async () => {
@@ -1151,12 +1235,13 @@ export class CdpWallpaperInjector {
     return { sessions: [...this.sessions.values()].filter(session => !session.deferred).length, failed: this.lastScanFailures, deferred: this.lastScanDeferred, timings: this.lastScanTimings };
   }
 
-  async restore() {
+  async restore({ allowEndpointUnavailable = false } = {}) {
     this.scenePreloadVersion += 1;
     this.scenePreloadKey = null;
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
     this.lifecycleVersion += 1;
     this.running = false;
+    this.waitingMessage = null;
     clearTimeout(this.timer);
     this.restoring = true;
     const compatibilityRestoreScript = this.compatibilityRestoreScript;
@@ -1177,7 +1262,17 @@ export class CdpWallpaperInjector {
       while (this.installations.size > 0 || this.attachments.size > 0) {
         await Promise.allSettled([...this.installations, ...this.attachments]);
       }
-      let targets = await this.listTargets();
+      let targets;
+      try {
+        targets = await this.listTargets();
+      } catch (error) {
+        if (allowEndpointUnavailable && this.sessions.size === 0 && isEndpointUnavailableError(error)) {
+          this.disconnectedSessions.clear();
+          this.status("restored", { sessions: 0, endpointUnavailable: true });
+          return;
+        }
+        throw error;
+      }
       if (targets.length === 0) throw new Error("没有找到可完整恢复的 Codex renderer");
       const coverageErrors = [];
       let cohortSettled = false;
@@ -1293,20 +1388,23 @@ export class CdpWallpaperInjector {
     this.status("preserved", { sessions: this.sessions.size });
   }
 
-  async close({ restore = false, preserveCurrentPage = false } = {}) {
+  async close({ restore = false, preserveCurrentPage = false, allowEndpointUnavailable = false } = {}) {
     this.scenePreloadVersion += 1;
     this.scenePreloadKey = null;
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
     this.lifecycleVersion += 1;
     this.running = false;
+    this.waitingMessage = null;
     clearTimeout(this.timer);
     try {
-      if (restore || (!preserveCurrentPage && [...this.sessions.values(), ...this.disconnectedSessions.values()].some((session) => session.cspBypassActive))) await this.restore();
+      if (restore || (!preserveCurrentPage && [...this.sessions.values(), ...this.disconnectedSessions.values()].some((session) => session.cspBypassActive))) {
+        await this.restore({ allowEndpointUnavailable });
+      }
       else if (preserveCurrentPage) {
         try {
           await this.preserveCurrentPage();
         } catch (error) {
-          await this.restore();
+          await this.restore({ allowEndpointUnavailable });
           throw error;
         }
       }

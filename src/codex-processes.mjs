@@ -7,8 +7,10 @@ const PROCESS_QUERY_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $targetPath = [IO.Path]::GetFullPath($env:CWB_TARGET_EXE)
+$targetName = [IO.Path]::GetFileName($targetPath)
+$wqlName = $targetName.Replace('\', '\\').Replace("'", "\'")
 try {
-  $items = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction Stop | Where-Object {
+  $items = @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName'" -ErrorAction Stop | Where-Object {
     if (-not $_.ExecutablePath -or -not $_.CommandLine) { return $false }
     try {
       $pathMatch = [string]::Equals(

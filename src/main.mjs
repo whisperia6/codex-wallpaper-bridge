@@ -331,6 +331,9 @@ async function injectOnceAtPort({ port, adaptive, signal }) {
 }
 
 async function confirmCloseRunningCodex(installation) {
+  if (typeof mainWindow?.isVisible === "function" && (!mainWindow.isVisible() || mainWindow.isMinimized())) {
+    showMainWindow();
+  }
   const processCount = installation.processIds?.length || 0;
   const result = await dialog.showMessageBox(mainWindow, {
     type: "warning",
@@ -347,6 +350,9 @@ async function confirmCloseRunningCodex(installation) {
 
 async function confirmLaunchSeparateCodex(installation, runningInstallations) {
   assertNotQuitting();
+  if (typeof mainWindow?.isVisible === "function" && (!mainWindow.isVisible() || mainWindow.isMinimized())) {
+    showMainWindow();
+  }
   const runningDetails = runningInstallations.map(({ label, path: executablePath }) => `${label}\n${executablePath}`).join("\n\n");
   const result = await dialog.showMessageBox(mainWindow, {
     type: "warning",

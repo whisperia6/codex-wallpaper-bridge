@@ -180,22 +180,22 @@ async function main() {
     dispatch: (id, input) => !stopping && injector?.running && directSceneEnabled
       ? injector.sceneDelivery?.input(id, input) : null });
 
-  const refreshInjection = async () => {
+  const refreshInjection = async ({ scan = false, allowDetached = false } = {}) => {
     // Saving is a disk/renderer transaction, not an OS capture readiness gate.
     // The middleware owns this queued startup and close waits for it separately.
     void media.configure().catch(() => console.error("系统媒体初始化未完成；可在媒体状态中查看"));
     if (!injector) return { ok: true, status: "preview-only" };
     const injection = await currentInjection();
-    const result = await injector.update(injection);
-    if (result.failed > 0 || (result.sessions === 0 && !(result.deferred > 0))) {
+    const result = scan ? await injector.update(injection, { scan: true }) : await injector.update(injection);
+    if (result.failed > 0 || (!allowDetached && result.sessions === 0 && !(result.deferred > 0))) {
       throw new Error("一个或多个 Codex renderer 未能完成注入验证");
     }
     return {
       ok: true,
-      status: result.sessions > 0 ? `updated:${result.sessions}` : `deferred:${result.deferred}`,
+      status: result.sessions > 0 ? `updated:${result.sessions}` : result.deferred > 0 ? `deferred:${result.deferred}` : "detached",
       deferred: result.deferred || 0,
       metrics: injection.metrics,
-      timings: result.timings
+      timings: result.timings || []
     };
   };
 
@@ -253,7 +253,7 @@ async function main() {
       return delivery ? delivery.properties(project.id, operation === "apply" ? values : null)
         : { phase: "unavailable", method: "none", values: {} };
     },
-    onConfigChange: () => enqueueOperation(refreshInjection),
+    onConfigChange: () => enqueueOperation(() => refreshInjection({ allowDetached: true })),
     // Speculation does not join the apply queue or install/reload any renderer.
     onScenePreload: directSceneEnabled ? (id) => stopping || !injector?.running
       ? { ok: true, status: "skipped", targets: 0 } : injector.preloadScene(id) : null,
@@ -270,7 +270,7 @@ async function main() {
         const state = await ensureInjector();
         const update = state.started
           ? { ok: true, metrics: state.metrics, timings: state.timings }
-          : await refreshInjection();
+          : await refreshInjection({ scan: true });
         if (!update.ok) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
         await writeRuntime(server, options, scanResult, true);
         const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
@@ -363,7 +363,7 @@ async function main() {
     const errors = [];
     for (const cleanup of [
       () => media.close(),
-      () => activeInjector?.close({ restore: true }),
+      () => activeInjector?.close({ restore: true, allowEndpointUnavailable: true }),
       () => server.close(),
       () => nativeProvider?.close(),
       () => rm(runtimePath, { force: true }),
