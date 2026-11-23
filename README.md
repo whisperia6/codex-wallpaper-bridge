@@ -57,7 +57,7 @@
 - 仅在使用视频转码优化时需要本机安装 `ffmpeg` 和 `ffprobe`。
 
 ### 方式一：使用 NSIS 安装包（推荐）
-从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.2.0`：[CodexWallpaperDesktop-1.2.0-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.2.0/CodexWallpaperDesktop-1.2.0-Setup.exe)）：
+从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.2.1`：[CodexWallpaperDesktop-1.2.1-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.2.1/CodexWallpaperDesktop-1.2.1-Setup.exe)）：
 - 中文安装向导，支持自选安装路径（推荐安装到 D / F 盘）。
 - 安装后启动即秒开，无需每次向 C 盘 `Temp` 解压临时文件。
 - 卸载时默认保留个人壁纸设置。
@@ -168,5 +168,5 @@ node --test test/win-helper.test.mjs test/cdp-owner.test.mjs test/compatibility-
 
 ## 更多文档与致谢
 
-- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
+- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.2.1 版本说明](docs/RELEASE_1.2.1.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
 - 场景渲染基于 WebWallGL，相关组件来源、版本与开源许可见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。
