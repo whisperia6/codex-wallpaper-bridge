@@ -219,8 +219,28 @@ test("launchCodex cleans up a Store-activated PID if endpoint wait is aborted", 
     },
     validateExecutableFn: async (value) => value,
     mkdirFn: async () => {},
-    activateStoreApp: async () => ({ processId: 7777 }),
+    activateStoreApp: async () => ({ processId: 7777, createdNew: true }),
     killProcessFn: (pid) => { killed.push(pid); },
   }), { name: "AbortError" });
   assert.deepEqual(killed, [7777]);
+});
+
+test("launchCodex never kills a pre-existing Store Codex process returned by ActivateApplication", async () => {
+  const killed = [];
+  await assert.rejects(launchCodex({
+    installation: {
+      kind: "store",
+      path: "C:\\Program Files\\WindowsApps\\OpenAI.Codex\\app\\ChatGPT.exe",
+      appUserModelId: "OpenAI.Codex_2p2nqsd0c76g0!App",
+      isRunning: false,
+    },
+    port: 9335,
+    profileRoot: "C:\\Profiles",
+    isEndpointReady: async () => false,
+    validateExecutableFn: async (value) => value,
+    mkdirFn: async () => {},
+    activateStoreApp: async () => ({ processId: 8888, createdNew: false }),
+    killProcessFn: (pid) => { killed.push(pid); },
+  }), /已在普通模式运行/);
+  assert.deepEqual(killed, []);
 });

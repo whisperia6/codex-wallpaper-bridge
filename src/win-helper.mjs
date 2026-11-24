@@ -9,9 +9,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 let cachedHelperPath;
 let helperDisabled = false;
 
-// 0x8007045A (ERROR_DLL_INIT_FAILED): .NET CLR cannot initialize when an .exe
-// inherits a Low Mandatory Integrity Level (for example inside sandboxed dev folders).
-const LOADER_INIT_FAILURE_CODES = new Set([2147943514, -2147023782]);
+// 0x8007045A (ERROR_DLL_INIT_FAILED), 0xC0000142 (STATUS_DLL_INIT_FAILED),
+// 0xC0000135 (STATUS_DLL_NOT_FOUND), 0xC0000022 (STATUS_ACCESS_DENIED):
+// .NET CLR or OS loader cannot initialize the helper executable.
+const LOADER_INIT_FAILURE_CODES = new Set([
+  2147943514, -2147023782,
+  3221225794, -1073741502,
+  3221225781, -1073741515,
+  3221225506, -1073741790,
+]);
 
 function helperCandidates() {
   const relative = path.join("dist", "bridge-runtime", "native", "cwb-win-helper.exe");
@@ -48,6 +54,11 @@ function isHelperLoaderFailure(error) {
     || error.code === "EPERM";
 }
 
+function isTransientHelperFailure(error) {
+  if (!error || error.killed === true || error.name === "AbortError") return false;
+  return error.code === "EBUSY";
+}
+
 export async function tryRunWinHelper(subcommand, options = {}, platform = process.platform) {
   const helperPath = resolveWinHelperPath(platform);
   if (!helperPath) return null;
@@ -58,6 +69,9 @@ export async function tryRunWinHelper(subcommand, options = {}, platform = proce
       ...options,
     });
   } catch (error) {
+    if (isTransientHelperFailure(error)) {
+      return null;
+    }
     if (isHelperLoaderFailure(error)) {
       helperDisabled = true;
       cachedHelperPath = null;

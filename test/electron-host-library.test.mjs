@@ -12,7 +12,7 @@ async function harness({ saving = false, error = false } = {}) {
   let time = 1000;
   const indicator = { classList: { contains: (name) => name === 'is-saving' ? saving : name === 'is-error' ? error : false } };
   const window = {
-    parent: { postMessage: (value) => messages.push(value) }, location: { href: 'http://127.0.0.1:30000/secret/' },
+    parent: { postMessage: (value, origin) => messages.push({ ...value, _targetOrigin: origin }) }, location: { href: 'http://127.0.0.1:30000/secret/' },
     addEventListener: (name, handler) => { handlers[name] = handler; },
     setTimeout: (callback, duration) => { time += duration; queueMicrotask(callback); }, clearTimeout() {},
     fetch: (...args) => { requests.push(args); return new Promise((resolve) => fetches.push(resolve)); },
@@ -23,7 +23,7 @@ async function harness({ saving = false, error = false } = {}) {
     addEventListener(name, handler) { documentHandlers[name] = handler; }, querySelector: (selector) => selector === '#saveIndicator' ? indicator : null };
   runInNewContext(source, { window, document, URL, Date: { now: () => time }, Element, MutationObserver: class {}, Set, Map });
   async function flush(id) {
-    handlers.message({ source: window.parent, data: { channel: 'cwb-control', action: 'flush-config', requestId: id } });
+    handlers.message({ source: window.parent, origin: 'cwb-desktop://shell', data: { channel: 'cwb-control', action: 'flush-config', requestId: id } });
     for (let count = 0; count < 600; count++) {
       if (messages.some((item) => item.type === 'flush-complete' && item.requestId === id)) break;
       await Promise.resolve();
@@ -37,15 +37,16 @@ test('theme changes notify only a UI preference, never write configuration or re
   const h = await harness();
   h.handlers['cwb-workbench-theme-change']({ detail:{theme:'light'} });
   h.handlers['cwb-workbench-theme-change']({ detail:{theme:'invalid'} });
-  assert.deepEqual(h.messages.map(value => ({...value})), [{channel:'cwb-control',type:'workbench-theme',theme:'light'}]);
+  assert.deepEqual(h.messages.map(({ _targetOrigin, ...value }) => ({ ...value, _targetOrigin })), [{ channel:'cwb-control', type:'workbench-theme', theme:'light', _targetOrigin:'cwb-desktop://shell' }]);
   assert.equal(h.requests.length, 0);
 });
 
-test('only parent desktop state can restore the workbench theme', async () => {
+test('only parent desktop state from trusted origin can restore the workbench theme', async () => {
   const h = await harness(), themes = [];
   h.window.cwbWorkbenchTheme = { restore:theme => themes.push(theme) };
-  h.handlers.message({source:{},data:{channel:'cwb-control',type:'desktop-state',state:{workbenchTheme:'light'}}});
-  h.handlers.message({source:h.window.parent,data:{channel:'cwb-control',type:'desktop-state',state:{workbenchTheme:'light'}}});
+  h.handlers.message({source:{},origin:'cwb-desktop://shell',data:{channel:'cwb-control',type:'desktop-state',state:{workbenchTheme:'light'}}});
+  h.handlers.message({source:h.window.parent,origin:'https://evil.invalid',data:{channel:'cwb-control',type:'desktop-state',state:{workbenchTheme:'light'}}});
+  h.handlers.message({source:h.window.parent,origin:'cwb-desktop://shell',data:{channel:'cwb-control',type:'desktop-state',state:{workbenchTheme:'light'}}});
   assert.deepEqual(themes, ['light']);
 });
 

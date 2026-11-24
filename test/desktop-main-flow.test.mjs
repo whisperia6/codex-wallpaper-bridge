@@ -161,8 +161,10 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
     closeCodexProcesses: async (options) => { calls.close.push(options); await duringClose?.(); return { closedCount: 1 }; },
     launchCodex: async (options) => { calls.launch.push(options); return {}; },
     detectInstallations: async () => { calls.detects += 1; return detectedInstallations; },
+    inspectExecutableIdentity: async () => ({ productName: "Codex", fileDescription: "Codex", looksLikeCodex: true, hasDesktopLayout: true }),
     selectInstallationId, validateCdpPort, validateExecutable: async (value) => value, runLaunchAndInjectFlow,
     dailyLogFilename, formatLogEntry, sanitizeLogText,
+    TRAY_ICON_DATA_URL: "",
     createTrayController: ({ actions }) => {
       trayActions = actions;
       return { showResidentNotice: () => {}, destroy: () => { calls.trayDestroyed += 1; } };
@@ -591,4 +593,13 @@ test('opening a different panel port cancels and drains an active takeover', asy
   assert.equal(f.calls.watchers[0].stopped, true); assert.equal(f.calls.launch.length, 0);
   releaseClose(); await takeover; assert.equal((await panel).ok, true);
   assert.equal(f.calls.launch.length, 0); assert.equal(f.calls.starts.at(-1), 19336);
+});
+
+test('second-instance with --quit-running-instance triggers graceful quit instead of showing the window', async context => {
+  const f = await harness(context, { acceptance: false });
+  await f.ipc('cwb:open-control-panel', { port: 19335 });
+  f.app.emit('second-instance', {}, ['CodexWallpaperDesktop.exe', '--quit-running-instance']);
+  await turn();
+  assert.equal(f.calls.trayDestroyed, 1);
+  assert.equal(f.children[0].killCount, 1);
 });

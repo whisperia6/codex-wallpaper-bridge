@@ -59,6 +59,7 @@
       "onlyLoadAppFromAsar": true
     },
     "win": {
+      "icon": "build/icon.ico",
       "requestedExecutionLevel": "asInvoker",
       "target": [
         {
@@ -72,6 +73,7 @@
       "artifactName": "CodexWallpaperDesktop-${version}-Setup.${ext}"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

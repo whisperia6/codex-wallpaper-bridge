@@ -9,6 +9,7 @@ using System.Management;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -97,6 +98,7 @@ namespace CwbWinHelper {
 
   [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   public interface IApplicationActivationManager {
+    [PreserveSig]
     int ActivateApplication(
       [In, MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
       [In, MarshalAs(UnmanagedType.LPWStr)] string arguments,
@@ -267,53 +269,100 @@ namespace CwbWinHelper {
       public IntPtr Buffer;
     }
 
+    private static readonly Regex CodexWordPattern = new Regex(@"\bCodex\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly int CurrentSessionId = Process.GetCurrentProcess().SessionId;
+
+    private static string QueryImagePathFromHandle(IntPtr handle) {
+      var buffer = new StringBuilder(1024);
+      int size = buffer.Capacity;
+      if (QueryFullProcessImageName(handle, 0, buffer, ref size) && size > 0) {
+        return buffer.ToString(0, size);
+      }
+      return null;
+    }
+
+    private static string QueryCommandLineFromHandle(IntPtr handle) {
+      int needed = 0;
+      int status = NtQueryInformationProcess(handle, ProcessCommandLineInformation, IntPtr.Zero, 0, out needed);
+      if (needed <= 0 && status != STATUS_INFO_LENGTH_MISMATCH && status != STATUS_BUFFER_TOO_SMALL && status != STATUS_BUFFER_OVERFLOW) {
+        return null;
+      }
+      int bufSize = Math.Max(needed, 512);
+      for (int attempt = 0; attempt < 3; attempt++) {
+        IntPtr buffer = Marshal.AllocHGlobal(bufSize);
+        try {
+          status = NtQueryInformationProcess(handle, ProcessCommandLineInformation, buffer, bufSize, out needed);
+          if (status == 0) {
+            UnicodeString ustr = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+            if (ustr.Buffer == IntPtr.Zero || ustr.Length == 0) return "";
+            return Marshal.PtrToStringUni(ustr.Buffer, ustr.Length / 2);
+          }
+          if ((status == STATUS_INFO_LENGTH_MISMATCH || status == STATUS_BUFFER_TOO_SMALL || status == STATUS_BUFFER_OVERFLOW) && needed > bufSize) {
+            bufSize = needed + 64;
+            continue;
+          }
+          return null;
+        } finally {
+          Marshal.FreeHGlobal(buffer);
+        }
+      }
+      return null;
+    }
+
     private static string TryGetProcessImagePath(int pid) {
       IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
       if (handle == IntPtr.Zero) return null;
       try {
-        var buffer = new StringBuilder(1024);
-        int size = buffer.Capacity;
-        if (QueryFullProcessImageName(handle, 0, buffer, ref size) && size > 0) {
-          return buffer.ToString(0, size);
-        }
-        return null;
+        return QueryImagePathFromHandle(handle);
       } finally {
         CloseHandle(handle);
       }
     }
 
-    private static string TryGetProcessCommandLine(int pid) {
+    private static void TryQueryProcessInfo(int pid, out string imagePath, out string commandLine) {
+      imagePath = null;
+      commandLine = null;
       IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-      if (handle == IntPtr.Zero) return null;
+      if (handle == IntPtr.Zero) return;
       try {
-        int needed = 0;
-        int status = NtQueryInformationProcess(handle, ProcessCommandLineInformation, IntPtr.Zero, 0, out needed);
-        if (needed <= 0 && status != STATUS_INFO_LENGTH_MISMATCH && status != STATUS_BUFFER_TOO_SMALL && status != STATUS_BUFFER_OVERFLOW) {
-          return null;
-        }
-        int bufSize = Math.Max(needed, 512);
-        for (int attempt = 0; attempt < 3; attempt++) {
-          IntPtr buffer = Marshal.AllocHGlobal(bufSize);
-          try {
-            status = NtQueryInformationProcess(handle, ProcessCommandLineInformation, buffer, bufSize, out needed);
-            if (status == 0) {
-              UnicodeString ustr = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
-              if (ustr.Buffer == IntPtr.Zero || ustr.Length == 0) return "";
-              return Marshal.PtrToStringUni(ustr.Buffer, ustr.Length / 2);
-            }
-            if ((status == STATUS_INFO_LENGTH_MISMATCH || status == STATUS_BUFFER_TOO_SMALL || status == STATUS_BUFFER_OVERFLOW) && needed > bufSize) {
-              bufSize = needed + 64;
-              continue;
-            }
-            return null;
-          } finally {
-            Marshal.FreeHGlobal(buffer);
-          }
-        }
-        return null;
+        imagePath = QueryImagePathFromHandle(handle);
+        commandLine = QueryCommandLineFromHandle(handle);
       } finally {
         CloseHandle(handle);
       }
+    }
+
+    private static bool IsSameSession(Process proc) {
+      try {
+        return proc.SessionId == CurrentSessionId;
+      } catch {
+        return false;
+      }
+    }
+
+    private static bool HasCodexDesktopLayout(string fullPath) {
+      try {
+        string dir = Path.GetDirectoryName(fullPath);
+        if (String.IsNullOrEmpty(dir)) return false;
+        return File.Exists(Path.Combine(dir, "resources", "app.asar"))
+          || File.Exists(Path.Combine(dir, "chrome_elf.dll"))
+          || File.Exists(Path.Combine(dir, "chrome.dll"));
+      } catch {
+        return false;
+      }
+    }
+
+    private static bool IsCodexVersionMetadata(string fullPath, Dictionary<string, bool> cache) {
+      bool isCodex;
+      if (cache.TryGetValue(fullPath, out isCodex)) return isCodex;
+      isCodex = false;
+      try {
+        FileVersionInfo info = FileVersionInfo.GetVersionInfo(fullPath);
+        string identity = (info.ProductName ?? "") + " " + (info.FileDescription ?? "");
+        isCodex = CodexWordPattern.IsMatch(identity);
+      } catch { }
+      cache[fullPath] = isCodex;
+      return isCodex;
     }
 
     private static readonly JavaScriptSerializer Json = CreateSerializer();
@@ -412,16 +461,17 @@ namespace CwbWinHelper {
           long? wmiCreationTicks = null;
 
           if (!hasExpected) {
-            executablePath = TryGetProcessImagePath(ownerId);
-            commandLine = TryGetProcessCommandLine(ownerId);
+            TryQueryProcessInfo(ownerId, out executablePath, out commandLine);
           }
           if (hasExpected || String.IsNullOrEmpty(executablePath) || commandLine == null) {
             if (scope == null) scope = CreateWmiScope();
             string fields = hasExpected ? "ProcessId, ExecutablePath, CommandLine, CreationDate" : "ProcessId, ExecutablePath, CommandLine";
             var owner = QuerySingleProcess(scope, ownerId, fields);
             if (owner == null) throw new InvalidOperationException("Listener owner disappeared");
-            commandLine = owner.ContainsKey("CommandLine") ? Convert.ToString(owner["CommandLine"], CultureInfo.InvariantCulture) : "";
-            executablePath = owner.ContainsKey("ExecutablePath") ? Convert.ToString(owner["ExecutablePath"], CultureInfo.InvariantCulture) : "";
+            string wmiCommandLine = owner.ContainsKey("CommandLine") ? Convert.ToString(owner["CommandLine"], CultureInfo.InvariantCulture) : "";
+            string wmiExecutablePath = owner.ContainsKey("ExecutablePath") ? Convert.ToString(owner["ExecutablePath"], CultureInfo.InvariantCulture) : "";
+            if (!String.IsNullOrEmpty(wmiCommandLine) || commandLine == null) commandLine = wmiCommandLine;
+            if (!String.IsNullOrEmpty(wmiExecutablePath) || String.IsNullOrEmpty(executablePath)) executablePath = wmiExecutablePath;
             processId = Convert.ToInt32(owner["ProcessId"], CultureInfo.InvariantCulture);
             if (hasExpected && owner.ContainsKey("CreationDate")) {
               wmiCreationTicks = ParseWmiCreationTicks(owner["CreationDate"]);
@@ -528,12 +578,20 @@ namespace CwbWinHelper {
         Console.Error.WriteLine("Missing Store AUMID");
         return 1;
       }
+      var existingPids = new HashSet<int>();
+      Process[] before = Process.GetProcesses();
+      for (int i = 0; i < before.Length; i++) {
+        using (Process p = before[i]) {
+          existingPids.Add(p.Id);
+        }
+      }
       var manager = (IApplicationActivationManager)(new ApplicationActivationManager());
       uint pid;
       int hr = manager.ActivateApplication(aumid, arguments, ActivateOptions.None, out pid);
       if (hr != 0) throw new COMException("ActivateApplication failed", hr);
       var result = new Dictionary<string, object>();
       result["processId"] = (int)pid;
+      result["createdNew"] = !existingPids.Contains((int)pid);
       Console.WriteLine(Json.Serialize(result));
       return 0;
     }
@@ -548,11 +606,13 @@ namespace CwbWinHelper {
       bool needWmiFallback = false;
       for (int i = 0; i < processes.Length; i++) {
         using (Process proc = processes[i]) {
+          if (!IsSameSession(proc)) continue;
           int pid = proc.Id;
-          string execPath = TryGetProcessImagePath(pid);
+          string execPath;
+          string commandLine;
+          TryQueryProcessInfo(pid, out execPath, out commandLine);
           if (String.IsNullOrEmpty(execPath)) { needWmiFallback = true; continue; }
           if (!PathMatches(execPath, targetPath)) continue;
-          string commandLine = TryGetProcessCommandLine(pid);
           if (commandLine == null) { needWmiFallback = true; continue; }
           if (String.IsNullOrEmpty(commandLine)) continue;
           if (commandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) >= 0) continue;
@@ -571,9 +631,9 @@ namespace CwbWinHelper {
         }
       }
       if (needWmiFallback) {
-        items.Clear();
+        var wmiItems = new List<Dictionary<string, object>>();
         var scope = CreateWmiScope();
-        string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "'";
+        string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "' AND SessionId = " + CurrentSessionId.ToString(CultureInfo.InvariantCulture);
         using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query))) {
           using (ManagementObjectCollection results = searcher.Get()) {
             foreach (ManagementObject mo in results) {
@@ -597,11 +657,12 @@ namespace CwbWinHelper {
                 entry["CommandLine"] = commandLine;
                 entry["MainWindowHandle"] = mainWindowHandle;
                 entry["MainWindowTitle"] = mainWindowTitle;
-                items.Add(entry);
+                wmiItems.Add(entry);
               }
             }
           }
         }
+        items = wmiItems;
       }
       Console.WriteLine(Json.Serialize(items));
       return 0;
@@ -644,6 +705,7 @@ namespace CwbWinHelper {
         Process[] processes = Process.GetProcessesByName(procName);
         for (int i = 0; i < processes.Length; i++) {
           using (Process proc = processes[i]) {
+            if (!IsSameSession(proc)) continue;
             int pid = proc.Id;
             if (!seenPids.Add(pid)) continue;
             string execPath = TryGetProcessImagePath(pid);
@@ -651,20 +713,13 @@ namespace CwbWinHelper {
             string fullPath = execPath;
             try { fullPath = Path.GetFullPath(execPath); } catch { }
             string fileName = Path.GetFileName(fullPath);
-            bool include = String.Equals(fileName, "ChatGPT.exe", StringComparison.OrdinalIgnoreCase)
-              || extraPaths.Contains(fullPath);
+            bool include = extraPaths.Contains(fullPath);
+            if (!include && String.Equals(fileName, "ChatGPT.exe", StringComparison.OrdinalIgnoreCase)) {
+              include = fullPath.IndexOf(@"\WindowsApps\OpenAI.Codex", StringComparison.OrdinalIgnoreCase) >= 0
+                || IsCodexVersionMetadata(fullPath, identityCache);
+            }
             if (!include && String.Equals(fileName, "Codex.exe", StringComparison.OrdinalIgnoreCase)) {
-              bool isCodex;
-              if (!identityCache.TryGetValue(fullPath, out isCodex)) {
-                isCodex = false;
-                try {
-                  FileVersionInfo info = FileVersionInfo.GetVersionInfo(fullPath);
-                  string identity = (info.ProductName ?? "") + " " + (info.FileDescription ?? "");
-                  isCodex = identity.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0;
-                } catch { }
-                identityCache[fullPath] = isCodex;
-              }
-              include = isCodex;
+              include = IsCodexVersionMetadata(fullPath, identityCache) && HasCodexDesktopLayout(fullPath);
             }
             if (!include) continue;
             string version;
@@ -748,11 +803,13 @@ namespace CwbWinHelper {
       bool needWmiFallback = false;
       for (int i = 0; i < processes.Length; i++) {
         using (Process proc = processes[i]) {
+          if (!IsSameSession(proc)) continue;
           int pid = proc.Id;
-          string execPath = TryGetProcessImagePath(pid);
+          string execPath;
+          string commandLine;
+          TryQueryProcessInfo(pid, out execPath, out commandLine);
           if (String.IsNullOrEmpty(execPath)) { needWmiFallback = true; continue; }
           if (!PathMatches(execPath, targetPath)) continue;
-          string commandLine = TryGetProcessCommandLine(pid);
           if (commandLine == null) {
             if (requireCommandLine) { needWmiFallback = true; continue; }
             commandLine = "";
@@ -770,7 +827,7 @@ namespace CwbWinHelper {
       var merged = new List<CodexProcRow>();
       var seenPids = new HashSet<int>();
       if (scope == null) scope = CreateWmiScope();
-      string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "'";
+      string query = "SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '" + EscapeWqlLiteral(targetFileName) + "' AND SessionId = " + CurrentSessionId.ToString(CultureInfo.InvariantCulture);
       using (var searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query))) {
         using (ManagementObjectCollection results = searcher.Get()) {
           foreach (ManagementObject mo in results) {

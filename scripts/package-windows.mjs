@@ -33,14 +33,6 @@ function resolveScratchPaths() {
       cacheRoot: assertChildPath(base, path.join(base, "electron-builder-cache")),
     };
   }
-  if (process.platform === "win32" && existsSync("F:\\")) {
-    const base = "F:\\.cwb-build-tmp";
-    return {
-      baseRoot: base,
-      scratchRoot: assertChildPath(base, path.join(base, "codex-wallpaper-desktop", names.scratchDirectoryName)),
-      cacheRoot: assertChildPath(base, path.join(base, "electron-builder-cache")),
-    };
-  }
   return {
     baseRoot: outputRoot,
     scratchRoot: assertChildPath(outputRoot, path.join(outputRoot, names.scratchDirectoryName)),

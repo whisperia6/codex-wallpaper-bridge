@@ -16,12 +16,14 @@ $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | ForEach-Object {
   $appId = 'App'
+  $executable = ''
   try {
     $m = Join-Path $_.InstallLocation 'AppxManifest.xml'
     if (Test-Path -LiteralPath $m -PathType Leaf) {
       [xml]$xml = Get-Content -LiteralPath $m -Raw
-      $node = @($xml.Package.Applications.Application | Where-Object { $_.Executable -match '(?i)(^|[\\/])ChatGPT\.exe$' }) | Select-Object -First 1
+      $node = @($xml.Package.Applications.Application | Where-Object { $_.Executable -match '(?i)(^|[\\/])(ChatGPT|Codex)\.exe$' }) | Select-Object -First 1
       if ($node -and $node.Id) { $appId = [string]$node.Id }
+      if ($node -and $node.Executable) { $executable = [string]$node.Executable }
     }
   } catch {}
   [pscustomobject]@{
@@ -30,6 +32,7 @@ $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyCon
     InstallLocation = $_.InstallLocation
     PackageFamilyName = $_.PackageFamilyName
     ApplicationId = $appId
+    Executable = $executable
     SignatureKind = $_.SignatureKind
   }
 })
@@ -132,7 +135,17 @@ function localInstallationId(executablePath) {
 
 function storeExecutablePath(storePackage) {
   if (!storePackage?.InstallLocation) return null;
-  return path.win32.join(String(storePackage.InstallLocation), "app", "ChatGPT.exe");
+  const installRoot = path.win32.resolve(String(storePackage.InstallLocation));
+  const declared = String(storePackage?.Executable || "").trim();
+  if (declared && !path.win32.isAbsolute(declared)) {
+    const resolved = path.win32.resolve(installRoot, declared);
+    const relative = path.win32.relative(installRoot, resolved);
+    if (relative && !relative.startsWith("..") && !path.win32.isAbsolute(relative)
+      && path.win32.extname(resolved).toLowerCase() === ".exe") {
+      return resolved;
+    }
+  }
+  return path.win32.join(installRoot, "app", "ChatGPT.exe");
 }
 
 function storeAppUserModelId(storePackage) {
@@ -317,6 +330,7 @@ async function discoverStaticInstallations({ forceRefresh = false } = {}) {
 const RUNNING_CODEX_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$currentSessionId = (Get-Process -Id $PID).SessionId
 $extraPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 [void]$names.Add('ChatGPT.exe')
@@ -335,17 +349,29 @@ if (-not [string]::IsNullOrWhiteSpace($env:CWB_EXTRA_EXE_PATHS)) {
   } catch {}
 }
 $clauses = @($names | ForEach-Object { "Name = '$($_.Replace('\', '\\').Replace("'", "\'"))'" })
-$filter = $clauses -join ' OR '
+$filter = "($($clauses -join ' OR ')) AND SessionId = $currentSessionId"
 $items = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object {
   $execPath = [string]$_.ExecutablePath
   $fullPath = $execPath
   try { $fullPath = [IO.Path]::GetFullPath($execPath) } catch {}
   $fileName = [IO.Path]::GetFileName($fullPath)
   $item = Get-Item -LiteralPath $fullPath -ErrorAction SilentlyContinue
-  $include = $fileName -ieq 'ChatGPT.exe' -or $extraPaths.Contains($fullPath)
+  $include = $extraPaths.Contains($fullPath)
+  if (-not $include -and $fileName -ieq 'ChatGPT.exe') {
+    if ($fullPath.IndexOf('\WindowsApps\OpenAI.Codex', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+      $include = $true
+    } elseif ($item) {
+      $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
+      if ($identity -match '(?i)\bCodex\b') { $include = $true }
+    }
+  }
   if (-not $include -and $fileName -ieq 'Codex.exe' -and $item) {
     $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
-    if ($identity -match '(?i)\bCodex\b') { $include = $true }
+    $dir = [IO.Path]::GetDirectoryName($fullPath)
+    $hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar') -PathType Leaf) -or
+      (Test-Path -LiteralPath (Join-Path $dir 'chrome_elf.dll') -PathType Leaf) -or
+      (Test-Path -LiteralPath (Join-Path $dir 'chrome.dll') -PathType Leaf)
+    if ($hasDesktopLayout -and $identity -match '(?i)\bCodex\b') { $include = $true }
   }
   if ($include) {
     [pscustomobject]@{
@@ -358,6 +384,54 @@ $items = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyCo
 $items | ConvertTo-Json -Compress
 `;
 
+const INSPECT_EXE_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$full = [IO.Path]::GetFullPath($env:CWB_INSPECT_EXE)
+$item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
+$productName = if ($item) { [string]$item.VersionInfo.ProductName } else { '' }
+$fileDescription = if ($item) { [string]$item.VersionInfo.FileDescription } else { '' }
+$dir = [IO.Path]::GetDirectoryName($full)
+$hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar') -PathType Leaf) -or
+  (Test-Path -LiteralPath (Join-Path $dir 'chrome_elf.dll') -PathType Leaf) -or
+  (Test-Path -LiteralPath (Join-Path $dir 'chrome.dll') -PathType Leaf)
+[pscustomobject]@{
+  productName = $productName
+  fileDescription = $fileDescription
+  looksLikeCodex = [bool](("$productName $fileDescription" -match '(?i)\bCodex\b') -or ($full.IndexOf('\WindowsApps\OpenAI.Codex', [StringComparison]::OrdinalIgnoreCase) -ge 0))
+  hasDesktopLayout = [bool]$hasDesktopLayout
+} | ConvertTo-Json -Compress
+`;
+
+export async function inspectExecutableIdentity(executablePath) {
+  const resolvedPath = await validateExecutable(executablePath);
+  if (process.platform !== "win32") {
+    return { productName: "", fileDescription: "", looksLikeCodex: true, hasDesktopLayout: true };
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", INSPECT_EXE_SCRIPT],
+      {
+        encoding: "utf8",
+        maxBuffer: 256 * 1024,
+        timeout: 5_000,
+        windowsHide: true,
+        env: { ...process.env, CWB_INSPECT_EXE: resolvedPath },
+      },
+    );
+    const parsed = JSON.parse(String(stdout || "").replace(/^\uFEFF/, "").trim());
+    return {
+      productName: String(parsed?.productName || ""),
+      fileDescription: String(parsed?.fileDescription || ""),
+      looksLikeCodex: Boolean(parsed?.looksLikeCodex),
+      hasDesktopLayout: Boolean(parsed?.hasDesktopLayout),
+    };
+  } catch {
+    return { productName: "", fileDescription: "", looksLikeCodex: false, hasDesktopLayout: false };
+  }
+}
+
 async function discoverRunningProcesses(manualExecutables = []) {
   const extraPaths = asArray(manualExecutables)
     .map((entry) => String(entry || "").trim())
@@ -366,11 +440,17 @@ async function discoverRunningProcesses(manualExecutables = []) {
     ...process.env,
     CWB_EXTRA_EXE_PATHS: extraPaths.length ? JSON.stringify(extraPaths) : "",
   };
-  const helperResult = await tryRunWinHelper("list-running-codex", {
-    maxBuffer: 4 * 1024 * 1024,
-    timeout: 8_000,
-    env,
-  });
+  let helperResult = null;
+  try {
+    helperResult = await tryRunWinHelper("list-running-codex", {
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 8_000,
+      env,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    helperResult = null;
+  }
   if (helperResult) {
     return parsePowerShellJson(helperResult.stdout);
   }

@@ -6,11 +6,12 @@ const execFileAsync = promisify(execFile);
 const PROCESS_QUERY_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$currentSessionId = (Get-Process -Id $PID).SessionId
 $targetPath = [IO.Path]::GetFullPath($env:CWB_TARGET_EXE)
 $targetName = [IO.Path]::GetFileName($targetPath)
 $wqlName = $targetName.Replace('\', '\\').Replace("'", "\'")
 try {
-  $items = @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName'" -ErrorAction Stop | Where-Object {
+  $items = @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName' AND SessionId = $currentSessionId" -ErrorAction Stop | Where-Object {
     if (-not $_.ExecutablePath -or -not $_.CommandLine) { return $false }
     try {
       $pathMatch = [string]::Equals(
@@ -129,9 +130,15 @@ export async function listCodexProcesses({
       CWB_CDP_PORT: String(port),
     },
   };
-  const helperResult = processRunner === undefined
-    ? await tryRunWinHelper("list-codex-processes", execOptions)
-    : null;
+  let helperResult = null;
+  if (processRunner === undefined) {
+    try {
+      helperResult = await tryRunWinHelper("list-codex-processes", execOptions);
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      helperResult = null;
+    }
+  }
   const { stdout } = helperResult ?? await (processRunner ?? execFileAsync)(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", PROCESS_QUERY_SCRIPT],

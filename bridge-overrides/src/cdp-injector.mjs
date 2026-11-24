@@ -82,7 +82,8 @@ function isTargetConnectionFailure(error) {
 
 function isEndpointUnavailableError(error) {
   const code = error?.cause?.code || error?.code;
-  if (["ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return true;
+  if (["ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return true;
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return true;
   return error instanceof TypeError && /fetch failed/i.test(String(error.message || ""));
 }
 
@@ -956,6 +957,8 @@ export class CdpWallpaperInjector {
     // reload is filtered above and must not rearm the cached reload request.
     session.themeReloadHandled = false;
     session.runtimeInstalled = false;
+    session.appliedPlanVersion = 0;
+    const planVersion = this.planVersion;
     session.rehydrating = this.installScript(
       session,
       {
@@ -968,7 +971,10 @@ export class CdpWallpaperInjector {
         requiresMediaCsp: this.requiresMediaCsp
       },
       { updateReloadHook: false }
-    ).catch((error) => {
+    ).then((result) => {
+      if (planVersion === this.planVersion) session.appliedPlanVersion = planVersion;
+      if (result && !result.deferred) session.lastInjection = result;
+    }).catch((error) => {
       this.status("rehydrate-error", { targetId: session.target.id, message: error.message });
     }).finally(() => {
       session.rehydrating = null;
@@ -1054,7 +1060,9 @@ export class CdpWallpaperInjector {
       await this.prepareScenePreloads(injection);
       const sessionsToUpdate = [];
       for (const session of this.sessions.values()) {
-        if (scan && session.appliedPlanVersion === targetPlanVersion) {
+        if ((session.appliedPlanVersion || 0) >= targetPlanVersion
+          && !session.rehydrating
+          && (session.deferred || session.runtimeInstalled)) {
           if (session.deferred) alreadyDeferredCount += 1;
           else {
             alreadyAppliedCount += 1;
@@ -1067,7 +1075,9 @@ export class CdpWallpaperInjector {
         }
       }
       results = await Promise.allSettled(sessionsToUpdate.map((session) => this.installScript(session, injection).then((value) => {
-        session.appliedPlanVersion = targetPlanVersion;
+        if ((session.appliedPlanVersion || 0) < targetPlanVersion) {
+          session.appliedPlanVersion = targetPlanVersion;
+        }
         return value;
       })));
     } finally { this.sceneUpdateDepth -= 1; }
@@ -1266,20 +1276,62 @@ export class CdpWallpaperInjector {
       try {
         targets = await this.listTargets();
       } catch (error) {
-        if (allowEndpointUnavailable && this.sessions.size === 0 && isEndpointUnavailableError(error)) {
+        if (allowEndpointUnavailable && isEndpointUnavailableError(error)) {
           this.disconnectedSessions.clear();
           this.status("restored", { sessions: 0, endpointUnavailable: true });
           return;
         }
         throw error;
       }
-      if (targets.length === 0) throw new Error("没有找到可完整恢复的 Codex renderer");
+      if (targets.length === 0) {
+        if (allowEndpointUnavailable) {
+          let allIds = new Set();
+          try {
+            allIds = new Set((await this.listTargets({ includeAll: true })).map((t) => t.id));
+          } catch (error) {
+            if (!isEndpointUnavailableError(error)) throw error;
+          }
+          const trackedIds = [...this.sessions.keys(), ...this.disconnectedSessions.keys()];
+          if (!trackedIds.some((id) => allIds.has(id))) {
+            this.disconnectedSessions.clear();
+            this.status("restored", { sessions: 0, endpointUnavailable: true });
+            return;
+          }
+        }
+        throw new Error("没有找到可完整恢复的 Codex renderer");
+      }
       const coverageErrors = [];
       let cohortSettled = false;
       for (let round = 0; round < 3; round++) {
         const connectionErrors = await this.connectRestorationTargets(targets, compatibilityRestoreScript);
-        const current = await this.listTargets();
-        if (current.length === 0) throw new Error('没有找到可完整恢复的 Codex renderer');
+        let current;
+        try {
+          current = await this.listTargets();
+        } catch (error) {
+          if (allowEndpointUnavailable && isEndpointUnavailableError(error)) {
+            this.disconnectedSessions.clear();
+            this.status("restored", { sessions: 0, endpointUnavailable: true });
+            return;
+          }
+          throw error;
+        }
+        if (current.length === 0) {
+          if (allowEndpointUnavailable) {
+            let allIds = new Set();
+            try {
+              allIds = new Set((await this.listTargets({ includeAll: true })).map((t) => t.id));
+            } catch (error) {
+              if (!isEndpointUnavailableError(error)) throw error;
+            }
+            const trackedIds = [...this.sessions.keys(), ...this.disconnectedSessions.keys()];
+            if (!trackedIds.some((id) => allIds.has(id))) {
+              this.disconnectedSessions.clear();
+              this.status("restored", { sessions: 0, endpointUnavailable: true });
+              return;
+            }
+          }
+          throw new Error('没有找到可完整恢复的 Codex renderer');
+        }
         const currentIds = new Set(current.map(t => t.id));
         const removed = targets.filter(t => !currentIds.has(t.id));
         const allIds = removed.length ? new Set((await this.listTargets({ includeAll: true })).map(t => t.id)) : currentIds;

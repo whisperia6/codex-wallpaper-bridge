@@ -1164,6 +1164,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       };
 
       const restore = async (options = {}) => {
+        stopThemeObserver();
         const theme = options.preserveTheme
           ? { state: themeState, preserved: true, reloadRequired: false }
           : await restoreOriginalTheme();

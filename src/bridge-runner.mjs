@@ -53,7 +53,7 @@ export async function invokeBridgeAction({
   }
   const response = await fetch(new URL("api/action", base), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: base.origin },
     body: JSON.stringify({ action, ...(adaptive === undefined ? {} : { adaptive }) }),
     signal: AbortSignal.timeout(timeoutMs),
   });

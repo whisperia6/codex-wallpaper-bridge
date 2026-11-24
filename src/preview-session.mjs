@@ -1,5 +1,5 @@
 const processStates = new WeakMap();
-const DEFAULT_EXIT_TIMEOUT_MS = 5000;
+const DEFAULT_EXIT_TIMEOUT_MS = 15000;
 
 function processError(error) {
   return error instanceof Error

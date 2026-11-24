@@ -788,3 +788,25 @@ test("close with allowEndpointUnavailable succeeds when Codex already exited and
   await injector.close({ restore: true, allowEndpointUnavailable: true });
   assert.ok(statuses.some((status) => status.type === "restored" && status.endpointUnavailable === true));
 });
+
+test("close with allowEndpointUnavailable succeeds when Codex has 0 open renderer windows or exits before socket close", async (context) => {
+  const { injector, setTargets, statuses } = harness(context);
+  await injector.start(plan(true));
+  assert.equal(injector.sessions.size, 1);
+  // Codex closed its window while staying resident (returns empty target list)
+  setTargets([]);
+  await injector.close({ restore: true, allowEndpointUnavailable: true });
+  assert.ok(statuses.some((status) => status.type === "restored" && status.endpointUnavailable === true));
+
+  const second = harness(context);
+  await second.injector.start(plan(true));
+  assert.equal(second.injector.sessions.size, 1);
+  // Codex exited right before WebSocket close fired: sessions still has 1 entry when fetch fails
+  second.injector.listTargets = async () => {
+    const error = new TypeError("fetch failed");
+    error.cause = { code: "ECONNREFUSED" };
+    throw error;
+  };
+  await second.injector.close({ restore: true, allowEndpointUnavailable: true });
+  assert.ok(second.statuses.some((status) => status.type === "restored" && status.endpointUnavailable === true));
+});

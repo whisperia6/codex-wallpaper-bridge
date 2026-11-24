@@ -25,6 +25,7 @@ public enum CwbActivateOptions { None = 0 }
 
 [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface ICwbApplicationActivationManager {
+  [PreserveSig]
   int ActivateApplication(
     [In, MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
     [In, MarshalAs(UnmanagedType.LPWStr)] string arguments,
@@ -47,19 +48,22 @@ public static class CwbStoreActivator {
 }
 '@
 
+$existingPids = [Collections.Generic.HashSet[int]]::new()
+foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) { [void]$existingPids.Add([int]$proc.Id) }
 $launchedPid = [CwbStoreActivator]::Activate($aumid, $arguments)
-[pscustomobject]@{ processId = [int]$launchedPid } | ConvertTo-Json -Compress
+[pscustomobject]@{ processId = [int]$launchedPid; createdNew = -not $existingPids.Contains([int]$launchedPid) } | ConvertTo-Json -Compress
 `;
 const CLOSE_CODEX_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$currentSessionId = (Get-Process -Id $PID).SessionId
 $targetPath = [IO.Path]::GetFullPath($env:CWB_TARGET_EXE)
 $targetName = [IO.Path]::GetFileName($targetPath)
 $wqlName = $targetName.Replace('\', '\\').Replace("'", "\'")
 $closeTimeoutMs = [Math]::Max(1000, [int]$env:CWB_CLOSE_TIMEOUT_MS)
 
 function Find-TargetCodexProcesses {
-  @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName'" -ErrorAction Stop | Where-Object {
+  @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName' AND SessionId = $currentSessionId" -ErrorAction Stop | Where-Object {
     if (-not $_.ExecutablePath) { return $false }
     try {
       return [string]::Equals(
@@ -286,7 +290,7 @@ async function activateStoreCodex({
   if (!Number.isInteger(processId) || processId <= 0) {
     throw new Error("Store 激活未返回有效进程 ID");
   }
-  return { processId };
+  return { processId, createdNew: parsed?.createdNew !== false };
 }
 
 export async function closeCodexProcesses({
@@ -393,6 +397,7 @@ export async function launchCodex({
   let launchedPid = null;
   let cleanupLaunched = () => {};
 
+  let activatedExistingStore = false;
   if (installation?.kind === "store" && typeof installation.appUserModelId === "string"
     && STORE_AUMID_PATTERN.test(installation.appUserModelId) && typeof activateStoreApp === "function") {
     try {
@@ -403,9 +408,13 @@ export async function launchCodex({
         signal,
       });
       launchedPid = activated.processId;
-      cleanupLaunched = () => {
-        try { killProcessFn(launchedPid); } catch {}
-      };
+      if (activated.createdNew === false) {
+        activatedExistingStore = true;
+      } else {
+        cleanupLaunched = () => {
+          try { killProcessFn(launchedPid); } catch {}
+        };
+      }
     } catch (error) {
       if (signal?.aborted || error?.name === "AbortError") throw error;
       onLog({ stream: "system", text: `Store 身份启动未完成，回退为直接启动可执行文件：${error.message}\n` });
@@ -427,7 +436,13 @@ export async function launchCodex({
   }
 
   try {
-    if (!await waitForEndpoint(normalizedPort, timeoutMs, signal, isEndpointReady)) {
+    if (activatedExistingStore) {
+      const listening = await isEndpointReady(normalizedPort);
+      signal?.throwIfAborted();
+      if (!listening) {
+        throw new Error("Microsoft Store 版 Codex 已在普通模式运行。请保存输入并完全退出后，再重新应用壁纸。");
+      }
+    } else if (!await waitForEndpoint(normalizedPort, timeoutMs, signal, isEndpointReady)) {
       throw new Error(`Codex 已启动，但 ${timeoutMs / 1000} 秒内没有监听 CDP 端口 ${normalizedPort}`);
     }
   } catch (error) {

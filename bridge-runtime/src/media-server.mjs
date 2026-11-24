@@ -188,16 +188,20 @@ function parseRange(header, size) {
   return { start, end };
 }
 
-function sendFile(request, response, entry, { range = false, cache = false, headers: extraHeaders = {} } = {}) {
+function sendFile(request, response, entry, { range = false, cache = false, cors = true, headers: extraHeaders = {} } = {}) {
   const method = request.method || 'GET';
   const size = entry.stat.size;
   const headers = {
     'Cache-Control': cache ? 'private, max-age=300' : 'no-store',
     'Content-Type': mimeType(entry.path),
     'Last-Modified': entry.stat.mtime.toUTCString(),
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range',
-    'Cross-Origin-Resource-Policy': 'cross-origin',
+    ...(cors ? {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    } : {
+      'X-Content-Type-Options': 'nosniff',
+    }),
     ...extraHeaders,
   };
 
@@ -969,13 +973,15 @@ export class MediaServer {
       return;
     }
     // Range support is useful for video/audio assets embedded by web projects.
-    const isHtml = ['.htm', '.html'].includes(path.extname(entry.path).toLowerCase());
+    // Apply sandbox + connect-src 'none' on every response (including .svg/.xml)
+    // so untrusted Workshop assets can never execute same-origin with the control API.
     sendFile(request, response, entry, {
       range: true,
       cache: true,
-      headers: isHtml
-        ? { 'Content-Security-Policy': 'sandbox allow-scripts' }
-        : {},
+      cors: false,
+      headers: {
+        'Content-Security-Policy': "sandbox allow-scripts; default-src 'self' data: blob:; style-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'",
+      },
     });
   }
 
@@ -1307,7 +1313,15 @@ export class MediaServer {
       plain(response, 404, 'Not Found');
       return;
     }
-    sendFile(request, response, entry, { range: true, cache: true });
+    const isHtml = ['.htm', '.html'].includes(path.extname(entry.path).toLowerCase());
+    sendFile(request, response, entry, {
+      range: true,
+      cache: true,
+      cors: false,
+      headers: isHtml ? {
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self' cwb-desktop://shell",
+      } : {},
+    });
   }
 }
 

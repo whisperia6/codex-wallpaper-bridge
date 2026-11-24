@@ -2,6 +2,7 @@
   if (window.parent === window) return;
 
   const CHANNEL = "cwb-control";
+  const DESKTOP_RENDERER_ORIGIN = "cwb-desktop://shell";
   const CONFIG_QUIET_MS = 360;
   const FLUSH_TIMEOUT_MS = 5_000;
   const DESKTOP_REQUEST_TIMEOUT_MS = 190_000;
@@ -12,7 +13,7 @@
   let latestDesktopState = null;
 
   function notify(type, detail = {}) {
-    window.parent.postMessage({ channel: CHANNEL, type, ...detail }, "*");
+    window.parent.postMessage({ channel: CHANNEL, type, ...detail }, DESKTOP_RENDERER_ORIGIN);
   }
 
   function isConfigWrite(input, init = {}) {
@@ -175,7 +176,7 @@
 
   window.addEventListener("message", (event) => {
     const message = event.data;
-    if (event.source !== window.parent || message?.channel !== CHANNEL) return;
+    if (event.source !== window.parent || event.origin !== DESKTOP_RENDERER_ORIGIN || message?.channel !== CHANNEL) return;
 
     if (message.type === "desktop-state" && message.state) {
       renderDesktopState(message.state);

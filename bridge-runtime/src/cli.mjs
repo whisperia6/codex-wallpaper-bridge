@@ -100,7 +100,7 @@ async function writeRuntime(server, options, scanResult, injectorActive) {
     pid: process.pid,
     command: options.command,
     cdpPort: options.cdpPort,
-    bridgeUrl: server?.baseUrl || null,
+    bridgeOrigin: server?.origin || null,
     projectRoot,
     injectorActive,
     nativeEngineProviderConfigured: options.nativeEngineProviderConfigured === true,

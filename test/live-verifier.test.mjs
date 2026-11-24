@@ -34,14 +34,24 @@ async function assertNoFilesCreated(extraPaths = []) {
   }
 }
 
+const STRIPPED_VERIFIER_ENV_KEYS = new Set([
+  "PATH",
+  "NODE_OPTIONS",
+  "NODE_USE_ENV_PROXY",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+]);
+
 async function rejectedBeforeHost(args, expectedReason, { nodeArguments = null, extraPaths = [] } = {}) {
   let result;
   try {
     result = await execFileAsync(process.execPath, nodeArguments || [script, ...args], {
       cwd: repository,
       // PowerShell and subprocess binaries are intentionally not available on PATH.
-      // Only the absolute Node executable is run, and every input must fail before ownership.
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH")),
+      // Strip proxy/Node option env vars too so experimental runtime warnings do not pollute stderr.
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !STRIPPED_VERIFIER_ENV_KEYS.has(key.toUpperCase()))),
       windowsHide: true, encoding: "utf8", timeout: 10_000, maxBuffer: 32 * 1024,
     });
     assert.fail("invalid verifier input unexpectedly succeeded");

@@ -30,10 +30,10 @@ import { listCodexProcesses } from "./codex-processes.mjs";
 import { runCodexTakeoverFlow } from "./codex-takeover-flow.mjs";
 import { startCodexProcessMonitor } from "./codex-process-monitor.mjs";
 import { createCodexTakeoverWatcher } from "./codex-takeover.mjs";
-import { detectInstallations, selectInstallationId, validateCdpPort, validateExecutable } from "./installations.mjs";
+import { detectInstallations, inspectExecutableIdentity, selectInstallationId, validateCdpPort, validateExecutable } from "./installations.mjs";
 import { runLaunchAndInjectFlow } from "./launch-flow.mjs";
 import { dailyLogFilename, formatLogEntry, sanitizeLogText } from "./local-logging.mjs";
-import { createTrayController } from "./tray-controller.mjs";
+import { createTrayController, TRAY_ICON_DATA_URL } from "./tray-controller.mjs";
 import { desktopWindowChromeOptions, setWindowChromeTheme } from "./window-chrome.mjs";
 import { prepareAcceptanceContext } from "./acceptance-context.mjs";
 import { verifyCdpEndpointOwner } from "./cdp-owner.mjs";
@@ -368,6 +368,9 @@ async function confirmLaunchSeparateCodex(installation, runningInstallations) {
 }
 
 function createMainWindow() {
+  const windowIcon = typeof nativeImage?.createFromDataURL === "function"
+    ? nativeImage.createFromDataURL(TRAY_ICON_DATA_URL)
+    : undefined;
   const window = new BrowserWindow({
     width: 1540,
     height: 900,
@@ -376,6 +379,7 @@ function createMainWindow() {
     show: false,
     backgroundColor: "#0c0d10",
     title: "Codex Wallpaper Desktop",
+    ...(windowIcon ? { icon: windowIcon } : {}),
     ...desktopWindowChromeOptions(process.platform),
     webPreferences: {
       preload: preloadPath,
@@ -597,6 +601,22 @@ function registerIpcHandlers() {
     assertNotQuitting();
     if (activeOperation) throw new Error("壁纸操作进行中，请稍后切换目标");
     const executablePath = await validateExecutable(result.filePaths[0]);
+    if (typeof inspectExecutableIdentity === "function") {
+      const identity = await inspectExecutableIdentity(executablePath).catch(() => null);
+      if (identity && !identity.looksLikeCodex) {
+        const confirm = await dialog.showMessageBox(mainWindow, {
+          type: "warning",
+          title: "确认所选可执行文件",
+          message: "所选程序未检测到 Codex 身份标识，是否仍要将其作为目标？",
+          detail: `${executablePath}\n\n应用壁纸时若该程序正在运行，本程序会尝试关闭并重启该路径对应的所有进程。若不确定它是 Codex 桌面版，建议取消。`,
+          buttons: ["仍要添加", "取消"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        if (confirm.response !== 0) return currentState();
+      }
+    }
     if (!settings.manualExecutables.some((entry) => entry.toLowerCase() === executablePath.toLowerCase())) {
       settings.manualExecutables.push(executablePath);
     }
@@ -711,12 +731,22 @@ function registerIpcHandlers() {
   });
 }
 
-if (!hasSingleInstanceLock) {
+const quitRunningInstanceRequested = Array.isArray(process.argv) && process.argv.includes("--quit-running-instance");
+if (!hasSingleInstanceLock || quitRunningInstanceRequested) {
   app.quit();
 } else {
-  app.on("second-instance", () => showMainWindow());
+  app.on("second-instance", (_event, argv) => {
+    if (Array.isArray(argv) && argv.includes("--quit-running-instance")) {
+      isQuitting = true;
+      app.quit();
+      return;
+    }
+    showMainWindow();
+  });
   app.whenReady().then(async () => {
     app.setAppUserModelId("com.local.codex-wallpaper-desktop");
+    session?.defaultSession?.setPermissionRequestHandler?.((_webContents, _permission, callback) => callback(false));
+    session?.defaultSession?.setPermissionCheckHandler?.(() => false);
     await installDesktopRendererProtocol({ protocol, rendererRoot });
     settingsPath = path.join(app.getPath("userData"), "settings.json");
     logsRoot = acceptanceContext?.logsRoot || path.join(process.env.LOCALAPPDATA || app.getPath("userData"), "CodexWallpaperDesktop", "logs");

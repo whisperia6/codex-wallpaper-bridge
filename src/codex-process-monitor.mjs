@@ -6,13 +6,14 @@ const MAX_OUTPUT_BUFFER = 128 * 1024;
 const MONITOR_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$currentSessionId = (Get-Process -Id $PID).SessionId
 $targetPath = [IO.Path]::GetFullPath($env:CWB_TARGET_EXE)
 $targetName = [IO.Path]::GetFileName($targetPath)
 $wqlName = $targetName.Replace('\', '\\').Replace("'", "\'")
 $intervalMs = [Math]::Max(500, [int]$env:CWB_PROCESS_POLL_MS)
 while ($true) {
   try {
-    $items = @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName'" -ErrorAction Stop | Where-Object {
+    $items = @(Get-CimInstance Win32_Process -Filter "Name = '$wqlName' AND SessionId = $currentSessionId" -ErrorAction Stop | Where-Object {
       if (-not $_.ExecutablePath -or -not $_.CommandLine) { return $false }
       try {
         $pathMatch = [string]::Equals(
