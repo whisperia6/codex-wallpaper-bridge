@@ -57,7 +57,7 @@
 - 仅在使用视频转码优化时需要本机安装 `ffmpeg` 和 `ffprobe`。
 
 ### 方式一：使用 NSIS 安装包（推荐）
-从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.2.1`：[CodexWallpaperDesktop-1.2.1-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.2.1/CodexWallpaperDesktop-1.2.1-Setup.exe)）：
+从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.2.2`：[CodexWallpaperDesktop-1.2.2-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.2.2/CodexWallpaperDesktop-1.2.2-Setup.exe)）：
 - 中文安装向导，支持自选安装路径（推荐安装到 D / F 盘）。
 - 安装后启动即秒开，无需每次向 C 盘 `Temp` 解压临时文件。
 - 卸载时默认保留个人壁纸设置。
@@ -85,7 +85,7 @@ npm start
 | --- | --- |
 | `CWB_FFMPEG_PATH` / `CWB_FFPROBE_PATH` | 手动指定 `ffmpeg.exe` / `ffprobe.exe` 路径（未加入 `PATH` 时使用） |
 | `CWB_CACHE_ROOT` | 覆盖视频转码缓存目录 |
-| `CWB_BUILD_TEMP_ROOT` | 覆盖打包时的临时构建目录（Windows 下存在 `F:\` 时默认使用 `F:\.cwb-build-tmp`） |
+| `CWB_BUILD_TEMP_ROOT` | 覆盖打包时的临时构建目录（默认使用 `out/.nsis-build`） |
 
 ---
 
@@ -107,7 +107,7 @@ out/release-<版本号>/CodexWallpaperDesktop-<版本号>-Setup.exe
 打包流程说明：
 - 构建阶段会同步 `bridge-overrides/`、用 `esbuild` 压缩主程序与桥接运行时，并用系统 `.NET Framework` `csc.exe` 预编译 `windows-media.dll` 与 `cwb-win-helper.exe`。
 - 使用 `electron-builder` 生成 NSIS x64 安装包，仅保留 `zh-CN` / `en-US` 语言包，并启用 ASAR 封装、嵌入式 ASAR 完整性校验及 Electron Fuses。
-- 临时构建目录在 Windows 下优先使用 `F:\.cwb-build-tmp`（可通过 `CWB_BUILD_TEMP_ROOT` 覆盖，无 F 盘时自动回退到 `out/.nsis-build`），构建完成后自动清理。
+- 临时构建目录默认使用 `out/.nsis-build`（可通过 `CWB_BUILD_TEMP_ROOT` 覆盖），构建完成后自动清理。
 
 ---
 
@@ -168,5 +168,5 @@ node --test test/win-helper.test.mjs test/cdp-owner.test.mjs test/compatibility-
 
 ## 更多文档与致谢
 
-- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.2.1 版本说明](docs/RELEASE_1.2.1.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
+- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.2.2 版本说明](docs/RELEASE_1.2.2.md) · [1.2.1 版本说明](docs/RELEASE_1.2.1.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
 - 场景渲染基于 WebWallGL，相关组件来源、版本与开源许可见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。
