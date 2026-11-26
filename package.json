@@ -1,9 +1,9 @@
 {
   "name": "codex-wallpaper-desktop",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "Windows wallpaper workbench for Codex Desktop.",
+  "description": "Lumina — Windows dynamic wallpaper workbench for Codex and Antigravity.",
   "main": "dist/main.mjs",
   "scripts": {
     "sync:bridge": "node scripts/sync-bridge-runtime.mjs",
@@ -29,7 +29,7 @@
   },
   "build": {
     "appId": "com.local.codex-wallpaper-desktop",
-    "productName": "Codex Wallpaper Desktop",
+    "productName": "Lumina",
     "compression": "normal",
     "electronLanguages": [
       "zh-CN",
@@ -69,8 +69,8 @@
           ]
         }
       ],
-      "executableName": "CodexWallpaperDesktop",
-      "artifactName": "CodexWallpaperDesktop-${version}-Setup.${ext}"
+      "executableName": "Lumina",
+      "artifactName": "Lumina-${version}-Setup.${ext}"
     },
     "nsis": {
       "include": "build/installer.nsh",
@@ -80,7 +80,7 @@
       "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Codex Wallpaper Desktop",
+      "shortcutName": "Lumina",
       "deleteAppDataOnUninstall": false,
       "installerLanguages": [
         "zh_CN",

@@ -1,8 +1,8 @@
-# Codex Wallpaper Desktop
+# Lumina
 
-一个面向 Windows 的 **Codex 桌面版动态壁纸工作台**。支持导入本地图片、视频，或直接读取本机已有的 Wallpaper Engine 壁纸库（图片 / 视频 / Web / Scene 场景），在同一界面完成预览、调参、轮播与一键注入。
+一个面向 Windows 的 **Codex / Antigravity 桌面版动态壁纸工作台**（原 Codex Wallpaper Desktop）。支持导入本地图片、视频，或直接读取本机已有的 Wallpaper Engine 壁纸库（图片 / 视频 / Web / Scene 场景），在同一界面完成预览、调参、轮播与一键注入。
 
-程序仅通过本机 Chrome DevTools Protocol（CDP）在运行时挂载背景层，**不修改 Codex 安装文件**，随时可一键恢复官方原貌。本项目为非官方工具，与 OpenAI 及 Wallpaper Engine 官方无关。
+程序仅通过本机 Chrome DevTools Protocol（CDP）在运行时挂载背景层，**不修改目标应用安装文件**，随时可一键恢复官方原貌。本项目为非官方工具，与 OpenAI、Google 及 Wallpaper Engine 官方无关。
 
 ## 界面预览
 
@@ -40,24 +40,25 @@
 - 可选接入本机 `ffmpeg` / `ffprobe`，提供帧率上限、编码器选择、后台转码与取消/重试；转码期间继续播放原片。
 - 独立缓存目录管理，支持带校验的跨盘迁移。
 
-### 5. 双版本 Codex 兼容与极速注入
-- **版本支持**：自动发现 Microsoft Store 版与本地 EXE 版 Codex，并支持手动指定便携版 `ChatGPT.exe`。
+### 5. Codex 与 Antigravity 双宿主兼容与极速注入
+- **多宿主支持**：自动发现 Microsoft Store 版与本地 EXE 版 Codex、以及 **Antigravity 桌面版**，并支持手动指定本地 EXE，在工作台顶部一键切换目标。
 - **Store 单图标启动**：Microsoft Store 版通过 Windows COM `IApplicationActivationManager` 以原生 AUMID 身份启动，避免任务栏双图标。
 - **原生辅助程序加速**：内置构建期预编译的 `cwb-win-helper.exe`（调用 `iphlpapi` / `NtQueryInformationProcess` / `QueryFullProcessImageName`），端口身份核验与进程发现从数秒级降至 ~130 ms，热重注 1 秒左右完成，且保留全部端口与进程归属安全校验。
-- **新版界面适配**：使用语义 `:has()` 规则清除新版 Codex 顶栏、侧栏及底部输入框页脚伪元素深色遮罩，不影响输入框本体与弹窗。
-- **托盘常驻与安全接管**：关闭或最小化至系统托盘维持媒体服务；重新打开普通模式 Codex 时先弹窗确认再接管，随时支持“恢复官方外观”。
+- **新版界面适配与左侧栏毛玻璃**：针对 Codex 与 Antigravity 分别提供壳层透明化、底部渐变遮罩清除、原生标题栏透明同步及可自由显隐的**左侧栏毛玻璃**开关，不影响输入框本体、右键菜单与弹窗。
+- **代理参数透传与本地回环保护**：重启目标进入调试模式时自动保留并同步代理参数，同时为本机 `127.0.0.1` 壁纸与 CDP 服务自动配置绕过规则，确保动态壁纸与网络服务互不干扰。
+- **托盘常驻与安全接管**：关闭或最小化至系统托盘维持媒体服务；重新打开普通模式目标应用时先弹窗确认再接管，随时支持“恢复官方外观”。
 
 ---
 
 ## 安装与使用
 
 ### 环境要求
-- Windows 10 / 11（x64），已安装 Codex 桌面版（Microsoft Store 版或本地 EXE 版）。
+- Windows 10 / 11（x64），已安装 Codex 桌面版（Microsoft Store 版或本地 EXE 版）或 Antigravity 桌面版。
 - 仅使用自有图片 / 视频时**不需要**安装 Wallpaper Engine。
 - 仅在使用视频转码优化时需要本机安装 `ffmpeg` 和 `ffprobe`。
 
 ### 方式一：使用 NSIS 安装包（推荐）
-从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.2.2`：[CodexWallpaperDesktop-1.2.2-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.2.2/CodexWallpaperDesktop-1.2.2-Setup.exe)）：
+从 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载最新版安装包（当前 `v1.3.0`：[Lumina-1.3.0-Setup.exe](https://github.com/whisperia6/codex-wallpaper-bridge/releases/download/v1.3.0/Lumina-1.3.0-Setup.exe)）：
 - 中文安装向导，支持自选安装路径（推荐安装到 D / F 盘）。
 - 安装后启动即秒开，无需每次向 C 盘 `Temp` 解压临时文件。
 - 卸载时默认保留个人壁纸设置。
@@ -74,10 +75,10 @@ npm start
 安装依赖后也可以直接双击根目录的 `run-electron.cmd`。
 
 ### 首次应用壁纸步骤
-1. 在工作台顶部选择目标 Codex 版本（未自动发现本地版时点击“选择本地 EXE”）。
-2. 扫描本机 Wallpaper Engine 目录，或直接导入自己的图片 / 视频，调整预览效果。
-3. 点击 **“应用到 Codex”**：若匹配端口已就绪将直接注入；若 Codex 正以普通模式运行，按提示确认重启进入调试模式（请先保存未发送输入）。
-4. 首次以独立调试 profile 启动 Codex 可能需要重新登录。不再使用时点击 **“恢复官方外观”** 或从托盘退出即可。
+1. 在工作台顶部选择目标应用（Codex 或 Antigravity；未自动发现时可点击“选择 EXE”）。
+2. 扫描本机 Wallpaper Engine 目录，或直接导入自己的图片 / 视频，调整预览效果与左侧栏毛玻璃开关。
+3. 点击 **“应用到 Codex / Antigravity”**：若匹配端口已就绪将直接注入；若目标正以普通模式运行，按提示确认重启进入调试模式（请先保存未发送输入）。
+4. 首次以独立调试 profile 启动目标应用可能需要重新登录。不再使用时点击 **“恢复官方外观”** 或从托盘退出即可。
 
 ### 可选环境变量
 
@@ -101,7 +102,7 @@ npm run package
 打包产物输出至：
 
 ```text
-out/release-<版本号>/CodexWallpaperDesktop-<版本号>-Setup.exe
+out/release-<版本号>/Lumina-<版本号>-Setup.exe
 ```
 
 打包流程说明：
@@ -168,5 +169,5 @@ node --test test/win-helper.test.mjs test/cdp-owner.test.mjs test/compatibility-
 
 ## 更多文档与致谢
 
-- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.2.2 版本说明](docs/RELEASE_1.2.2.md) · [1.2.1 版本说明](docs/RELEASE_1.2.1.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
+- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.3.0 版本说明](docs/RELEASE_1.3.0.md) · [1.2.2 版本说明](docs/RELEASE_1.2.2.md) · [1.2.1 版本说明](docs/RELEASE_1.2.1.md) · [1.2.0 版本说明](docs/RELEASE_1.2.0.md) · [1.1.0 版本说明](docs/RELEASE_1.1.0.md) · [1.0.0 版本说明](docs/RELEASE_1.0.0.md)
 - 场景渲染基于 WebWallGL，相关组件来源、版本与开源许可见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。
