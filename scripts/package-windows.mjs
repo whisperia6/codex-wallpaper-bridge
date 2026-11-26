@@ -21,7 +21,7 @@ const electronDist = path.join(electronRoot, "dist");
 const electronPackage = JSON.parse(await readFile(path.join(electronRoot, "package.json"), "utf8"));
 const electronRuntimeVersion = (await readFile(path.join(electronDist, "version"), "utf8")).trim();
 if (electronRuntimeVersion !== electronPackage.version) throw new Error("本地 Electron 运行时版本不一致，请重新安装依赖");
-const names = windowsArtifactNames("CodexWallpaperDesktop", packageJson.version);
+const names = windowsArtifactNames(packageJson.build?.win?.executableName || "Lumina", packageJson.version);
 
 function resolveScratchPaths() {
   const customRoot = String(process.env.CWB_BUILD_TEMP_ROOT || "").trim();

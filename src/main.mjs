@@ -41,6 +41,7 @@ import { createPreviewSession, stopPreviewProcess } from "./preview-session.mjs"
 import { createDesktopEngineHost } from "./desktop-engine-host.mjs";
 import { registerDesktopRendererScheme, installDesktopRendererProtocol } from "./desktop-renderer-protocol.mjs";
 import { DESKTOP_RENDERER_URL } from "../bridge-runtime/src/desktop-origin.mjs";
+import { extractPreservedLaunchArgs, hostDisplayName, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererRoot = path.join(here, "renderer");
@@ -62,6 +63,7 @@ let settings = {
   selectedId: null,
   port: 9335,
   adaptive: true,
+  preservedLaunchArgs: {},
 };
 let activeOperation = null;
 let settingsPath = null;
@@ -79,6 +81,7 @@ let latestCodexSnapshot = null;
 let takeoverTask = null;
 let takeoverContext = null;
 let takeoverRunning = false;
+const preservedLaunchArgs = new Map();
 const previewSession = createPreviewSession({
   start: (port, { onChild }) => startBridgePreview({
     executablePath: process.execPath,
@@ -113,7 +116,7 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
         const state = await currentState();
         installation = state.installations.find(({ id }) => id === state.selectedId);
       }
-      if (!installation) throw new Error("没有所选的 Codex 安装目标");
+      if (!installation) throw new Error("没有所选的目标应用");
       await verifySelectedOwner(installation, port);
       return { verified: true };
     },
@@ -126,7 +129,7 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
       CWB_NATIVE_ENGINE_PROVIDER: ownedNativeProvider ? "owned-parent-v1" : "",
     },
     stdio: "pipe",
-    serviceName: "Codex Wallpaper Bridge",
+    serviceName: "Lumina",
   });
   if (ownedNativeProvider) {
     try { nativeEngineHost.attach(child); }
@@ -157,8 +160,8 @@ function log(entry) {
 function logStartupPhase({ phase, elapsedMs, ok }) {
   const labels = {
     discovery: "安装发现", endpoint: "调试端口探测", owner: "进程身份核验",
-    confirmation: "等待用户确认", close: "关闭已确认实例", launch: "启动 Codex",
-    target: "等待 Codex 页面", control: "准备壁纸服务", inject: "注入流程",
+    confirmation: "等待用户确认", close: "关闭已确认实例", launch: "启动目标应用",
+    target: "等待目标页面", control: "准备壁纸服务", inject: "注入流程",
     apply: "等待注入及媒体就绪", total: "点击到流程结束",
   };
   if (!labels[phase] || !Number.isFinite(elapsedMs)) return;
@@ -172,6 +175,37 @@ async function measureStartupPhase(phase, task) {
   finally { logStartupPhase({ phase, elapsedMs: performance.now() - startedAt, ok }); }
 }
 
+function sanitizeSavedLaunchArgs(raw) {
+  const result = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return result;
+  for (const [id, list] of Object.entries(raw)) {
+    if (typeof id !== "string" || !id || !Array.isArray(list)) continue;
+    const cleaned = extractPreservedLaunchArgs([`app.exe ${list.filter((item) => typeof item === "string").join(" ")}`]);
+    if (cleaned.length) result[id] = cleaned;
+  }
+  return result;
+}
+
+async function rememberPreservedLaunchArgs(installationId, extraArgs) {
+  if (!installationId || !Array.isArray(extraArgs) || extraArgs.length === 0) return;
+  preservedLaunchArgs.set(installationId, extraArgs);
+  const currentSaved = settings.preservedLaunchArgs?.[installationId];
+  if (JSON.stringify(currentSaved) !== JSON.stringify(extraArgs)) {
+    settings.preservedLaunchArgs = {
+      ...(settings.preservedLaunchArgs || {}),
+      [installationId]: extraArgs,
+    };
+    await saveSettings().catch(() => {});
+  }
+}
+
+function getPreservedLaunchArgs(installationId) {
+  if (!installationId) return [];
+  return preservedLaunchArgs.get(installationId)
+    || settings.preservedLaunchArgs?.[installationId]
+    || [];
+}
+
 async function loadSettings() {
   try {
     const parsed = JSON.parse(await readFile(settingsPath, "utf8"));
@@ -181,18 +215,24 @@ async function loadSettings() {
     } catch {
       savedPort = 9335;
     }
+    const savedArgs = sanitizeSavedLaunchArgs(parsed.preservedLaunchArgs);
+    preservedLaunchArgs.clear();
+    for (const [id, args] of Object.entries(savedArgs)) preservedLaunchArgs.set(id, args);
     settings = {
       manualExecutables: Array.isArray(parsed.manualExecutables) ? parsed.manualExecutables : [],
       selectedId: typeof parsed.selectedId === "string" ? parsed.selectedId : null,
       port: savedPort,
       adaptive: parsed.adaptive !== false,
+      preservedLaunchArgs: savedArgs,
     };
   } catch {
+    preservedLaunchArgs.clear();
     settings = {
       manualExecutables: [],
       selectedId: null,
       port: 9335,
       adaptive: true,
+      preservedLaunchArgs: {},
     };
   }
 }
@@ -257,7 +297,7 @@ async function runOperation(name, task) {
 async function resolveInstallation(installationId, snapshot = null) {
   const state = snapshot ?? await currentState();
   const installation = state.installations.find(({ id }) => id === installationId);
-  if (!installation) throw new Error("请选择有效的 Codex 安装");
+  if (!installation) throw new Error("请选择有效的目标应用");
   settings.selectedId = installation.id;
   await saveSettings();
   return installation;
@@ -270,7 +310,9 @@ async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
   const installation = current.installations.find(({ id }) => id === installationId) || null;
   try {
     await verifySelectedOwner(installation, validateCdpPort(port));
-    const collected = await collectCdpDiagnostics(validateCdpPort(port));
+    const collected = await collectCdpDiagnostics(validateCdpPort(port), {
+      hostType: installationHostType(installation),
+    });
     // URLs and probe titles are needed internally for target detection, not in
     // saved reports: they can contain an auth route or a conversation title.
     diagnostics = {
@@ -312,14 +354,19 @@ async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
   return diagnosticPath;
 }
 
-async function injectOnceAtPort({ port, adaptive, signal }) {
+async function injectOnceAtPort({ port, adaptive, hostType = "codex", signal }) {
   signal?.throwIfAborted();
   assertNotQuitting();
   const startedAt = performance.now();
   const control = await measureStartupPhase("control", () => ensureControlPanel(port));
   assertNotQuitting();
   signal?.throwIfAborted();
-  const injection = await measureStartupPhase("apply", () => invokeBridgeAction({ controlUrl: control.url, action: "inject", adaptive: Boolean(adaptive) }));
+  const injection = await measureStartupPhase("apply", () => invokeBridgeAction({
+    controlUrl: control.url,
+    action: "inject",
+    adaptive: Boolean(adaptive),
+    hostType,
+  }));
   const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
   return {
     compatibility: injection.compatibility || [],
@@ -334,12 +381,13 @@ async function confirmCloseRunningCodex(installation) {
   if (typeof mainWindow?.isVisible === "function" && (!mainWindow.isVisible() || mainWindow.isMinimized())) {
     showMainWindow();
   }
+  const hostName = hostDisplayName(installationHostType(installation));
   const processCount = installation.processIds?.length || 0;
   const result = await dialog.showMessageBox(mainWindow, {
     type: "warning",
-    title: "Codex 正在运行",
+    title: `${hostName} 正在运行`,
     message: `${installation.label}正在运行，是否关闭并继续？`,
-    detail: `将只关闭下面路径对应的 Codex 进程，然后以调试模式重新启动并自动完成快速流式注入。请先保存尚未发送的输入。\n\n${installation.path}\n\n已发现进程：${processCount} 个`,
+    detail: `将只关闭下面路径对应的 ${hostName} 进程，然后以调试模式重新启动并自动完成快速流式注入。请先保存尚未发送的输入。\n\n${installation.path}\n\n已发现进程：${processCount} 个`,
     buttons: ["关闭并继续", "取消"],
     defaultId: 1,
     cancelId: 1,
@@ -353,11 +401,12 @@ async function confirmLaunchSeparateCodex(installation, runningInstallations) {
   if (typeof mainWindow?.isVisible === "function" && (!mainWindow.isVisible() || mainWindow.isMinimized())) {
     showMainWindow();
   }
+  const hostName = hostDisplayName(installationHostType(installation));
   const runningDetails = runningInstallations.map(({ label, path: executablePath }) => `${label}\n${executablePath}`).join("\n\n");
   const result = await dialog.showMessageBox(mainWindow, {
     type: "warning",
-    title: "将启动另一版本的 Codex",
-    message: "所选 Codex 与正在运行的版本不同，是否另开窗口？",
+    title: `将启动另一版本的 ${hostName}`,
+    message: `所选 ${hostName} 与正在运行的版本不同，是否另开窗口？`,
     detail: `正在运行（不会关闭）：\n${runningDetails}\n\n即将启动：\n${installation.label}\n${installation.path}\n\n继续会使用独立调试配置打开新窗口，壁纸将应用到新窗口，不会应用到原有窗口。若要给原有版本应用壁纸，请取消并在工作台顶部选择对应版本。`,
     buttons: ["另开所选版本", "取消"],
     defaultId: 1,
@@ -378,7 +427,7 @@ function createMainWindow() {
     minHeight: 700,
     show: false,
     backgroundColor: "#0c0d10",
-    title: "Codex Wallpaper Desktop",
+    title: "Lumina",
     ...(windowIcon ? { icon: windowIcon } : {}),
     ...desktopWindowChromeOptions(process.platform),
     webPreferences: {
@@ -517,9 +566,11 @@ async function cancelCodexTakeover() {
 function startCodexTakeover({ installation, port, adaptive, baselineProcessIds = [] }) {
   stopCodexTakeover();
   if (acceptanceContext || shutdownRequested || !installation?.path) return;
+  const hostType = installationHostType(installation);
+  const hostName = hostDisplayName(hostType);
   const context = {
     installation: { ...installation }, port: validateCdpPort(port),
-    adaptive: Boolean(adaptive), controller: new AbortController(),
+    adaptive: Boolean(adaptive), hostType, controller: new AbortController(),
   };
   takeoverContext = context;
   const isCurrent = () => takeoverContext === context && !shutdownRequested && !isQuitting
@@ -545,7 +596,9 @@ function startCodexTakeover({ installation, port, adaptive, baselineProcessIds =
       onTakeover: ({ ordinary }) => {
         if (!isCurrent() || takeoverRunning) return;
         takeoverRunning = true;
-        const task = runOperation("自动接管 Codex", async () => {
+        const extraArgs = extractPreservedLaunchArgs(ordinary.map((entry) => entry.commandLine));
+        if (extraArgs.length) void rememberPreservedLaunchArgs(context.installation.id, extraArgs);
+        const task = runOperation(`自动接管 ${hostName}`, async () => {
           const result = await runCodexTakeoverFlow({
             installation: context.installation, port: context.port, adaptive: context.adaptive,
             expectedProcesses: ordinary, signal: context.controller.signal, isCurrent,
@@ -556,11 +609,14 @@ function startCodexTakeover({ installation, port, adaptive, baselineProcessIds =
               installation: selected, expectedProcesses, signal: context.controller.signal, onLog: log,
             }),
             launchCodex: (options) => launchCodex({
-              ...options, profileRoot: path.join(app.getPath("userData"), "codex-profiles"), onLog: log,
+              ...options,
+              profileRoot: path.join(app.getPath("userData"), "codex-profiles"),
+              extraArgs: getPreservedLaunchArgs(context.installation.id),
+              onLog: log,
             }),
-            waitForTarget: (selectedPort, signal) => waitForCodexTarget(selectedPort, { signal }),
+            waitForTarget: (selectedPort, signal) => waitForCodexTarget(selectedPort, { signal, hostType: context.hostType }),
             verifyOwner: verifySelectedOwner,
-            injectOnce: injectOnceAtPort,
+            injectOnce: (options) => injectOnceAtPort({ ...options, hostType: context.hostType }),
           });
           if (result.canceled || result.skipped) stopCodexTakeover();
           return result;
@@ -592,7 +648,7 @@ function registerIpcHandlers() {
   });
   registerHandler("cwb:choose-executable", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: "选择 Codex 的 ChatGPT.exe",
+      title: "选择 Codex 或 Antigravity 可执行文件",
       properties: ["openFile"],
       filters: [{ name: "Windows 可执行文件", extensions: ["exe"] }],
     });
@@ -603,12 +659,12 @@ function registerIpcHandlers() {
     const executablePath = await validateExecutable(result.filePaths[0]);
     if (typeof inspectExecutableIdentity === "function") {
       const identity = await inspectExecutableIdentity(executablePath).catch(() => null);
-      if (identity && !identity.looksLikeCodex) {
+      if (identity && !identity.looksLikeCodex && !identity.looksLikeAntigravity) {
         const confirm = await dialog.showMessageBox(mainWindow, {
           type: "warning",
           title: "确认所选可执行文件",
-          message: "所选程序未检测到 Codex 身份标识，是否仍要将其作为目标？",
-          detail: `${executablePath}\n\n应用壁纸时若该程序正在运行，本程序会尝试关闭并重启该路径对应的所有进程。若不确定它是 Codex 桌面版，建议取消。`,
+          message: "所选程序未检测到 Codex / Antigravity 身份标识，是否仍要将其作为目标？",
+          detail: `${executablePath}\n\n应用壁纸时若该程序正在运行，本程序会尝试关闭并重启该路径对应的所有进程。若不确定它是 Codex 或 Antigravity 桌面版，建议取消。`,
           buttons: ["仍要添加", "取消"],
           defaultId: 1,
           cancelId: 1,
@@ -628,7 +684,7 @@ function registerIpcHandlers() {
   });
   registerHandler("cwb:apply-codex", async ({ installationId, port, adaptive = true } = {}) => {
     if (!activeOperation || takeoverRunning) await cancelCodexTakeover();
-    return runOperation("应用到 Codex", async () => {
+    return runOperation("应用壁纸", async () => {
     const operationStartedAt = performance.now();
     let completed = false;
     try {
@@ -636,14 +692,18 @@ function registerIpcHandlers() {
       await rememberOperationSettings({ port, adaptive });
       const snapshot = await measureStartupPhase("discovery", currentState);
       const installation = await resolveInstallation(installationId, snapshot);
+      const hostType = installationHostType(installation);
+      const hostName = hostDisplayName(hostType);
       const normalizedPort = validateCdpPort(port);
       // Reuse the process snapshot taken before applying. Every process that
-      // already existed is ignored by the takeover watcher; only a Codex
+      // already existed is ignored by the takeover watcher; only a target
       // process created after this point may trigger a reclaim.
       const baselineProcessIds = installation.processIds || [];
       const flow = await runLaunchAndInjectFlow({
         installation,
-        runningInstallations: snapshot.installations.filter(({ isRunning }) => isRunning),
+        runningInstallations: snapshot.installations.filter(
+          (entry) => entry.isRunning && installationHostType(entry) === hostType,
+        ),
         port: normalizedPort,
         adaptive: Boolean(adaptive),
         onPhase: logStartupPhase,
@@ -656,23 +716,30 @@ function registerIpcHandlers() {
         verifyEndpointOwner: verifySelectedOwner,
         confirmClose: confirmCloseRunningCodex,
         confirmLaunchSeparate: confirmLaunchSeparateCodex,
-        closeCodex: (selected) => {
+        closeCodex: async (selected) => {
           assertNotQuitting();
           if (acceptanceContext) throw new Error("独立验收不得关闭 Codex");
+          try {
+            const processes = await listCodexProcesses({ executablePath: selected.path, port: normalizedPort });
+            const extraArgs = extractPreservedLaunchArgs(processes.map((entry) => entry.commandLine));
+            if (extraArgs.length) await rememberPreservedLaunchArgs(selected.id, extraArgs);
+          } catch {}
           return closeCodexProcesses({ installation: selected, onLog: log });
         },
         launchCodex: ({ installation: selected, port: selectedPort }) => {
           assertNotQuitting();
           if (acceptanceContext) throw new Error("独立验收不得启动 Codex");
+          const extraArgs = getPreservedLaunchArgs(selected.id);
           return launchCodex({
             installation: selected,
             port: selectedPort,
             profileRoot: path.join(app.getPath("userData"), "codex-profiles"),
+            ...(extraArgs.length ? { extraArgs } : {}),
             onLog: log,
           });
         },
-        waitForTarget: waitForCodexTarget,
-        injectOnce: injectOnceAtPort,
+        waitForTarget: (selectedPort) => waitForCodexTarget(selectedPort, { hostType }),
+        injectOnce: (options) => injectOnceAtPort({ ...options, hostType }),
       });
       if (flow.canceled) return flow;
       completed = true;
@@ -687,8 +754,8 @@ function registerIpcHandlers() {
         adaptive: flow.injection.adaptive,
         closedCount: flow.closed?.closedCount || 0,
         message: flow.launch
-          ? "Codex 已启动并应用壁纸；媒体服务将在托盘中保持运行"
-          : "壁纸已重新应用到正在调试的 Codex",
+          ? `${hostName} 已启动并应用壁纸；媒体服务将在托盘中保持运行`
+          : `壁纸已重新应用到正在调试的 ${hostName}`,
       };
     } catch (error) {
       try {
@@ -713,10 +780,11 @@ function registerIpcHandlers() {
     await rememberOperationSettings({ port });
     const normalizedPort = validateCdpPort(port);
     const installation = await resolveInstallation(installationId || settings.selectedId);
+    const hostType = installationHostType(installation);
     await verifySelectedOwner(installation, normalizedPort);
     assertNotQuitting();
     const control = await ensureControlPanel(normalizedPort);
-    return invokeBridgeAction({ controlUrl: control.url, action: "restore" });
+    return invokeBridgeAction({ controlUrl: control.url, action: "restore", hostType });
     });
   });
   registerHandler("cwb:open-control-panel", async ({ port } = {}) => {

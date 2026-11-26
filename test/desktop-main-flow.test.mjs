@@ -13,6 +13,7 @@ import { runLaunchAndInjectFlow } from "../src/launch-flow.mjs";
 import { dailyLogFilename, formatLogEntry, sanitizeLogText } from "../src/local-logging.mjs";
 import { createPreviewSession, stopPreviewProcess } from "../src/preview-session.mjs";
 import { DESKTOP_RENDERER_URL } from "../bridge-runtime/src/desktop-origin.mjs";
+import { extractPreservedLaunchArgs, hostDisplayName, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 import { registerDesktopRendererScheme } from "../src/desktop-renderer-protocol.mjs";
 import { desktopWindowChromeOptions, setWindowChromeTheme } from "../src/window-chrome.mjs";
 
@@ -90,6 +91,7 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
     Menu: {}, nativeImage: {}, session: {}, Tray: {}, shell: { openPath: async () => "" },
     protocol: { registerSchemesAsPrivileged: () => calls.order.push("register-desktop-scheme") },
     DESKTOP_RENDERER_URL, registerDesktopRendererScheme,
+    extractPreservedLaunchArgs, hostDisplayName, installationHostType,
     desktopWindowChromeOptions, setWindowChromeTheme,
     installDesktopRendererProtocol: async () => calls.order.push("install-desktop-protocol"),
     createDesktopEngineHost: (options) => {
@@ -387,7 +389,7 @@ test("main blocks the wrong installation and CDP port before apply or restore st
   for (const channel of ["cwb:apply-codex", "cwb:restore"]) {
     const invalid = await fixture.ipc(channel, { installationId: "missing", port: 19335 });
     assert.equal(invalid.ok, false);
-    assert.match(invalid.message, /有效的 Codex 安装/);
+    assert.match(invalid.message, /有效的目标应用/);
     const mismatch = await fixture.ipc(channel, { installationId: "store", port: 19335 });
     assert.equal(mismatch.ok, false);
     assert.match(mismatch.message, /不属于所选 Codex 安装/);

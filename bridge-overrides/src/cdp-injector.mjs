@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { buildRestoreScript } from "./injected-renderer.mjs";
 import { NativeEngineDelivery } from "../../bridge-runtime/src/native-engine-delivery.mjs";
 import { DirectSceneDelivery } from "../../bridge-runtime/src/direct-scene-delivery.mjs";
+import { extractTargetOrigin, hostDisplayName, isValidTargetUrlForHost, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
 
 const SCRIPT_TIMEOUT_MS = 15_000;
 // Owned media keeps its existing 15 s load gate. Leave room for that gate to
@@ -209,17 +210,16 @@ class CdpSocket {
   }
 }
 
-function isCodexRenderer(target) {
+function isHostRenderer(target, hostType = "codex") {
   if (!target || target.type !== "page" || !target.webSocketDebuggerUrl) return false;
-  const url = String(target.url || "");
-  if (/initialRoute=.*(?:avatar|pet|overlay)/i.test(url)) return false;
-  return url.startsWith("app://");
+  return isValidTargetUrlForHost(target.url, hostType);
 }
 
 export class CdpWallpaperInjector {
   constructor({
     host = "127.0.0.1",
     port = 9335,
+    hostType = "codex",
     pollIntervalMs = 1_500,
     onStatus = () => {},
     installOnNewDocument = true,
@@ -230,6 +230,7 @@ export class CdpWallpaperInjector {
   } = {}) {
     this.host = host;
     this.port = Number(port);
+    this.hostType = normalizeHostType(hostType, { strict: true });
     this.pollIntervalMs = pollIntervalMs;
     this.onStatus = onStatus;
     this.installOnNewDocument = installOnNewDocument;
@@ -310,7 +311,7 @@ export class CdpWallpaperInjector {
     if (!response.ok) throw new Error(`CDP target list returned HTTP ${response.status}`);
     const targets = await response.json();
     if (!Array.isArray(targets) || targets.some(t => !t || typeof t.id !== 'string' || !t.id)) throw new Error('CDP target list is malformed');
-    return includeAll ? targets : targets.filter(isCodexRenderer);
+    return includeAll ? targets : targets.filter((target) => isHostRenderer(target, this.hostType));
   }
 
   attach(target, options) {
@@ -345,7 +346,7 @@ export class CdpWallpaperInjector {
         // disappear during that wait; do not open its stale debugger socket.
         const current = (await this.listTargets({ includeAll: true })).find(t => t.id === target.id);
         if (!current) throw Object.assign(new Error('CDP target disappeared before attachment'), { cwbTargetGoneAfterVerification: true });
-        if (!isCodexRenderer(current) || current.webSocketDebuggerUrl !== target.webSocketDebuggerUrl) {
+        if (!isHostRenderer(current, this.hostType) || current.webSocketDebuggerUrl !== target.webSocketDebuggerUrl) {
           throw new Error('Verified CDP target changed before attachment');
         }
         target = current;
@@ -376,6 +377,7 @@ export class CdpWallpaperInjector {
       await socket.call("Page.setBypassCSP", { enabled: bypassCspRequested });
       session = {
         target,
+        targetOrigin: extractTargetOrigin(target.url, this.hostType),
         socket,
         newDocumentId: previous?.newDocumentId || null,
         compatibilityRestoreScript: previous?.compatibilityRestoreScript || "",
@@ -615,12 +617,15 @@ export class CdpWallpaperInjector {
     const marker = randomUUID();
     await this.evaluateScript(session, `globalThis.__cwbDocumentReload=${JSON.stringify(marker)};true`);
     await session.socket.call("Page.reload", { ignoreCache: false }, SCRIPT_TIMEOUT_MS);
+    const originCheck = this.hostType === "antigravity"
+      ? `/^https:\\/\\/127\\.0\\.0\\.1:\\d{1,5}$/.test(location.origin)`
+      : `location.origin==='app://-'`;
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       try {
         // DOM readiness is sufficient for bootstrap; unrelated subresources
         // need not finish. The marker proves this is not a queued old load.
-        if (await this.evaluateScript(session, `globalThis.__cwbDocumentReload!==${JSON.stringify(marker)}&&location.origin==='app://-'&&document.readyState!=='loading'&&Boolean(document.body)`, Math.min(1000, Math.max(1, deadline - Date.now()))) === true) {
+        if (await this.evaluateScript(session, `globalThis.__cwbDocumentReload!==${JSON.stringify(marker)}&&${originCheck}&&document.readyState!=='loading'&&Boolean(document.body)`, Math.min(1000, Math.max(1, deadline - Date.now()))) === true) {
           session.runtimeInstalled = false; return;
         }
       } catch {}
@@ -1298,7 +1303,7 @@ export class CdpWallpaperInjector {
             return;
           }
         }
-        throw new Error("没有找到可完整恢复的 Codex renderer");
+        throw new Error(`没有找到可完整恢复的 ${hostDisplayName(this.hostType)} renderer`);
       }
       const coverageErrors = [];
       let cohortSettled = false;
@@ -1330,7 +1335,7 @@ export class CdpWallpaperInjector {
               return;
             }
           }
-          throw new Error('没有找到可完整恢复的 Codex renderer');
+          throw new Error(`没有找到可完整恢复的 ${hostDisplayName(this.hostType)} renderer`);
         }
         const currentIds = new Set(current.map(t => t.id));
         const removed = targets.filter(t => !currentIds.has(t.id));
@@ -1480,8 +1485,8 @@ export class CdpWallpaperInjector {
   }
 }
 
-export async function restoreCdpWallpaper({ port = 9335, host = "127.0.0.1", onStatus, compatibilityRestoreScript = "" } = {}) {
-  const injector = new CdpWallpaperInjector({ port, host, onStatus });
+export async function restoreCdpWallpaper({ port = 9335, host = "127.0.0.1", hostType = "codex", onStatus, compatibilityRestoreScript = "" } = {}) {
+  const injector = new CdpWallpaperInjector({ port, host, hostType, onStatus });
   injector.compatibilityRestoreScript = compatibilityRestoreScript;
   try {
     await injector.restore();

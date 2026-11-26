@@ -17,12 +17,12 @@ test("tray menu exposes the simplified wallpaper workflow", async () => {
   const template = buildTrayMenuTemplate(actions(calls));
   assert.deepEqual(template.filter(({ label }) => label).map(({ label }) => label), [
     "打开壁纸设置",
-    "应用到 Codex",
+    "应用壁纸",
     "恢复官方外观",
     "打开本地日志目录",
     "退出",
   ]);
-  template.find(({ label }) => label === "应用到 Codex").click();
+  template.find(({ label }) => label === "应用壁纸").click();
   await Promise.resolve();
   assert.deepEqual(calls, ["apply"]);
 });
@@ -53,7 +53,7 @@ test("tray controller binds menu, double click, notification, and cleanup", asyn
     actions: actions(calls),
   });
 
-  assert.equal(controller.tray.tooltip, "Codex Wallpaper Desktop");
+  assert.equal(controller.tray.tooltip, "Lumina");
   assert.equal(builtTemplate.length, 7);
   controller.tray.handlers.get("double-click")();
   await Promise.resolve();

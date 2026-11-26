@@ -59,9 +59,11 @@ test('disabling audio retains volume and unrelated effect patches retain playbac
 test('playback fields and zero opacity reach the lightweight injection payload', () => {
   const input = normalizeConfig({ effects: { positionX: 17, positionY: 81, zoom: 123,
     playbackRate: 2, mirror: true, audioEnabled: true, volume: 29, contrast: 180, opacity: 0,
-    glassOpacity: 0, glassBlur: 0, webLoopHoldSeconds: 12, webForceSingleLoop: true } });
+    glassOpacity: 0, glassBlur: 0, sidebarBlur: false, webLoopHoldSeconds: 12, webForceSingleLoop: true } });
+  assert.equal(normalizeConfig().effects.sidebarBlur, true);
+  assert.equal(normalizeConfig({ effects: { sidebarBlur: 'no' } }).effects.sidebarBlur, true);
   const result = rendererEffects(input);
-  for (const key of ['position', 'zoom', 'playbackRate', 'mirror', 'audioEnabled', 'volume', 'contrast', 'opacity', 'glassOpacity', 'glassBlur', 'webLoopHoldSeconds', 'webForceSingleLoop']) {
+  for (const key of ['position', 'zoom', 'playbackRate', 'mirror', 'audioEnabled', 'volume', 'contrast', 'opacity', 'glassOpacity', 'glassBlur', 'sidebarBlur', 'webLoopHoldSeconds', 'webForceSingleLoop']) {
     assert.equal(result[key], input.effects[key], key);
   }
 });

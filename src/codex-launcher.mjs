@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { isCdpEndpointReady } from "./cdp-client.mjs";
 import { validateCdpPort, validateExecutable } from "./installations.mjs";
 import { tryRunWinHelper } from "./win-helper.mjs";
+import { buildProxyEnvironment, hostDisplayName, inferHostTypeFromPath, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const execFileAsync = promisify(execFile);
 const CLOSE_TIMEOUT_MS = 12_000;
@@ -78,8 +79,8 @@ function Find-TargetCodexProcesses {
 }
 
 function Order-RootsFirst($rows) {
-  $roots = @($rows | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
-  $children = @($rows | Where-Object { -not $_.CommandLine -or $_.CommandLine -match '--type=' })
+  $roots = @($rows | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine -notmatch '--import=' })
+  $children = @($rows | Where-Object { -not $_.CommandLine -or $_.CommandLine -match '--type=' -or $_.CommandLine -match '--import=' })
   @($roots + $children)
 }
 
@@ -104,7 +105,7 @@ $strictTakeover = -not [string]::IsNullOrEmpty($env:CWB_EXPECTED_PROCESSES)
 $matched = @(Find-TargetCodexProcesses)
 if ($strictTakeover) {
   $expected = @($env:CWB_EXPECTED_PROCESSES | ConvertFrom-Json)
-  $roots = @($matched | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
+  $roots = @($matched | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine -notmatch '--import=' })
   if ($roots.Count -ne $expected.Count) { throw 'Codex process set changed; takeover canceled' }
   foreach ($entry in $expected) {
     $found = @($roots | Where-Object { $_.ProcessId -eq $entry.processId -and $_.CommandLine -ceq $entry.commandLine })
@@ -231,19 +232,41 @@ function parseCloseResult(output) {
   };
 }
 
-export function profileDirectoryName(executablePath) {
+export function profileDirectoryName(executablePath, hostType = null) {
   const normalizedPath = path.win32.normalize(String(executablePath || "")).toLowerCase();
   const digest = createHash("sha256").update(normalizedPath).digest("hex").slice(0, 12);
-  return `codex-${digest}`;
+  const resolvedHost = hostType === "antigravity" || (!hostType && inferHostTypeFromPath(executablePath) === "antigravity")
+    ? "antigravity"
+    : "codex";
+  return `${resolvedHost}-${digest}`;
 }
 
-export function buildCodexArguments({ port, profilePath }) {
+export function buildCodexArguments({ port, profilePath, extraArgs = [] }) {
   const normalizedPort = validateCdpPort(port);
-  if (!profilePath) throw new Error("缺少 Codex 独立 profile 路径");
+  if (!profilePath) throw new Error("缺少独立 profile 路径");
+  const safeExtraArgs = (Array.isArray(extraArgs) ? extraArgs : [])
+    .filter((entry) => typeof entry === "string" && /^--proxy-(?:server|bypass-list|pac-url)=[A-Za-z0-9._:@/,;*=+\[\]-]{1,512}$/.test(entry));
+  const hasProxy = safeExtraArgs.some((entry) => entry.startsWith("--proxy-server=") || entry.startsWith("--proxy-pac-url="));
+  if (hasProxy) {
+    const loopbackRules = ["localhost", "127.0.0.1", "[::1]", "*.local"];
+    const bypassIndex = safeExtraArgs.findIndex((entry) => entry.startsWith("--proxy-bypass-list="));
+    if (bypassIndex === -1) {
+      safeExtraArgs.push(`--proxy-bypass-list=${loopbackRules.join(";")}`);
+    } else {
+      const existing = safeExtraArgs[bypassIndex]
+        .slice("--proxy-bypass-list=".length)
+        .split(/[;,]/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+      const merged = [...new Set([...loopbackRules, ...existing])].join(";");
+      if (merged.length <= 512) safeExtraArgs[bypassIndex] = `--proxy-bypass-list=${merged}`;
+    }
+  }
   return [
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${normalizedPort}`,
     `--user-data-dir=${profilePath}`,
+    ...safeExtraArgs,
   ];
 }
 
@@ -368,6 +391,7 @@ export async function launchCodex({
   installation,
   port,
   profileRoot,
+  extraArgs = [],
   timeoutMs = 25_000,
   onLog = () => {},
   signal,
@@ -379,6 +403,8 @@ export async function launchCodex({
   killProcessFn = (pid) => process.kill(pid),
 }) {
   signal?.throwIfAborted();
+  const hostType = installationHostType(installation);
+  const hostName = hostDisplayName(hostType);
   const normalizedPort = validateCdpPort(port);
   const ready = await isEndpointReady(normalizedPort);
   signal?.throwIfAborted();
@@ -386,14 +412,14 @@ export async function launchCodex({
     return { connected: true, alreadyListening: true, processId: null };
   }
   if (installation?.isRunning) {
-    throw new Error("这个 Codex 已在普通模式运行。请保存输入并完全退出它，再由桌面版启动调试实例。");
+    throw new Error(`这个 ${hostName} 已在普通模式运行。请保存输入并完全退出它，再由桌面版启动调试实例。`);
   }
   const executablePath = await validateExecutableFn(installation?.path);
   signal?.throwIfAborted();
-  const profilePath = path.join(profileRoot, profileDirectoryName(executablePath));
+  const profilePath = path.join(profileRoot, profileDirectoryName(executablePath, hostType));
   await mkdirFn(profilePath, { recursive: true });
   signal?.throwIfAborted();
-  const args = buildCodexArguments({ port: normalizedPort, profilePath });
+  const args = buildCodexArguments({ port: normalizedPort, profilePath, extraArgs });
   let launchedPid = null;
   let cleanupLaunched = () => {};
 
@@ -423,10 +449,15 @@ export async function launchCodex({
 
   if (launchedPid === null) {
     onLog({ stream: "system", text: `启动 ${executablePath}\n` });
+    const spawnEnv = buildProxyEnvironment(args, process.env);
+    // Antigravity ships with RunAsNode enabled for its own sidecar workers;
+    // inheriting ELECTRON_RUN_AS_NODE=1 makes it reject Chromium flags.
+    delete spawnEnv.ELECTRON_RUN_AS_NODE;
     const child = spawnImpl(executablePath, args, {
       detached: true,
       stdio: "ignore",
       windowsHide: false,
+      env: spawnEnv,
     });
     child.unref();
     launchedPid = child.pid;
@@ -440,10 +471,10 @@ export async function launchCodex({
       const listening = await isEndpointReady(normalizedPort);
       signal?.throwIfAborted();
       if (!listening) {
-        throw new Error("Microsoft Store 版 Codex 已在普通模式运行。请保存输入并完全退出后，再重新应用壁纸。");
+        throw new Error(`Microsoft Store 版 ${hostName} 已在普通模式运行。请保存输入并完全退出后，再重新应用壁纸。`);
       }
     } else if (!await waitForEndpoint(normalizedPort, timeoutMs, signal, isEndpointReady)) {
-      throw new Error(`Codex 已启动，但 ${timeoutMs / 1000} 秒内没有监听 CDP 端口 ${normalizedPort}`);
+      throw new Error(`${hostName} 已启动，但 ${timeoutMs / 1000} 秒内没有监听 CDP 端口 ${normalizedPort}`);
     }
   } catch (error) {
     // Only our newly launched, not-yet-ready process is cleaned up. Never kill

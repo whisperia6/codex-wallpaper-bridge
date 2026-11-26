@@ -16,6 +16,7 @@ import { sceneAssetCache } from "../../bridge-runtime/src/scene-asset-cache.mjs"
 import { validateWebWallpaperInput } from "../../bridge-runtime/src/web-wallpaper-input.mjs";
 import { MediaMiddleware } from "../../bridge-runtime/src/media-middleware.mjs";
 import { LyricsStore } from "../../bridge-runtime/src/media-lyrics.mjs";
+import { hostDisplayName, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
@@ -30,13 +31,14 @@ function parseArguments(argv) {
   const firstArgument = args.shift();
   const command = firstArgument && !firstArgument.startsWith("-") ? firstArgument : "preview";
   if (firstArgument?.startsWith("-")) args.unshift(firstArgument);
-  const options = { command, cdpPort: 9335, open: true, once: false, keepOnExit: false };
+  const options = { command, cdpPort: 9335, hostType: "codex", open: true, once: false, keepOnExit: false };
   while (args.length) {
     const argument = args.shift();
     if (argument === "--no-open") options.open = false;
     else if (argument === "--once") options.once = true;
     else if (argument === "--keep-on-exit") options.keepOnExit = true;
     else if (argument === "--cdp-port") options.cdpPort = Number(args.shift());
+    else if (argument === "--host-type") options.hostType = normalizeHostType(args.shift(), { strict: true });
     else if (argument === "--steam-root") (options.steamRoots ||= []).push(args.shift());
     else if (argument === "--help" || argument === "-h") options.help = true;
     else throw new Error(`未知参数：${argument}`);
@@ -118,11 +120,12 @@ async function main() {
   if (options.command === "restore") {
     await restoreCdpWallpaper({
       port: options.cdpPort,
+      hostType: options.hostType,
       compatibilityRestoreScript: buildCompatibilityRestoreScript(),
       onStatus: (status) => console.log(`[CDP] ${status.type}${status.message ? `: ${status.message}` : ""}`)
     });
     await rm(runtimePath, { force: true }).catch(() => {});
-    console.log("已清除 Codex renderer 中的 Wallpaper Bridge 样式。");
+    console.log(`已清除 ${hostDisplayName(options.hostType)} renderer 中的 Wallpaper Bridge 样式。`);
     return;
   }
 
@@ -157,6 +160,7 @@ async function main() {
   options.sceneRenderer = nativeProvider ? (directSceneEnabled ? "direct-gpu" : "vp8") : "preview-only";
 
   let injector = null;
+  let activeHostType = options.hostType;
   let server;
   let compatibility = null;
   let stopping = false;
@@ -171,7 +175,11 @@ async function main() {
     return operation;
   };
   const currentInjection = async () => ({
-    ...await buildCurrentInjection(server, configStore, { nativeEnabled: Boolean(nativeProvider), directSceneEnabled }),
+    ...await buildCurrentInjection(server, configStore, {
+      nativeEnabled: Boolean(nativeProvider),
+      directSceneEnabled,
+      hostType: activeHostType,
+    }),
     ...compatibility,
   });
   const media = new MediaMiddleware({ getConfig: () => configStore.get(),
@@ -188,7 +196,7 @@ async function main() {
     const injection = await currentInjection();
     const result = scan ? await injector.update(injection, { scan: true }) : await injector.update(injection);
     if (result.failed > 0 || (!allowDetached && result.sessions === 0 && !(result.deferred > 0))) {
-      throw new Error("一个或多个 Codex renderer 未能完成注入验证");
+      throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
     }
     return {
       ok: true,
@@ -200,9 +208,14 @@ async function main() {
   };
 
   const ensureInjector = async () => {
+    if (injector && (injector.hostType || "codex") !== activeHostType) {
+      await injector.close({ restore: false, allowEndpointUnavailable: true }).catch(() => {});
+      injector = null;
+    }
     if (!injector || injector.running === false) {
       injector ||= new CdpWallpaperInjector({
         port: options.cdpPort,
+        hostType: activeHostType,
         installOnNewDocument: !options.once,
         nativeProvider,
         sceneProvider: directSceneEnabled ? {
@@ -224,9 +237,9 @@ async function main() {
         const injection = await currentInjection();
         const result = await injector.start(injection);
         await injector.updatePower((await media.snapshot()).power);
-        if (result.failed > 0) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
+        if (result.failed > 0) throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
         if (result.sessions === 0 && !(result.deferred > 0)) {
-          throw new Error(`没有在 127.0.0.1:${options.cdpPort} 找到 Codex renderer；可先使用预览页`);
+          throw new Error(`没有在 127.0.0.1:${options.cdpPort} 找到 ${hostDisplayName(activeHostType)} renderer；可先使用预览页`);
         }
         return { injector, started: true, deferred: result.deferred || 0, metrics: injection.metrics, timings: result.timings };
       } catch (error) {
@@ -259,10 +272,13 @@ async function main() {
       ? { ok: true, status: "skipped", targets: 0 } : injector.preloadScene(id) : null,
     onAction: (action, body = {}) => enqueueOperation(async () => {
       if (action === "inject") {
+        if (Object.hasOwn(body, "hostType")) {
+          activeHostType = normalizeHostType(body.hostType, { strict: true });
+        }
         if (Object.hasOwn(body, "adaptive")) {
           if (typeof body.adaptive !== "boolean") throw new Error("兼容模式必须是布尔值");
           compatibility = {
-            compatibilityScript: buildCompatibilityScript({ adaptive: body.adaptive }),
+            compatibilityScript: buildCompatibilityScript({ adaptive: body.adaptive, hostType: activeHostType }),
             compatibilityRestoreScript: buildCompatibilityRestoreScript(),
           };
         }
@@ -271,7 +287,7 @@ async function main() {
         const update = state.started
           ? { ok: true, metrics: state.metrics, timings: state.timings }
           : await refreshInjection({ scan: true });
-        if (!update.ok) throw new Error("一个或多个 Codex renderer 未能完成注入验证");
+        if (!update.ok) throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
         await writeRuntime(server, options, scanResult, true);
         const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
         const deferredTargets = update.deferred || state.deferred || 0;
@@ -286,15 +302,23 @@ async function main() {
         };
       }
       if (action === "restore") {
+        const restoreHostType = Object.hasOwn(body, "hostType")
+          ? normalizeHostType(body.hostType, { strict: true })
+          : activeHostType;
         compatibility = null;
-        if (injector) {
+        if (injector && (injector.hostType || "codex") === restoreHostType) {
           const activeInjector = injector;
           activeInjector.compatibilityRestoreScript ||= buildCompatibilityRestoreScript();
           await activeInjector.close({ restore: true });
           injector = null;
         } else {
+          if (injector) {
+            await injector.close({ restore: false, allowEndpointUnavailable: true }).catch(() => {});
+            injector = null;
+          }
           await restoreCdpWallpaper({
             port: options.cdpPort,
+            hostType: restoreHostType,
             compatibilityRestoreScript: buildCompatibilityRestoreScript(),
           });
         }

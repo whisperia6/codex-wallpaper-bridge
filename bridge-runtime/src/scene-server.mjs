@@ -107,14 +107,21 @@ function singleRange(value, size) {
   return { start, end, partial: true };
 }
 
-function parentOriginOf(value) {
+function parentOriginOf(value, { allowHttpsLoopback = false } = {}) {
   if (value === null || value === undefined) return null;
   // Both independently verified Codex builds register this as a standard scheme.
   // Node's WHATWG URL reports custom origins as "null"; never use that value or
   // broaden to app:/*. Only the exact Chromium origin may receive telemetry.
   if (value === 'app://-') return value;
   const url = new URL(value);
-  if (url.origin !== value || url.protocol !== 'http:' || url.hostname !== '127.0.0.1') {
+  const httpsLoopbackAllowed = allowHttpsLoopback === true
+    && url.protocol === 'https:'
+    && url.hostname === '127.0.0.1'
+    && /^\d{1,5}$/.test(url.port)
+    && Number(url.port) >= 1
+    && Number(url.port) <= 65535;
+  const httpLoopbackAllowed = url.protocol === 'http:' && url.hostname === '127.0.0.1';
+  if (url.origin !== value || (!httpLoopbackAllowed && !httpsLoopbackAllowed)) {
     throw new TypeError('scene parent must be an explicit loopback or verified Codex app origin');
   }
   return url.origin;
@@ -147,12 +154,13 @@ export class ReadonlyWallpaperServer {
   #desktopAncestor;
   #diagnostics = { requests: [], bytes: 0, denied: 0, upstreamDiagnostics: 0 };
 
-  constructor({ project, config = {}, parentOrigin = null, vendorDir = VENDOR_DIR, diagnosticProbe = false, frameRate = 30, nativeQuality = false, desktopAncestor = false, authorFiles = null } = {}) {
+  constructor({ project, config = {}, parentOrigin = null, allowHttpsLoopback = false, vendorDir = VENDOR_DIR, diagnosticProbe = false, frameRate = 30, nativeQuality = false, desktopAncestor = false, authorFiles = null } = {}) {
     if (!['scene', 'web'].includes(project?.type) || typeof project.rootPath !== 'string') throw new TypeError('a registered scene or web project is required');
+    if (typeof allowHttpsLoopback !== 'boolean') throw new TypeError('invalid https loopback parent option');
     this.#project = structuredClone(project);
     this.#config = structuredClone(config);
     this.#authorFiles = authorFiles;
-    this.#parentOrigin = parentOriginOf(parentOrigin);
+    this.#parentOrigin = parentOriginOf(parentOrigin, { allowHttpsLoopback });
     if (typeof desktopAncestor !== 'boolean' || (desktopAncestor && !this.#parentOrigin?.startsWith('http://127.0.0.1'))) {
       throw new TypeError('invalid desktop ancestor');
     }

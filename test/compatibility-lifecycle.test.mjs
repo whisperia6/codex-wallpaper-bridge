@@ -12,6 +12,7 @@ import {
   buildCompatibilityRestoreScript,
   buildCompatibilityScript,
 } from "../src/compatibility-script.mjs";
+import { hostDisplayName, normalizeHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const compatibilityRestoreScript = buildCompatibilityRestoreScript();
 
@@ -464,6 +465,7 @@ async function cliHarness({ startResult = { sessions: 1, failed: 0, timings: [] 
     performance,
     mkdir: async () => {}, rm: async () => {}, writeFile: async () => {},
     buildCompatibilityScript, buildCompatibilityRestoreScript,
+    hostDisplayName, normalizeHostType,
     openNativeEngineProvider: () => nativeProvider,
     LyricsStore: class {},
     MediaMiddleware: class { async configure() { await onMediaConfigure?.(); } async snapshot() { return { power: { onBattery: false } }; } async close() {} },
@@ -471,7 +473,7 @@ async function cliHarness({ startResult = { sessions: 1, failed: 0, timings: [] 
     scanWallpaperProjects: async () => ({ projects: [{ id: "video" }], warnings: [] }),
     buildCurrentInjection: async () => ({ bootstrapScript: "bootstrap-script", applyScript: "apply-script", metrics: {} }),
     CdpWallpaperInjector: class {
-      constructor() { this.running = false; this.id = instances.length + 1; instances.push(this); events.push(`create:${this.id}`); }
+      constructor(options = {}) { this.running = false; this.hostType = options.hostType || "codex"; this.id = instances.length + 1; instances.push(this); events.push(`create:${this.id}`); }
       async start(injection) {
         this.running = true;
         events.push(`start:${this.id}:begin`);

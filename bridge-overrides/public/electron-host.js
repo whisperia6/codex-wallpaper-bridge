@@ -86,6 +86,7 @@
   function controls() {
     return {
       bar: document.querySelector("#desktopTargetBar"),
+      heading: document.querySelector("#desktopTargetBar .desktop-target-bar__identity strong"),
       status: document.querySelector("#desktopApplyStatus"),
       installation: document.querySelector("#desktopInstallationSelect"),
       refresh: document.querySelector("#desktopRefreshButton"),
@@ -95,6 +96,26 @@
       restore: document.querySelector("#desktopRestoreButton"),
       apply: document.querySelector("#desktopApplyButton"),
     };
+  }
+
+  function selectedInstallation(selectedId) {
+    const id = selectedId || controls().installation?.value || latestDesktopState?.selectedId || "";
+    return (latestDesktopState?.installations || []).find((entry) => entry.id === id) || null;
+  }
+
+  function hostDisplayLabel(installation) {
+    if (installation?.hostType === "antigravity" || /(?:^|[\\/])antigravity\.exe$/i.test(String(installation?.path || ""))) {
+      return "Antigravity";
+    }
+    return "Codex";
+  }
+
+  function syncTargetCopy(selectedId, disabled = Boolean(latestDesktopState?.busy)) {
+    const elements = controls();
+    const hostName = hostDisplayLabel(selectedInstallation(selectedId));
+    if (elements.heading) elements.heading.textContent = `应用到 ${hostName}`;
+    const applyLabel = elements.apply?.querySelector("span");
+    if (applyLabel) applyLabel.textContent = disabled ? "正在处理" : `应用到 ${hostName}`;
   }
 
   function setStatus(message, tone = "idle") {
@@ -121,7 +142,7 @@
     if (!state.installations?.length) {
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = "未检测到 Codex，请选择本地 EXE";
+      option.textContent = "未检测到 Codex / Antigravity，请选择本地 EXE";
       elements.installation.append(option);
     } else {
       for (const installation of state.installations) {
@@ -135,7 +156,7 @@
     }
     elements.port.value = String(state.port || 9335);
     elements.adaptive.checked = state.adaptive !== false;
-    setStatus(state.feedback || "选择壁纸后应用到 Codex", state.feedbackTone || "idle");
+    setStatus(state.feedback || "选择壁纸后应用到目标应用", state.feedbackTone || "idle");
 
     const disabled = Boolean(state.busy);
     elements.installation.disabled = disabled;
@@ -146,7 +167,7 @@
     elements.restore.disabled = disabled;
     elements.apply.disabled = disabled || !currentValue;
     elements.apply.classList.toggle("is-busy", disabled);
-    elements.apply.querySelector("span").textContent = disabled ? "正在处理" : "应用到 Codex";
+    syncTargetCopy(currentValue, disabled);
   }
 
   function currentPayload() {
@@ -164,7 +185,10 @@
       if (!result?.ok && !result?.canceled) setStatus(result?.message || "操作失败", "error");
       if (result?.ok && !result?.canceled && (action === "apply" || action === "restore")) {
         window.dispatchEvent(new CustomEvent("cwb-desktop-injection-change", {
-          detail: { injected: action === "apply" },
+          detail: {
+            injected: action === "apply",
+            hostName: hostDisplayLabel(selectedInstallation(payload?.installationId)),
+          },
         }));
       }
       return result;
@@ -217,6 +241,7 @@
   window.addEventListener("DOMContentLoaded", () => {
     const elements = controls();
     elements.bar.hidden = false;
+    elements.installation.addEventListener("change", () => syncTargetCopy(elements.installation.value));
     elements.refresh.addEventListener("click", () => void runControlAction("refresh-installations"));
     elements.choose.addEventListener("click", () => void runControlAction("choose-executable"));
     elements.apply.addEventListener("click", () => void runControlAction("apply", currentPayload()));

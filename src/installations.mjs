@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { inferHostTypeFromPath } from "../bridge-runtime/src/host-profiles.mjs";
 import { tryRunWinHelper } from "./win-helper.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -38,6 +39,7 @@ $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyCon
 })
 
 $candidatePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$antigravityCandidatePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
 function Add-CodexCandidate([string]$candidatePath) {
   if ([string]::IsNullOrWhiteSpace($candidatePath)) { return }
@@ -53,6 +55,16 @@ function Add-CodexCandidate([string]$candidatePath) {
   }
 }
 
+function Add-AntigravityCandidate([string]$candidatePath) {
+  if ([string]::IsNullOrWhiteSpace($candidatePath)) { return }
+  $expandedPath = [Environment]::ExpandEnvironmentVariables($candidatePath.Trim().Trim('"'))
+  $fileName = [IO.Path]::GetFileName($expandedPath)
+  if ($fileName -ine 'Antigravity.exe') { return }
+  if (Test-Path -LiteralPath $expandedPath -PathType Leaf) {
+    [void]$antigravityCandidatePaths.Add([IO.Path]::GetFullPath($expandedPath))
+  }
+}
+
 function Add-InstallLocation([string]$installLocation) {
   if ([string]::IsNullOrWhiteSpace($installLocation)) { return }
   $dir = $installLocation.Trim().Trim('"')
@@ -64,20 +76,35 @@ function Add-InstallLocation([string]$installLocation) {
   Add-CodexCandidate (Join-Path $dir 'Codex.exe')
 }
 
+function Add-AntigravityInstallLocation([string]$installLocation) {
+  if ([string]::IsNullOrWhiteSpace($installLocation)) { return }
+  $dir = $installLocation.Trim().Trim('"')
+  Add-AntigravityCandidate (Join-Path $dir 'Antigravity.exe')
+}
+
 $uninstallRoots = @(
   'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
   'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
   'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
-Get-ItemProperty -Path $uninstallRoots | Where-Object {
-  [string]$_.DisplayName -match '^(OpenAI\s+)?Codex(?:\s+(Desktop|App))?$'
-} | ForEach-Object {
-  Add-InstallLocation ([string]$_.InstallLocation)
-  $displayIcon = ([string]$_.DisplayIcon).Trim()
-  if ($displayIcon -match '^"([^"]+\.exe)"') {
-    Add-CodexCandidate $Matches[1]
-  } elseif ($displayIcon -match '^(.+?\.exe)(?:,\d+)?$') {
-    Add-CodexCandidate $Matches[1]
+Get-ItemProperty -Path $uninstallRoots | ForEach-Object {
+  $displayName = [string]$_.DisplayName
+  if ($displayName -match '^(OpenAI\s+)?Codex(?:\s+(Desktop|App))?$') {
+    Add-InstallLocation ([string]$_.InstallLocation)
+    $displayIcon = ([string]$_.DisplayIcon).Trim()
+    if ($displayIcon -match '^"([^"]+\.exe)"') {
+      Add-CodexCandidate $Matches[1]
+    } elseif ($displayIcon -match '^(.+?\.exe)(?:,\d+)?$') {
+      Add-CodexCandidate $Matches[1]
+    }
+  } elseif ($displayName -match '^(Google\s+)?Antigravity(?:\s+2(?:\.0)?)?$') {
+    Add-AntigravityInstallLocation ([string]$_.InstallLocation)
+    $displayIcon = ([string]$_.DisplayIcon).Trim()
+    if ($displayIcon -match '^"([^"]+\.exe)"') {
+      Add-AntigravityCandidate $Matches[1]
+    } elseif ($displayIcon -match '^(.+?\.exe)(?:,\d+)?$') {
+      Add-AntigravityCandidate $Matches[1]
+    }
   }
 }
 
@@ -90,6 +117,13 @@ $knownDirectories = @(
 )
 $knownDirectories | ForEach-Object { Add-InstallLocation $_ }
 
+$knownAntigravityDirectories = @(
+  (Join-Path $env:LOCALAPPDATA 'Programs\antigravity'),
+  (Join-Path $env:ProgramFiles 'Antigravity'),
+  (Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Antigravity')
+)
+$knownAntigravityDirectories | ForEach-Object { Add-AntigravityInstallLocation $_ }
+
 $startMenuRoots = @(
   (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
   (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs')
@@ -100,6 +134,9 @@ if ($shell) {
   Get-ChildItem -Path $startMenuRoots -Filter '*Codex*.lnk' -File -Recurse | ForEach-Object {
     try { Add-CodexCandidate $shell.CreateShortcut($_.FullName).TargetPath } catch {}
   }
+  Get-ChildItem -Path $startMenuRoots -Filter '*Antigravity*.lnk' -File -Recurse | ForEach-Object {
+    try { Add-AntigravityCandidate $shell.CreateShortcut($_.FullName).TargetPath } catch {}
+  }
 }
 
 $localInstallations = @($candidatePaths | ForEach-Object {
@@ -109,6 +146,20 @@ $localInstallations = @($candidatePaths | ForEach-Object {
     [pscustomobject]@{
       ExecutablePath = $item.FullName
       ProductVersion = $item.VersionInfo.ProductVersion
+    }
+  }
+}) + @($antigravityCandidatePaths | ForEach-Object {
+  $item = Get-Item -LiteralPath $_
+  $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
+  $dir = [IO.Path]::GetDirectoryName($item.FullName)
+  $hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar') -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $dir 'chrome_elf.dll') -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $dir 'chrome.dll') -PathType Leaf)
+  if ($hasDesktopLayout -and $identity -match '(?i)\bAntigravity\b') {
+    [pscustomobject]@{
+      ExecutablePath = $item.FullName
+      ProductVersion = $item.VersionInfo.ProductVersion
+      HostType = 'antigravity'
     }
   }
 })
@@ -206,10 +257,12 @@ export function normalizeInstallations({
     if (!executablePath) continue;
     const key = normalizedPathKey(executablePath);
     if (installations.has(key)) continue;
+    const isAntigravity = localInstallation?.HostType === "antigravity" || inferHostTypeFromPath(executablePath) === "antigravity";
     installations.set(key, {
       id: localInstallationId(executablePath),
       kind: "local",
-      label: "本地 EXE 版（自动发现）",
+      ...(isAntigravity ? { hostType: "antigravity" } : {}),
+      label: isAntigravity ? "Antigravity（自动发现）" : "本地 EXE 版（自动发现）",
       path: executablePath,
       version: String(localInstallation.ProductVersion || "未知"),
       isRunning: false,
@@ -221,10 +274,12 @@ export function normalizeInstallations({
     const executablePath = String(processInfo?.ExecutablePath || "").trim();
     if (!executablePath) continue;
     const key = normalizedPathKey(executablePath);
+    const isAntigravity = processInfo?.HostType === "antigravity" || inferHostTypeFromPath(executablePath) === "antigravity";
     const existing = installations.get(key) || {
       id: localInstallationId(executablePath),
       kind: "local",
-      label: "本地 EXE 版",
+      ...(isAntigravity ? { hostType: "antigravity" } : {}),
+      label: isAntigravity ? "Antigravity" : "本地 EXE 版",
       path: executablePath,
       version: String(processInfo.ProductVersion || "未知"),
       isRunning: false,
@@ -243,10 +298,12 @@ export function normalizeInstallations({
     if (!executablePath) continue;
     const key = normalizedPathKey(executablePath);
     if (installations.has(key)) continue;
+    const isAntigravity = inferHostTypeFromPath(executablePath) === "antigravity";
     installations.set(key, {
       id: localInstallationId(executablePath),
       kind: "local",
-      label: "本地 EXE 版",
+      ...(isAntigravity ? { hostType: "antigravity" } : {}),
+      label: isAntigravity ? "Antigravity（手动选择）" : "本地 EXE 版",
       path: executablePath,
       version: "未知",
       isRunning: false,
@@ -335,6 +392,7 @@ $extraPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordin
 $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 [void]$names.Add('ChatGPT.exe')
 [void]$names.Add('Codex.exe')
+[void]$names.Add('Antigravity.exe')
 if (-not [string]::IsNullOrWhiteSpace($env:CWB_EXTRA_EXE_PATHS)) {
   try {
     foreach ($entry in @($env:CWB_EXTRA_EXE_PATHS | ConvertFrom-Json)) {
@@ -373,12 +431,23 @@ $items = @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyCo
       (Test-Path -LiteralPath (Join-Path $dir 'chrome.dll') -PathType Leaf)
     if ($hasDesktopLayout -and $identity -match '(?i)\bCodex\b') { $include = $true }
   }
+  $hostType = if ($fileName -ieq 'Antigravity.exe') { 'antigravity' } else { 'codex' }
+  if (-not $include -and $fileName -ieq 'Antigravity.exe' -and $item) {
+    $identity = "$($item.VersionInfo.ProductName) $($item.VersionInfo.FileDescription)"
+    $dir = [IO.Path]::GetDirectoryName($fullPath)
+    $hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar') -PathType Leaf) -or
+      (Test-Path -LiteralPath (Join-Path $dir 'chrome_elf.dll') -PathType Leaf) -or
+      (Test-Path -LiteralPath (Join-Path $dir 'chrome.dll') -PathType Leaf)
+    if ($hasDesktopLayout -and $identity -match '(?i)\bAntigravity\b') { $include = $true }
+  }
   if ($include) {
-    [pscustomobject]@{
+    $entry = [ordered]@{
       ProcessId = [int]$_.ProcessId
       ExecutablePath = $execPath
       ProductVersion = if ($item) { [string]$item.VersionInfo.ProductVersion } else { '' }
     }
+    if ($hostType -eq 'antigravity') { $entry.HostType = 'antigravity' }
+    [pscustomobject]$entry
   }
 })
 $items | ConvertTo-Json -Compress
@@ -399,6 +468,7 @@ $hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar'
   productName = $productName
   fileDescription = $fileDescription
   looksLikeCodex = [bool](("$productName $fileDescription" -match '(?i)\bCodex\b') -or ($full.IndexOf('\WindowsApps\OpenAI.Codex', [StringComparison]::OrdinalIgnoreCase) -ge 0))
+  looksLikeAntigravity = [bool]($hasDesktopLayout -and ("$productName $fileDescription" -match '(?i)\bAntigravity\b'))
   hasDesktopLayout = [bool]$hasDesktopLayout
 } | ConvertTo-Json -Compress
 `;
@@ -406,7 +476,7 @@ $hasDesktopLayout = (Test-Path -LiteralPath (Join-Path $dir 'resources\app.asar'
 export async function inspectExecutableIdentity(executablePath) {
   const resolvedPath = await validateExecutable(executablePath);
   if (process.platform !== "win32") {
-    return { productName: "", fileDescription: "", looksLikeCodex: true, hasDesktopLayout: true };
+    return { productName: "", fileDescription: "", looksLikeCodex: true, looksLikeAntigravity: false, hasDesktopLayout: true };
   }
   try {
     const { stdout } = await execFileAsync(
@@ -425,10 +495,11 @@ export async function inspectExecutableIdentity(executablePath) {
       productName: String(parsed?.productName || ""),
       fileDescription: String(parsed?.fileDescription || ""),
       looksLikeCodex: Boolean(parsed?.looksLikeCodex),
+      looksLikeAntigravity: Boolean(parsed?.looksLikeAntigravity),
       hasDesktopLayout: Boolean(parsed?.hasDesktopLayout),
     };
   } catch {
-    return { productName: "", fileDescription: "", looksLikeCodex: false, hasDesktopLayout: false };
+    return { productName: "", fileDescription: "", looksLikeCodex: false, looksLikeAntigravity: false, hasDesktopLayout: false };
   }
 }
 

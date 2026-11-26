@@ -42,7 +42,17 @@ export class DirectSceneDelivery {
     const [project, config] = await Promise.all([this.#getProject(entry.key), this.#getConfig()]);
     if (this.#closed || entry.closed) throw Error('gpu_lease_cancelled');
     if (!project || !['scene', 'web'].includes(project.type) || project.eligible === false || project.hidden) throw Error('gpu_project_unavailable');
-    entry.server = createSceneServer({ project, config, parentOrigin: 'app://-', frameRate: 60, nativeQuality: true, diagnosticProbe: this.#diagnosticProbe, authorFiles: this.#authorFiles });
+    const parentOrigin = entry.parentOrigin || 'app://-';
+    entry.server = createSceneServer({
+      project,
+      config,
+      parentOrigin,
+      allowHttpsLoopback: parentOrigin.startsWith('https://127.0.0.1:'),
+      frameRate: 60,
+      nativeQuality: true,
+      diagnosticProbe: this.#diagnosticProbe,
+      authorFiles: this.#authorFiles,
+    });
     entry.rootPath = project.rootPath;
     entry.type = project.type;
     await entry.server.start();
@@ -69,7 +79,13 @@ export class DirectSceneDelivery {
     if (this.#closed) throw Error('gpu_delivery_closed');
     if (!session.sceneTransportId) throw Error('gpu_receiver_lost');
     if (this.#failures.has(key)) throw Error('gpu_source_failed');
+    const parentOrigin = session.targetOrigin || 'app://-';
     let entry = this.#sources.get(key);
+    if (entry && !entry.closed && entry.parentOrigin !== parentOrigin) {
+      await Promise.all([...entry.leases].map((lease) => this.#release(lease)));
+      await entry.closing;
+      entry = this.#sources.get(key);
+    }
     if (entry?.closed) throw Error('gpu_source_closing');
     if (!entry) {
       // Finish only already committed transitions before reserving a third
@@ -84,7 +100,7 @@ export class DirectSceneDelivery {
         await this.sweep();
       }
       if (this.#sources.size >= 2) throw Error('gpu_source_capacity');
-      entry = { key, server: null, schema: {}, leases: new Set(), closed: false, closing: null };
+      entry = { key, parentOrigin, server: null, schema: {}, leases: new Set(), closed: false, closing: null };
       this.#sources.set(key, entry);
       entry.starting = this.#start(entry);
       entry.starting.catch(() => {});

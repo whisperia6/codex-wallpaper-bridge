@@ -29,17 +29,20 @@ export async function runLaunchAndInjectFlow({
   let selectedInstallation = installation;
   let closed = null;
 
+  const hostName = installation?.hostType === "antigravity" || /(?:^|[\\/])antigravity\.exe$/i.test(String(installation?.path || ""))
+    ? "Antigravity"
+    : "Codex";
   if (!alreadyDebuggable && !installation?.isRunning) {
     const otherRunningInstallations = runningInstallations.filter(({ id, isRunning }) => isRunning && id !== installation.id);
     if (otherRunningInstallations.length > 0) {
       if (typeof confirmLaunchSeparate !== "function") {
-        throw new Error("启动另一版本的 Codex 前需要确认，已停止启动");
+        throw new Error(`启动另一版本的 ${hostName} 前需要确认，已停止启动`);
       }
       const confirmed = await measure("confirmation", () => confirmLaunchSeparate(installation, otherRunningInstallations));
       if (confirmed !== true) {
         return {
           canceled: true,
-          message: "已取消，未启动另一版本，原有 Codex 窗口保持不变",
+          message: `已取消，未启动另一版本，原有 ${hostName} 窗口保持不变`,
         };
       }
     }
@@ -50,7 +53,7 @@ export async function runLaunchAndInjectFlow({
     if (!confirmed) {
       return {
         canceled: true,
-        message: "已取消，Codex 保持运行",
+        message: `已取消，${hostName} 保持运行`,
       };
     }
     closed = await measure("close", () => closeCodex(installation));

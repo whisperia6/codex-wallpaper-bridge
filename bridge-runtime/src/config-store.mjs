@@ -42,6 +42,7 @@ export const DEFAULT_CONFIG = Object.freeze({
     opacity: 100,
     glassOpacity: 62,
     glassBlur: 18,
+    sidebarBlur: true,
     webLoopHoldSeconds: 0,
     webForceSingleLoop: false,
     pauseWhenHidden: true,
@@ -161,6 +162,9 @@ export function normalizeConfig(input = {}, defaults = DEFAULT_CONFIG) {
       audioEnabled: typeof effects.audioEnabled === 'boolean' ? effects.audioEnabled : (baseEffects.audioEnabled ?? false),
       glassOpacity: finiteNumber(effects.glassOpacity, baseEffects.glassOpacity ?? 62, 0, 100),
       glassBlur: finiteNumber(effects.glassBlur, baseEffects.glassBlur ?? 18, 0, 60),
+      sidebarBlur: typeof effects.sidebarBlur === 'boolean'
+        ? effects.sidebarBlur
+        : (typeof baseEffects.sidebarBlur === 'boolean' ? baseEffects.sidebarBlur : true),
       webLoopHoldSeconds: Math.round(finiteNumber(effects.webLoopHoldSeconds, baseEffects.webLoopHoldSeconds ?? 0, 0, 3600)),
       webForceSingleLoop: typeof effects.webForceSingleLoop === 'boolean' ? effects.webForceSingleLoop : (baseEffects.webForceSingleLoop === true),
       pauseWhenHidden: typeof effects.pauseWhenHidden === 'boolean'

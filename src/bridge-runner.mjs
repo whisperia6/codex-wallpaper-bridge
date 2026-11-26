@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import path from "node:path";
+import { normalizeHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const COMMAND_TIMEOUT_MS = 180_000;
 const ANSI_PATTERN = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
@@ -31,6 +32,7 @@ export async function invokeBridgeAction({
   controlUrl,
   action,
   adaptive,
+  hostType,
   // GPU Scene startup may use the shared slot's bounded 90s first-frame gate,
   // plus one CSP document initialization. VP8 keeps its own provider deadline.
   timeoutMs = action === "inject" || action === "retry-engine" ? 150_000 : action === "restore" ? 30_000 : 15_000,
@@ -51,10 +53,15 @@ export async function invokeBridgeAction({
   if (adaptive !== undefined && typeof adaptive !== "boolean") {
     throw new Error("兼容模式必须是布尔值");
   }
+  const normalizedHostType = hostType === undefined ? undefined : normalizeHostType(hostType, { strict: true });
   const response = await fetch(new URL("api/action", base), {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: base.origin },
-    body: JSON.stringify({ action, ...(adaptive === undefined ? {} : { adaptive }) }),
+    body: JSON.stringify({
+      action,
+      ...(adaptive === undefined ? {} : { adaptive }),
+      ...(normalizedHostType === undefined ? {} : { hostType: normalizedHostType }),
+    }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => null);

@@ -7,6 +7,7 @@
     blur: 0,
     saturation: 100,
     fit: "cover",
+    sidebarBlur: true,
     webLoopHoldSeconds: 0,
     webForceSingleLoop: false,
     playing: true,
@@ -198,6 +199,7 @@
       blur: Math.round(clamp(raw.blur ?? raw.blurPx, 0, 40, DEFAULT_EFFECTS.blur)),
       saturation: Math.round(percentLike(raw.saturation, DEFAULT_EFFECTS.saturation, 240)),
       fit,
+      sidebarBlur: raw.sidebarBlur !== false,
       webLoopHoldSeconds: Math.round(clamp(raw.webLoopHoldSeconds, 0, 3600, DEFAULT_EFFECTS.webLoopHoldSeconds)),
       webForceSingleLoop: raw.webForceSingleLoop === true,
       playing: raw.playing ?? raw.autoplay ?? raw.playback ?? DEFAULT_EFFECTS.playing,
@@ -666,7 +668,7 @@
     if (result && typeof result.catch === "function") result.catch(() => {
       if (state.playRejectedRevision === state.mediaRevision) return;
       state.playRejectedRevision = state.mediaRevision;
-      toast("浏览器拒绝自动播放，请点击播放；有声壁纸可能需要在 Codex 中交互后重新应用。", "error");
+      toast("浏览器拒绝自动播放，请点击播放；有声壁纸可能需要在目标应用中交互后重新应用。", "error");
     });
   }
 
@@ -717,7 +719,7 @@
       const failed = scenePreviewFailures.has(project.id);
       const live = preview.id === project.id && preview.phase === "ready" && !failed;
       elements.previewStateText.textContent = failed ? "预览图回退" : live ? !playback.playing ? "预览已暂停" : project.type === "web" ? "Web GPU 实时" : `Scene 实时 · ${preview.fps ?? 0} FPS` : "GPU 加载中";
-      elements.previewStateText.title = live ? `实际画布 ${preview.width}×${preview.height}；这里是引擎帧率，不是物理屏幕帧率。` : "工作台预览与 Codex 宿主验收相互独立。";
+      elements.previewStateText.title = live ? `实际画布 ${preview.width}×${preview.height}；这里是引擎帧率，不是物理屏幕帧率。` : "工作台预览与目标应用宿主验收相互独立。";
     } else {
       elements.previewStateText.textContent = isProjectPlayable(project)
         ? (playback.playing ? "本地预览中" : "预览已暂停") : "静态预览";
@@ -777,6 +779,7 @@
     elements.root.style.setProperty("--wallpaper-mirror", effects.mirror ? "-1" : "1");
     elements.root.style.setProperty("--contrast", `${effects.contrast ?? 100}%`);
     elements.root.style.setProperty("--wallpaper-opacity", String((effects.opacity ?? 100) / 100));
+    elements.root.dataset.sidebarBlur = effects.sidebarBlur === false ? "off" : "on";
     for (const control of $$('[data-effect]')) {
       const value = effects[control.dataset.effect] ?? state.defaultEffects[control.dataset.effect];
       if (value === undefined) continue;
@@ -967,8 +970,8 @@
     await pollVideoTasks(true);
     setConnection(
       "connected",
-      state.injected ? "已注入 Codex" : "本地服务已连接",
-      state.injected ? "当前背景正在与 Codex 同步" : `${state.inventory.length} 张壁纸可用`,
+      state.injected ? "已应用到目标" : "本地服务已连接",
+      state.injected ? "当前背景正在与目标应用同步" : `${state.inventory.length} 张壁纸可用`,
     );
   }
 
@@ -1398,16 +1401,16 @@
     }
 
     setBusy(elements.injectButton, true);
-    setConnection("loading", "正在注入 Codex", "连接桌面窗口并应用背景");
+    setConnection("loading", "正在注入目标应用", "连接桌面窗口并应用背景");
     try {
       await persistConfig();
       const payload = await invokeAction("inject", { selectedId: project.id });
       state.injected = true;
-      setConnection("connected", "已注入 Codex", `${project.title} · 效果实时同步`);
-      toast(responseMessage(payload, "背景已成功注入 Codex"));
+      setConnection("connected", "已注入目标应用", `${project.title} · 效果实时同步`);
+      toast(responseMessage(payload, "背景已成功注入目标应用"));
     } catch (error) {
-      setConnection("error", "注入失败", "Codex 窗口未连接");
-      showError("无法注入 Codex", error.message);
+      setConnection("error", "注入失败", "目标应用窗口未连接");
+      showError("无法注入目标应用", error.message);
     } finally {
       setBusy(elements.injectButton, false);
       elements.injectButton.disabled = !currentProject();
@@ -1420,32 +1423,32 @@
     try {
       const preview = project.scenePreviewAvailable ? await showProjectMedia(project, { force: true }) : null;
       if (preview && !preview.ok) throw new Error("工作台 Scene 预览重试未就绪，已保留原画面。");
-      // A local preview retry must not implicitly attach to an unrelated Codex.
+      // A local preview retry must not implicitly attach to an unrelated host.
       let payload = null;
       if (state.injected) {
         try { payload = await invokeAction("retry-engine", { projectId: project.id }); }
         catch (error) {
           if (error.message === "gpu_source_not_failed") {
-            toast("工作台场景已重新加载；Codex 当前场景未发生故障，无需重试");
+            toast("工作台场景已重新加载；当前宿主场景未发生故障，无需重试");
             return;
           }
           throw error;
         }
       }
-      toast(responseMessage(payload, "工作台场景已重新加载；Codex 宿主状态单独验收"));
+      toast(responseMessage(payload, "工作台场景已重新加载；目标宿主状态单独验收"));
     } catch (error) { showError("场景重试未完成", error.message); }
     finally { setBusy(elements.engineRetryButton, false); }
   }
 
   async function restoreCodex() {
     setBusy(elements.restoreButton, true);
-    setConnection("loading", "正在恢复", "移除 Codex 背景与视觉效果");
+    setConnection("loading", "正在恢复", "移除目标应用背景与视觉效果");
     try {
       const payload = await invokeAction("restore");
       state.injected = false;
       await loadPlaylists();
       setConnection("connected", "已恢复官方外观", "本地预览仍会保留");
-      toast(responseMessage(payload, "Codex 已恢复官方外观"));
+      toast(responseMessage(payload, "已恢复官方外观"));
     } catch (error) {
       setConnection("error", "恢复失败", "未能移除已注入效果");
       showError("无法恢复官方外观", error.message);
@@ -1671,10 +1674,11 @@
     });
     window.addEventListener("cwb-desktop-injection-change", (event) => {
       state.injected = event.detail?.injected === true;
+      const hostName = event.detail?.hostName || "目标应用";
       const project = currentProject();
       setConnection(
         "connected",
-        state.injected ? "已注入 Codex" : "已恢复官方外观",
+        state.injected ? `已注入 ${hostName}` : "已恢复官方外观",
         state.injected && project ? `${project.title} · 效果实时同步` : `${state.inventory.length} 张壁纸可用`,
       );
     });

@@ -270,6 +270,7 @@ namespace CwbWinHelper {
     }
 
     private static readonly Regex CodexWordPattern = new Regex(@"\bCodex\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AntigravityWordPattern = new Regex(@"\bAntigravity\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly int CurrentSessionId = Process.GetCurrentProcess().SessionId;
 
     private static string QueryImagePathFromHandle(IntPtr handle) {
@@ -363,6 +364,25 @@ namespace CwbWinHelper {
       } catch { }
       cache[fullPath] = isCodex;
       return isCodex;
+    }
+
+    private static bool IsAntigravityVersionMetadata(string fullPath, Dictionary<string, bool> cache) {
+      bool isAntigravity;
+      if (cache.TryGetValue(fullPath, out isAntigravity)) return isAntigravity;
+      isAntigravity = false;
+      try {
+        FileVersionInfo info = FileVersionInfo.GetVersionInfo(fullPath);
+        string identity = (info.ProductName ?? "") + " " + (info.FileDescription ?? "");
+        isAntigravity = AntigravityWordPattern.IsMatch(identity);
+      } catch { }
+      cache[fullPath] = isAntigravity;
+      return isAntigravity;
+    }
+
+    private static bool IsChildOrSidecarCommandLine(string commandLine) {
+      return String.IsNullOrEmpty(commandLine)
+        || commandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) >= 0
+        || commandLine.IndexOf("--import=", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private static readonly JavaScriptSerializer Json = CreateSerializer();
@@ -615,7 +635,7 @@ namespace CwbWinHelper {
           if (!PathMatches(execPath, targetPath)) continue;
           if (commandLine == null) { needWmiFallback = true; continue; }
           if (String.IsNullOrEmpty(commandLine)) continue;
-          if (commandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+          if (IsChildOrSidecarCommandLine(commandLine)) continue;
           long mainWindowHandle = 0;
           string mainWindowTitle = "";
           try {
@@ -642,7 +662,7 @@ namespace CwbWinHelper {
                 string commandLine = mo["CommandLine"] as string;
                 if (String.IsNullOrEmpty(execPath) || String.IsNullOrEmpty(commandLine)) continue;
                 if (!PathMatches(execPath, targetPath)) continue;
-                if (commandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                if (IsChildOrSidecarCommandLine(commandLine)) continue;
                 int pid = Convert.ToInt32(mo["ProcessId"], CultureInfo.InvariantCulture);
                 long mainWindowHandle = 0;
                 string mainWindowTitle = "";
@@ -673,6 +693,7 @@ namespace CwbWinHelper {
       var seenPids = new HashSet<int>();
       var versionCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       var identityCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+      var antigravityIdentityCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
       var extraPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
       var processNames = new List<string>();
       var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -681,6 +702,7 @@ namespace CwbWinHelper {
       };
       addProcName("ChatGPT");
       addProcName("Codex");
+      addProcName("Antigravity");
 
       string rawExtraPaths = Environment.GetEnvironmentVariable("CWB_EXTRA_EXE_PATHS");
       if (!String.IsNullOrWhiteSpace(rawExtraPaths)) {
@@ -714,12 +736,16 @@ namespace CwbWinHelper {
             try { fullPath = Path.GetFullPath(execPath); } catch { }
             string fileName = Path.GetFileName(fullPath);
             bool include = extraPaths.Contains(fullPath);
+            string hostType = String.Equals(fileName, "Antigravity.exe", StringComparison.OrdinalIgnoreCase) ? "antigravity" : "codex";
             if (!include && String.Equals(fileName, "ChatGPT.exe", StringComparison.OrdinalIgnoreCase)) {
               include = fullPath.IndexOf(@"\WindowsApps\OpenAI.Codex", StringComparison.OrdinalIgnoreCase) >= 0
                 || IsCodexVersionMetadata(fullPath, identityCache);
             }
             if (!include && String.Equals(fileName, "Codex.exe", StringComparison.OrdinalIgnoreCase)) {
               include = IsCodexVersionMetadata(fullPath, identityCache) && HasCodexDesktopLayout(fullPath);
+            }
+            if (!include && String.Equals(fileName, "Antigravity.exe", StringComparison.OrdinalIgnoreCase)) {
+              include = IsAntigravityVersionMetadata(fullPath, antigravityIdentityCache) && HasCodexDesktopLayout(fullPath);
             }
             if (!include) continue;
             string version;
@@ -734,6 +760,7 @@ namespace CwbWinHelper {
             entry["ProcessId"] = pid;
             entry["ExecutablePath"] = execPath;
             entry["ProductVersion"] = version;
+            if (hostType == "antigravity") entry["HostType"] = "antigravity";
             items.Add(entry);
           }
         }
@@ -748,9 +775,7 @@ namespace CwbWinHelper {
     }
 
     private static bool IsRootCodexProcess(CodexProcRow row) {
-      return row != null
-        && !String.IsNullOrEmpty(row.CommandLine)
-        && row.CommandLine.IndexOf("--type=", StringComparison.OrdinalIgnoreCase) < 0;
+      return row != null && !IsChildOrSidecarCommandLine(row.CommandLine);
     }
 
     private static List<CodexProcRow> OrderRootsFirst(List<CodexProcRow> rows) {

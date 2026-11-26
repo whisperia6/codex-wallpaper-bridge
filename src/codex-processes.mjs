@@ -22,7 +22,7 @@ try {
     } catch {
       $pathMatch = $false
     }
-    $pathMatch -and $_.CommandLine -notmatch '--type='
+    $pathMatch -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine -notmatch '--import='
   } | ForEach-Object {
     $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
     [pscustomobject]@{

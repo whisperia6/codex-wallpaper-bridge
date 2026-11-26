@@ -1217,6 +1217,12 @@ html[data-cwb-desktop-embedded="true"] .workspace { height: 100%; min-height: 0;
   border-right: 1px solid rgba(255, 255, 255, 0.09);
   background: rgba(12, 13, 16, 0.64);
   backdrop-filter: blur(14px);
+  transition: background 180ms ease, backdrop-filter 180ms ease, border-color 180ms ease;
+}
+:root[data-sidebar-blur="off"] .codex-overlay__sidebar {
+  border-right-color: transparent;
+  background: transparent;
+  backdrop-filter: none;
 }
 .codex-overlay__label { margin: 10px 8px 6px; color: #9ea4b0; font-size: 11px; font-weight: 600; }
 .codex-overlay__item {

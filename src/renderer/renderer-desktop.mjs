@@ -22,7 +22,7 @@ const state = {
   port: 9335,
   adaptive: true,
   busy: false,
-  feedback: "选择壁纸后，点击“应用到 Codex”即可生效",
+  feedback: "选择壁纸后，点击应用即可生效",
   feedbackTone: "idle",
   controlUrl: null,
   controlPort: null,
@@ -126,7 +126,7 @@ function loadControlFrame(url, forceReload = false) {
   themedUrl.searchParams.set("workbenchTheme", state.workbenchTheme);
   const frameUrl = themedUrl.href;
   state.controlReady = false;
-  showPlaceholder("正在连接壁纸工作台", "配置、Codex 目标和应用操作都将在同一页完成。");
+  showPlaceholder("正在连接壁纸工作台", "配置、目标应用和应用操作都将在同一页完成。");
   if (forceReload && elements.controlFrame.src === frameUrl) {
     elements.controlFrame.src = "about:blank";
     window.setTimeout(() => { elements.controlFrame.src = frameUrl; }, 0);
@@ -183,21 +183,30 @@ async function flushControlSettings() {
   return result;
 }
 
+function selectedHostLabel(installationId = state.selectedId) {
+  const entry = state.installations.find((item) => item.id === installationId);
+  if (entry?.hostType === "antigravity" || /(?:^|[\\/])antigravity\.exe$/i.test(String(entry?.path || ""))) {
+    return "Antigravity";
+  }
+  return entry ? "Codex" : "目标应用";
+}
+
 async function applyCodex(payload = {}) {
   const selectedId = payload.installationId || state.selectedId;
   const selectedPort = normalizePort(payload.port ?? state.port);
   const adaptive = payload.adaptive !== false;
-  if (!selectedId) throw new Error("请选择 Codex 安装目标");
+  if (!selectedId) throw new Error("请选择目标应用");
   state.selectedId = selectedId;
   state.port = selectedPort;
   state.adaptive = adaptive;
+  const hostName = selectedHostLabel(selectedId);
 
   setFeedback("正在保存壁纸设置…", "busy");
   await flushControlSettings();
-  setFeedback("正在应用到 Codex…", "busy");
+  setFeedback(`正在应用到 ${hostName}…`, "busy");
   const result = await api.applyCodex({ installationId: selectedId, port: selectedPort, adaptive });
-  if (result?.canceled) setFeedback(result.message || "已取消，Codex 未被关闭", "idle");
-  else if (result?.ok) setFeedback(result.message || "已应用到 Codex", "success");
+  if (result?.canceled) setFeedback(result.message || `已取消，${hostName} 未被关闭`, "idle");
+  else if (result?.ok) setFeedback(result.message || `已应用到 ${hostName}`, "success");
   else setFeedback(result?.message || "应用失败，详情已写入本地日志", "error");
 
   if (selectedPort !== state.controlPort) {
@@ -228,7 +237,7 @@ async function executeDesktopAction(action, payload = {}) {
     if (action === "refresh-installations") {
       const result = await api.refreshInstallations();
       updateDesktopState(result);
-      setFeedback(`已发现 ${result.installations?.length || 0} 个 Codex 目标`, "success");
+      setFeedback(`已发现 ${result.installations?.length || 0} 个可用目标`, "success");
       return { ok: true, ...result };
     }
     if (action === "choose-executable") {

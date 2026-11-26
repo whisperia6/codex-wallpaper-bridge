@@ -14,10 +14,16 @@ function safePayload(payload) {
 
 async function rendererBootstrap(createMediaSwitcher, runMediaTransition, createEngineMediaTransport,
   createDirectSceneTransport, createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput,
-  resolvePlayback, nativeEnabled = false, directSceneEnabled = false) {
+  resolvePlayback, nativeEnabled = false, directSceneEnabled = false, hostType = "codex") {
+    const isAntigravity = hostType === "antigravity";
     // Page.addScriptToEvaluateOnNewDocument also runs in child frames. Author
-    // origins must never receive the Codex bootstrap or its host capabilities.
-    if (typeof location !== "undefined" && (location.origin !== "app://-" || globalThis.parent !== globalThis)) {
+    // origins must never receive the host bootstrap or its capabilities.
+    const originAllowed = typeof location === "undefined"
+      ? true
+      : isAntigravity
+        ? /^https:\/\/127\.0\.0\.1:\d{1,5}$/.test(location.origin)
+        : location.origin === "app://-";
+    if (typeof location !== "undefined" && (!originAllowed || globalThis.parent !== globalThis)) {
       return { ok: false, ready: false, version: null };
     }
     const KEY = "__codexWallpaperBridgeRuntime";
@@ -303,6 +309,10 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const waitForThemePaint = () => new Promise((resolve) => setTimeout(resolve, 35));
 
       const ensureDarkTheme = () => {
+        if (isAntigravity) {
+          themeState = "host-managed";
+          return Promise.resolve({ state: themeState, originalTheme: null, reloadRequired: false });
+        }
         if (themeActivationPromise) return themeActivationPromise;
         themeActivationPromise = (async () => {
           themeState = "reading";
@@ -339,6 +349,10 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       };
 
       const restoreOriginalTheme = async () => {
+        if (isAntigravity) {
+          themeState = "host-managed";
+          return { state: themeState, originalTheme: null, reloadRequired: false };
+        }
         try { await themeActivationPromise; } catch {}
         const saved = readSavedTheme();
         if (!saved) {
@@ -387,6 +401,15 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           "-webkit-backdrop-filter": "none",
           "box-shadow": "none"
         },
+        sidebarFrosted: {
+          "background-color": "rgba(12, 16, 24, 0.22)",
+          "background-image": "none",
+          "border-color": "transparent",
+          "border-right-color": "rgba(255, 255, 255, 0.07)",
+          "backdrop-filter": "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)",
+          "-webkit-backdrop-filter": "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)",
+          "box-shadow": "none"
+        },
         header: {
           "background-color": "transparent",
           "background-image": "none",
@@ -408,6 +431,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         dim: 28,
         glassOpacity: 62,
         glassBlur: 18,
+        sidebarBlur: true,
         pauseWhenHidden: true,
         playing: true
       };
@@ -426,6 +450,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         dim: number(value.dim, defaults.dim, 0, 90),
         glassOpacity: number(value.glassOpacity, defaults.glassOpacity, 0, 100),
         glassBlur: number(value.glassBlur, defaults.glassBlur, 0, 60),
+        sidebarBlur: value.sidebarBlur !== false,
         webLoopHoldSeconds: number(value.webLoopHoldSeconds, 0, 0, 3600),
         webForceSingleLoop: value.webForceSingleLoop === true,
         pauseWhenHidden: value.pauseWhenHidden !== false,
@@ -532,6 +557,13 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             html[data-codex-wallpaper-bridge="active"] body > :not(#${ids.root}) {
               z-index: 1;
             }
+            ${isAntigravity ? `
+            html[data-codex-wallpaper-bridge="active"] body > #root {
+              position: relative;
+              z-index: 1;
+              background: transparent !important;
+            }
+            ` : ""}
             html[data-codex-wallpaper-bridge="active"] :is(
               main.main-surface,
               main[data-app-shell-main-surface],
@@ -724,7 +756,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const refreshShellElement = (element) => {
         if (!element?.matches) return;
         if (element.matches(shellSelectors.sidebar)) {
-          applyShellElement(element, "sidebar");
+          applyShellElement(element, current?.effects?.sidebarBlur === false ? "sidebar" : "sidebarFrosted");
         } else if (element.matches(shellSelectors.header)) {
           applyShellElement(element, "header");
         } else {
@@ -735,6 +767,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       };
 
       const applyShellOverrides = (scope = document) => {
+        if (isAntigravity) return;
         if (scope?.nodeType === 1) refreshShellElement(scope);
         if (!scope?.querySelectorAll) return;
         const selector = `${shellSelectors.sidebar}, ${shellSelectors.header}`;
@@ -801,8 +834,40 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           const media = document.createElement(kind === "video" ? "video" : "img");
           media.id = initial ? ids.media : `${ids.media}-pending-${revision}`; media.style.opacity = "0";
           media.style.cssText += ";position:absolute;inset:0;width:100%;height:100%;border:0";
-          let resolveReady, rejectReady, committed = false;
-          const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+          let resolveReady, rejectReady, committed = false, settled = false, fallbackTimer = null;
+          const clearFallbackTimer = () => {
+            if (fallbackTimer !== null && typeof globalThis.clearTimeout === "function") {
+              globalThis.clearTimeout(fallbackTimer);
+              fallbackTimer = null;
+            }
+          };
+          const ready = new Promise((resolve, reject) => {
+            resolveReady = () => {
+              if (settled) return;
+              settled = true;
+              clearFallbackTimer();
+              resolve();
+            };
+            rejectReady = (err) => {
+              if (settled) return;
+              settled = true;
+              clearFallbackTimer();
+              reject(err);
+            };
+          });
+          const hasDecodedVideo = () => media.readyState >= 2 && media.videoWidth > 0;
+          const armDecodedFallback = () => {
+            if (settled || fallbackTimer !== null || !(media.videoWidth > 0)) return;
+            if (typeof globalThis.setTimeout === "function") {
+              // Hosts with CalculateNativeWinOcclusion disabled (e.g. Antigravity)
+              // keep document.hidden false while DWM/Viz withholds compositor frame
+              // callbacks on an occluded or opacity:0 pending video element.
+              fallbackTimer = globalThis.setTimeout(() => {
+                fallbackTimer = null;
+                if (media.videoWidth > 0) resolveReady();
+              }, 250);
+            }
+          };
           const update = ({ effects: value }) => {
             media.style.objectFit = value.fit; media.style.objectPosition = value.position;
             media.style.transform = "scale(" + (value.zoom / 100) + ") scaleX(" + (value.mirror ? -1 : 1) + ")";
@@ -812,28 +877,40 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               media.muted = !committed || !value.audioEnabled;
               if (!resolvePlayback(value, { hidden: document.hidden === true }).playing) {
                 media.pause();
-                if (media.readyState >= 2 && media.videoWidth > 0) resolveReady();
+                if (hasDecodedVideo()) resolveReady();
               }
-              else void media.play().catch(() => updateMediaState("play-rejected", "autoplay blocked"));
+              else void media.play().catch(() => {
+                if (committed && !media.muted) {
+                  media.muted = true;
+                  void media.play().catch(() => updateMediaState("play-rejected", "autoplay blocked"));
+                  return;
+                }
+                updateMediaState("play-rejected", "autoplay blocked");
+              });
             }
           };
           media.addEventListener("error", () => rejectReady(new Error("Media decode failed")), { once: true });
           if (kind === "video") {
             media.loop = true; media.muted = true; media.playsInline = true; media.preload = "auto";
             if (wallpaper.previewUrl) media.poster = wallpaper.previewUrl;
-            media.addEventListener("loadeddata", () => {
+            const onVideoDecoded = () => {
               // A policy-paused video has decoded data but Chromium need not
               // composite it while hidden/on battery. Do not wait for a frame
-              // callback that cannot fire; visible playback still requires it.
-              if (media.requestVideoFrameCallback && !media.paused && resolvePlayback(effects, { hidden: document.hidden === true }).playing) media.requestVideoFrameCallback(resolveReady);
-              else if (media.videoWidth > 0) resolveReady();
-            }, { once: true });
+              // callback that cannot fire; visible playback still prefers one,
+              // bounded by a short fallback when occluded windows suppress VSync.
+              if (media.requestVideoFrameCallback && !media.paused && resolvePlayback(effects, { hidden: document.hidden === true }).playing) {
+                media.requestVideoFrameCallback(resolveReady);
+                armDecodedFallback();
+              } else if (media.videoWidth > 0) resolveReady();
+            };
+            media.addEventListener("loadeddata", onVideoDecoded, { once: true });
+            media.addEventListener("canplay", onVideoDecoded, { once: true });
           } else media.addEventListener("load", () => media.decode().then(resolveReady, rejectReady), { once: true });
           root.insertBefore(media, document.getElementById(ids.scrim)); media.src = source; update({ effects });
           return { node: media, ready, update,
             activate() { committed = true; media.style.removeProperty("opacity"); update({ effects: current.effects }); },
             retire() { committed = false; if (kind === "video") { media.muted = true; media.pause(); } },
-            release() { committed = false; if (kind === "video") media.pause(); media.removeAttribute("src"); media.load?.(); media.remove(); } };
+            release() { committed = false; clearFallbackTimer(); if (kind === "video") media.pause(); media.removeAttribute("src"); media.load?.(); media.remove(); } };
         }
         const framePayload = JSON.stringify({
           kind,
@@ -885,8 +962,10 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             }
             media.addEventListener("error",()=>report("error",media.error?.message||"media error"),{passive:true});
             media.addEventListener("loadeddata",()=>{
-              if(media.requestVideoFrameCallback&&!media.paused)media.requestVideoFrameCallback(firstFrame);
-              else if(media.videoWidth>0)firstFrame();
+              if(media.requestVideoFrameCallback&&!media.paused){
+                media.requestVideoFrameCallback(firstFrame);
+                if(typeof setTimeout==="function")setTimeout(()=>{if(media.readyState>=2&&media.videoWidth>0)firstFrame();},250);
+              }else if(media.videoWidth>0)firstFrame();
             },{once:true});
           }else if(config.kind==="web"){
             media=document.createElement("iframe");
@@ -1029,6 +1108,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           (effects.glassBlur === 0 ? 0 : Math.min(60, effects.glassBlur + 2)) + "px"
         );
         document.documentElement.style.setProperty("--cwb-header-blur", effects.glassBlur + "px");
+        document.documentElement.setAttribute("data-cwb-sidebar-blur", effects.sidebarBlur === false ? "off" : "on");
       };
 
       const ensureMounted = () => {
@@ -1179,6 +1259,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         document.getElementById(ids.root)?.remove();
         document.getElementById(ids.style)?.remove();
         document.documentElement.removeAttribute("data-codex-wallpaper-bridge");
+        document.documentElement.removeAttribute("data-cwb-sidebar-blur");
         document.documentElement.style.removeProperty("--cwb-glass-alpha");
         document.documentElement.style.removeProperty("--cwb-glass-blur");
         document.documentElement.style.removeProperty("--cwb-sidebar-alpha");
@@ -1208,31 +1289,33 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         status: () => ({ ...mediaState, switch: mediaSwitcher.status(), theme: themeState,
           playback: resolvePlayback(current?.effects || {}, { hidden: document.hidden === true, inactive: !current }) }),
         ready: true,
+        hostType,
         version: VERSION
       };
     };
 
     let runtime = globalThis[KEY];
-    if (!runtime || runtime.version !== VERSION || nativeEnabled || directSceneEnabled) {
+    if (!runtime || runtime.version !== VERSION || runtime.hostType !== hostType || nativeEnabled || directSceneEnabled) {
       // Finish the previous runtime's DOM teardown before installing a new one.
       try { await runtime?.restore?.({ preserveTheme: true }); } catch {}
       runtime = createRuntime();
       globalThis[KEY] = runtime;
     }
-    return { ok: true, ready: runtime.ready === true, version: runtime.version, transport: nativeController, sceneTransport: sceneController };
+    return { ok: true, ready: runtime.ready === true, version: runtime.version, hostType: runtime.hostType, transport: nativeController, sceneTransport: sceneController };
 }
 
 /**
  * Builds the renderer-side script injected through Chrome DevTools Protocol.
- * The script is deliberately self-contained: it must run inside Codex without
- * imports, Node globals, or access to this package's filesystem.
+ * The script is deliberately self-contained: it must run inside the target host
+ * without imports, Node globals, or access to this package's filesystem.
  */
-export function buildBootstrapScript({ nativeEnabled = false, directSceneEnabled = false } = {}) {
+export function buildBootstrapScript({ nativeEnabled = false, directSceneEnabled = false, hostType = "codex" } = {}) {
+  const normalizedHostType = hostType === "antigravity" ? "antigravity" : "codex";
   // Do not ship unused engine/author adapters to ordinary image/video targets.
   const engine = nativeEnabled && !directSceneEnabled ? createEngineMediaTransport.toString() : 'null';
   const gpu = directSceneEnabled ? [createDirectSceneTransport, createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput]
     .map(fn => fn.toString()).join(', ') : 'null, null, null, null, null';
-  return `(${rendererBootstrap.toString()})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true})`;
+  return `(${rendererBootstrap.toString()})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true}, ${JSON.stringify(normalizedHostType)})`;
 }
 
 export function buildApplyScript(payload = {}) {

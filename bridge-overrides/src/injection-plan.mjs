@@ -1,5 +1,6 @@
 import { buildApplyScript, buildBootstrapScript } from "./injected-renderer.mjs";
 import { eligibleProjects } from "../../bridge-runtime/src/library-policy.mjs";
+import { normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
 
 function absoluteAssetUrl(value, origin) {
   if (!value) return null;
@@ -56,6 +57,7 @@ export function rendererEffects(config) {
     pauseOnBattery: effects.pauseOnBattery === true,
     glassOpacity: effects.glassOpacity ?? 62,
     glassBlur: effects.glassBlur ?? 18,
+    sidebarBlur: effects.sidebarBlur !== false,
     webLoopHoldSeconds: Math.max(0, Math.min(3600, Math.round(Number(effects.webLoopHoldSeconds) || 0))),
     webForceSingleLoop: effects.webForceSingleLoop === true,
     transition: effects.transition ?? "cut",
@@ -71,8 +73,9 @@ export async function fetchPublicInventory(server) {
   return response.json();
 }
 
-export function buildInjectionPlan({ server, config, inventory, nativeEnabled = false, directSceneEnabled = false }) {
+export function buildInjectionPlan({ server, config, inventory, nativeEnabled = false, directSceneEnabled = false, hostType = "codex" }) {
   if (!server?.origin || !server?.basePath) throw new Error("本机壁纸服务尚未启动");
+  const normalizedHostType = normalizeHostType(hostType, { strict: true });
   const projects = eligibleProjects(inventory?.projects || inventory?.items || [], config);
   const selected = projects.find((project) => project.id === config?.selectedId) || projects[0] || null;
   let wallpaper = null;
@@ -107,7 +110,7 @@ export function buildInjectionPlan({ server, config, inventory, nativeEnabled = 
     // Resource index and directory are control-plane state, never CDP payload.
     config: { selectedId: config?.selectedId ?? null, effects: rendererEffects(config) }
   };
-  const bootstrapScript = buildBootstrapScript({ nativeEnabled, directSceneEnabled });
+  const bootstrapScript = buildBootstrapScript({ nativeEnabled, directSceneEnabled, hostType: normalizedHostType });
   const applyScript = buildApplyScript(payload);
   const fallbackScripts = [];
   if (wallpaper?.playable === "direct-gpu") {
@@ -122,6 +125,7 @@ export function buildInjectionPlan({ server, config, inventory, nativeEnabled = 
     }
   }
   return {
+    hostType: normalizedHostType,
     bootstrapScript,
     applyScript,
     nativeEnabled: nativeEnabled === true,
@@ -146,5 +150,5 @@ export async function buildCurrentInjection(server, configStore, options = {}) {
     configStore.get()
   ]);
   return buildInjectionPlan({ server, config, inventory, nativeEnabled: options.nativeEnabled === true,
-    directSceneEnabled: options.directSceneEnabled === true });
+    directSceneEnabled: options.directSceneEnabled === true, hostType: options.hostType || "codex" });
 }

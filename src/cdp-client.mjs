@@ -1,4 +1,5 @@
 import { WebSocket } from "ws";
+import { hostDisplayName, isValidTargetUrlForHost, normalizeHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const CDP_HOST = "127.0.0.1";
 const TARGET_SCORE_THRESHOLD = 10;
@@ -16,13 +17,21 @@ const PROBE_EXPRESSION = `(() => {
     "[data-composer-surface-variant]",
     "[data-above-composer-portal]"
   ];
+  const antigravityHookCount =
+    (document.getElementById("gemini-neko-pet-root") ? 1 : 0) +
+    (document.querySelector("[data-base-ui-portal]") ? 1 : 0) +
+    (typeof globalThis.electronNative !== "undefined" ? 1 : 0) +
+    (typeof globalThis.agyComputerPreview !== "undefined" ? 1 : 0) +
+    (typeof globalThis.__agyExpectedPageAgentBundleVersion !== "undefined" ? 1 : 0);
   return {
     href: location.href,
+    origin: location.origin,
     title: document.title,
     userAgent: navigator.userAgent,
     hasRoot: Boolean(document.querySelector("#root")),
     semanticHookCount: semanticSelectors.reduce((count, selector) => count + document.querySelectorAll(selector).length, 0),
     composerHookCount: composerSelectors.reduce((count, selector) => count + document.querySelectorAll(selector).length, 0),
+    antigravityHookCount,
     descendantCount: document.querySelectorAll("body *").length
   };
 })()`;
@@ -146,13 +155,18 @@ class CdpConnection {
   }
 }
 
-export function isAuxiliaryTarget(target) {
+export function isAuxiliaryTarget(target, { hostType = "codex" } = {}) {
   if (!target || target.type !== "page" || !target.webSocketDebuggerUrl) return true;
-  return /initialRoute=.*(?:avatar|pet|overlay)/i.test(String(target.url || ""));
+  const url = String(target.url || "");
+  if (/initialRoute=.*(?:avatar|pet|overlay)/i.test(url)) return true;
+  if (normalizeHostType(hostType) === "antigravity") {
+    return !isValidTargetUrlForHost(url, "antigravity");
+  }
+  return false;
 }
 
 export function scoreCodexTarget(target, probe = {}) {
-  if (isAuxiliaryTarget(target)) return Number.NEGATIVE_INFINITY;
+  if (isAuxiliaryTarget(target, { hostType: "codex" })) return Number.NEGATIVE_INFINITY;
   let score = 0;
   if (/^app:\/\//i.test(String(target.url || ""))) score += 5;
   if (/codex/i.test(String(target.title || ""))) score += 3;
@@ -163,9 +177,26 @@ export function scoreCodexTarget(target, probe = {}) {
   return score;
 }
 
-export function selectCodexTargets(entries, threshold = TARGET_SCORE_THRESHOLD) {
+export function scoreAntigravityTarget(target, probe = {}) {
+  if (isAuxiliaryTarget(target, { hostType: "antigravity" })) return Number.NEGATIVE_INFINITY;
+  let score = 0;
+  if (isValidTargetUrlForHost(target.url, "antigravity")) score += 6;
+  if (/antigravity/i.test(String(target.title || ""))) score += 4;
+  if (probe.hasRoot) score += 3;
+  score += Math.min(4, Math.max(0, Number(probe.antigravityHookCount) || 0));
+  if ((Number(probe.descendantCount) || 0) >= 20) score += 2;
+  return score;
+}
+
+export function scoreTargetForHost(target, probe = {}, hostType = "codex") {
+  return normalizeHostType(hostType) === "antigravity"
+    ? scoreAntigravityTarget(target, probe)
+    : scoreCodexTarget(target, probe);
+}
+
+export function selectCodexTargets(entries, threshold = TARGET_SCORE_THRESHOLD, { hostType = "codex" } = {}) {
   return entries
-    .map((entry) => ({ ...entry, score: scoreCodexTarget(entry.target, entry.probe) }))
+    .map((entry) => ({ ...entry, score: scoreTargetForHost(entry.target, entry.probe, hostType) }))
     .filter((entry) => entry.score >= threshold);
 }
 
@@ -199,11 +230,12 @@ async function evaluate(connection, expression) {
   return response.result?.value;
 }
 
-export async function inspectCodexTargets(port, { includeSurfaces = false } = {}) {
+export async function inspectCodexTargets(port, { includeSurfaces = false, hostType = "codex" } = {}) {
+  const normalizedHost = normalizeHostType(hostType);
   const targets = await fetchJson(`${endpoint(port)}/json/list`);
   const entries = [];
   for (const target of Array.isArray(targets) ? targets : []) {
-    if (isAuxiliaryTarget(target)) continue;
+    if (isAuxiliaryTarget(target, { hostType: normalizedHost })) continue;
     const connection = new CdpConnection(target.webSocketDebuggerUrl);
     try {
       await connection.connect();
@@ -216,12 +248,13 @@ export async function inspectCodexTargets(port, { includeSurfaces = false } = {}
       connection.close();
     }
   }
-  return selectCodexTargets(entries);
+  return selectCodexTargets(entries, TARGET_SCORE_THRESHOLD, { hostType: normalizedHost });
 }
 
-export async function evaluateInCodexTargets(port, expression) {
-  const selected = await inspectCodexTargets(port);
-  if (selected.length === 0) throw new Error(`127.0.0.1:${port} 没有匹配的 Codex renderer`);
+export async function evaluateInCodexTargets(port, expression, { hostType = "codex" } = {}) {
+  const normalizedHost = normalizeHostType(hostType);
+  const selected = await inspectCodexTargets(port, { hostType: normalizedHost });
+  if (selected.length === 0) throw new Error(`127.0.0.1:${port} 没有匹配的 ${hostDisplayName(normalizedHost)} renderer`);
   const results = [];
   for (const entry of selected) {
     const connection = new CdpConnection(entry.target.webSocketDebuggerUrl);
@@ -241,14 +274,16 @@ export async function evaluateInCodexTargets(port, expression) {
   return results;
 }
 
-export async function collectCdpDiagnostics(port) {
+export async function collectCdpDiagnostics(port, { hostType = "codex" } = {}) {
+  const normalizedHost = normalizeHostType(hostType);
   const [browser, targets] = await Promise.all([
     fetchJson(`${endpoint(port)}/json/version`),
-    inspectCodexTargets(port, { includeSurfaces: true }),
+    inspectCodexTargets(port, { includeSurfaces: true, hostType: normalizedHost }),
   ]);
   return {
     collectedAt: new Date().toISOString(),
     endpoint: endpoint(port),
+    hostType: normalizedHost,
     browser: {
       Browser: browser.Browser,
       ProtocolVersion: browser["Protocol-Version"],
@@ -258,7 +293,9 @@ export async function collectCdpDiagnostics(port) {
     },
     targets: targets.map(({ target, probe, diagnostics, score, error }) => ({
       id: target.id,
-      titleMatchesCodex: /codex/i.test(String(target.title || "")),
+      titleMatchesCodex: normalizedHost === "antigravity"
+        ? /antigravity/i.test(String(target.title || ""))
+        : /codex/i.test(String(target.title || "")),
       type: target.type,
       url: target.url,
       score,
@@ -281,15 +318,17 @@ export async function isCdpEndpointReady(port) {
 export async function waitForCodexTarget(port, {
   timeoutMs = 30_000,
   intervalMs = 150,
-  inspectTargets = inspectCodexTargets,
+  hostType = "codex",
+  inspectTargets = (selectedPort) => inspectCodexTargets(selectedPort, { hostType }),
   delayFn = delay,
   signal,
 } = {}) {
+  const hostName = hostDisplayName(hostType);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
-    throw new Error("等待 Codex renderer 的超时时间无效");
+    throw new Error(`等待 ${hostName} renderer 的超时时间无效`);
   }
   if (!Number.isInteger(intervalMs) || intervalMs < 0 || intervalMs > 5_000) {
-    throw new Error("等待 Codex renderer 的轮询间隔无效");
+    throw new Error(`等待 ${hostName} renderer 的轮询间隔无效`);
   }
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -306,5 +345,5 @@ export async function waitForCodexTarget(port, {
     await delayFn(intervalMs);
   } while (Date.now() < deadline);
   const suffix = lastError?.message ? `：${lastError.message}` : "";
-  throw new Error(`Codex 已启动，但 ${timeoutMs / 1000} 秒内 renderer 未就绪${suffix}`);
+  throw new Error(`${hostName} 已启动，但 ${timeoutMs / 1000} 秒内 renderer 未就绪${suffix}`);
 }

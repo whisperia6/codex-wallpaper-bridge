@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0c0d10" />
-    <title>Codex Wallpaper Bridge</title>
+    <title>Lumina</title>
     <script src="workbench-theme.js"></script>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -34,19 +34,19 @@
     </div>
 
     <div class="app-shell">
-      <section class="desktop-target-bar glass-strip" id="desktopTargetBar" aria-label="Codex 应用设置" hidden>
+      <section class="desktop-target-bar glass-strip" id="desktopTargetBar" aria-label="目标应用设置" hidden>
         <div class="desktop-target-bar__identity">
           <span class="desktop-target-bar__dot" aria-hidden="true"></span>
           <div>
-            <strong>应用到 Codex</strong>
+            <strong>应用到目标</strong>
             <small id="desktopApplyStatus" data-tone="idle">正在读取安装目标…</small>
           </div>
         </div>
         <label class="desktop-control desktop-control--target" for="desktopInstallationSelect">
           <span>目标</span>
-          <select id="desktopInstallationSelect" aria-label="Codex 安装目标"></select>
+          <select id="desktopInstallationSelect" aria-label="目标应用"></select>
         </label>
-        <button class="desktop-icon-button" id="desktopRefreshButton" type="button" title="重新检测 Codex" aria-label="重新检测 Codex">
+        <button class="desktop-icon-button" id="desktopRefreshButton" type="button" title="重新检测目标应用" aria-label="重新检测目标应用">
           <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6"/></svg>
         </button>
         <button class="desktop-button" id="desktopChooseButton" type="button">选择 EXE</button>
@@ -62,7 +62,7 @@
         <button class="desktop-button" id="desktopRestoreButton" type="button">恢复官方外观</button>
         <button class="button button--primary desktop-apply-button" id="desktopApplyButton" type="button">
           <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3"/></svg>
-          <span>应用到 Codex</span>
+          <span>应用壁纸</span>
         </button>
       </section>
 
@@ -72,8 +72,8 @@
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.1"/><path d="M12 3.3v5M12 15.7v5M4.5 7.7l4.3 2.5m6.4 3.6 4.3 2.5M4.5 16.3l4.3-2.5m6.4-3.6 4.3-2.5"/></svg>
           </div>
           <div class="brand-copy">
-            <h1>Wallpaper Bridge</h1>
-            <p>Codex 本地壁纸控制器</p>
+            <h1>Lumina</h1>
+            <p>AI 桌面端动态壁纸工作台</p>
           </div>
           <span class="version-tag">PREVIEW</span>
         </header>
@@ -207,7 +207,7 @@
             </label>
             <button class="button button--primary" id="injectButton" type="button">
               <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3"/></svg>
-              <span>注入 Codex</span>
+              <span>注入应用</span>
             </button>
           </div>
         </header>
@@ -216,11 +216,11 @@
           <div class="preview-stage-bar">
             <div class="preview-label">
               <span class="preview-label__live"><i></i> LIVE PREVIEW</span>
-              <span>所有视觉调节都会同步到 Codex</span>
+              <span>所有视觉调节都会实时同步到目标应用</span>
             </div>
             <div class="preview-mode-switch" id="previewModeSwitch" role="group" aria-label="预览视图模式">
               <button type="button" data-preview-mode="pure" aria-pressed="true">纯壁纸</button>
-              <button type="button" data-preview-mode="codex" aria-pressed="false">Codex 叠加预览</button>
+              <button type="button" data-preview-mode="codex" aria-pressed="false">界面叠加预览</button>
             </div>
           </div>
 
@@ -234,8 +234,8 @@
             </div>
             <div class="codex-overlay__main">
               <div class="codex-overlay__bubble is-user">当前亮度和暗化遮罩下，文字和代码块的对比度够清晰吗？</div>
-              <div class="codex-overlay__bubble is-ai">拖动右侧「亮度」「暗化遮罩」或「背景模糊」会实时作用于背后壁纸，方便直接评估 <code>Codex</code> 实际阅读体验。</div>
-              <div class="codex-overlay__composer"><span>向 Codex 提问，@ 引用文件…</span><i>↑</i></div>
+              <div class="codex-overlay__bubble is-ai">拖动右侧「亮度」「暗化遮罩」或「背景模糊」会实时作用于背后壁纸，方便直接评估 <code>Codex / Antigravity</code> 实际阅读体验。</div>
+              <div class="codex-overlay__composer"><span>向 AI 提问，@ 引用文件…</span><i>↑</i></div>
             </div>
           </div>
 
@@ -324,7 +324,7 @@
           <div class="select-setting" data-settings-tab="appearance">
             <label for="fitSelect">
               <span><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>背景适配</span>
-              <small>画面如何填充 Codex 窗口</small>
+              <small>画面如何填充目标应用窗口</small>
             </label>
             <div class="select-wrap">
               <select id="fitSelect">
@@ -342,6 +342,15 @@
               <small>切换壁纸后立即播放</small>
             </label>
             <input class="switch-input" id="playbackToggle" type="checkbox" checked />
+            <span class="switch" aria-hidden="true"></span>
+          </div>
+
+          <div class="toggle-setting" data-settings-tab="appearance">
+            <label for="sidebarBlurToggle">
+              <span><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5Zm5 0v14"/></svg>左侧栏毛玻璃</span>
+              <small>为侧栏叠加轻雾模糊，与右侧壁纸区分</small>
+            </label>
+            <input class="switch-input" id="sidebarBlurToggle" data-effect="sidebarBlur" type="checkbox" checked />
             <span class="switch" aria-hidden="true"></span>
           </div>
 
@@ -454,7 +463,7 @@
         <ol>
           <li><span>1</span><div><strong>选择本机壁纸</strong><p>从左侧库中挑选视频、网页或场景壁纸。</p></div></li>
           <li><span>2</span><div><strong>调整显示效果</strong><p>设置亮度、模糊和暗化，让文字保持清晰。</p></div></li>
-          <li><span>3</span><div><strong>注入 Codex</strong><p>点击右上角按钮，将当前效果应用到 Codex。</p></div></li>
+          <li><span>3</span><div><strong>应用到目标应用</strong><p>在顶部选择 Codex 或 Antigravity，点击应用即可生效。</p></div></li>
         </ol>
         <p class="dialog-tip">你可以随时点击「恢复官方外观」完整移除背景效果。</p>
       </form>

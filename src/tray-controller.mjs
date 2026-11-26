@@ -12,7 +12,7 @@ export function buildTrayMenuTemplate(actions, onError = () => {}) {
   return [
     { label: "打开壁纸设置", click: wrapAction(actions.showWindow, onError) },
     { type: "separator" },
-    { label: "应用到 Codex", click: wrapAction(actions.apply, onError) },
+    { label: "应用壁纸", click: wrapAction(actions.apply, onError) },
     { label: "恢复官方外观", click: wrapAction(actions.restore, onError) },
     { label: "打开本地日志目录", click: wrapAction(actions.openLogs, onError) },
     { type: "separator" },
@@ -31,7 +31,7 @@ export function createTrayController({
     .createFromDataURL(TRAY_ICON_DATA_URL)
     .resize({ width: 16, height: 16 });
   const tray = new TrayCtor(icon);
-  tray.setToolTip("Codex Wallpaper Desktop");
+  tray.setToolTip("Lumina");
   tray.setContextMenu(MenuApi.buildFromTemplate(buildTrayMenuTemplate(actions, onError)));
   tray.on("double-click", wrapAction(actions.showWindow, onError));
 
@@ -40,7 +40,7 @@ export function createTrayController({
     showResidentNotice() {
       if (process.platform !== "win32" || typeof tray.displayBalloon !== "function") return;
       tray.displayBalloon({
-        title: "Codex Wallpaper Desktop 仍在运行",
+        title: "Lumina 仍在运行",
         content: "已驻留系统托盘；双击图标可重新打开。",
         iconType: "info",
         noSound: true,
