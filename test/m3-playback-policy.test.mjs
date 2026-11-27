@@ -33,5 +33,5 @@ test('every bootstrap stays under 100 KiB and GPU mode never ships the unused VP
     assert.ok(Buffer.byteLength(buildBootstrapScript(flags)) < 100 * 1024);
   }
   assert.doesNotMatch(buildBootstrapScript({ nativeEnabled: true, directSceneEnabled: true }), /new VideoDecoder/);
-  assert.match(buildBootstrapScript(), /0\.6\.0-m3-media-policy-v4/);
+  assert.match(buildBootstrapScript(), /0\.6\.0-m3-media-policy-v6/);
 });

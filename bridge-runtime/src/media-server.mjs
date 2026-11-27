@@ -20,6 +20,7 @@ import { openScenePackageVideo } from './scene-inspector.mjs';
 import { VideoVersions, layoutChunks } from './video-stream.mjs';
 import { ManagedCache } from './managed-cache.mjs';
 import { VideoOptimizer, videoOptions } from './video-optimizer.mjs';
+import { HOST_TYPES } from './host-profiles.mjs';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const DEFAULT_PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
@@ -348,20 +349,32 @@ function memoryConfigStore(initialConfig = DEFAULT_CONFIG) {
   };
 }
 
+function publicHostEndpoint(entry) {
+  if (!HOST_TYPES.includes(entry?.hostType) || !Number.isInteger(entry.port) || entry.port < 1024 || entry.port > 65535) return null;
+  return { hostType: entry.hostType, port: entry.port };
+}
+
+function publicHostEndpoints(entries) {
+  return entries.slice(0, HOST_TYPES.length).map(publicHostEndpoint).filter(Boolean);
+}
+
 function publicActionResult(result) {
   if (result == null) return { ok: true };
   if (typeof result === 'boolean') return { ok: result };
   if (typeof result !== 'object' || Array.isArray(result)) return { ok: true };
   const response = { ok: typeof result.ok === 'boolean' ? result.ok : true };
+  if (typeof result.injectorActive === 'boolean') response.injectorActive = result.injectorActive;
+  if (Array.isArray(result.activeHosts)) response.activeHosts = publicHostEndpoints(result.activeHosts);
+  if (Array.isArray(result.registeredHosts)) response.registeredHosts = publicHostEndpoints(result.registeredHosts);
   if (['direct-gpu', 'vp8', 'preview-only'].includes(result.sceneRenderer)) response.sceneRenderer = result.sceneRenderer;
   if (typeof result.message === 'string') response.message = result.message.slice(0, 2_000);
   if (['string', 'number', 'boolean'].includes(typeof result.status)) response.status = result.status;
-    if (Number.isSafeInteger(result.delivered) && result.delivered >= 0 && result.delivered <= 16) response.delivered = result.delivered;
-  if (Array.isArray(result.engine)) response.engine = result.engine.slice(0, 2).flatMap((entry) => {
+  if (Number.isSafeInteger(result.delivered) && result.delivered >= 0 && result.delivered <= 16 * HOST_TYPES.length) response.delivered = result.delivered;
+  if (Array.isArray(result.engine)) response.engine = result.engine.slice(0, 2 * HOST_TYPES.length).flatMap((entry) => {
     if (!entry || typeof entry.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(entry.id)) return [];
     if (entry.renderer === 'direct-gpu') {
       const integer = (value, max) => Number.isSafeInteger(value) && value >= 0 && value <= max ? value : 0;
-      return [{ id: entry.id, ...(entry.type === 'web' || entry.type === 'scene' ? { type: entry.type } : {}), renderer: 'direct-gpu', failed: entry.failed === true,
+      return [{ id: entry.id, ...publicHostEndpoint(entry), ...(entry.type === 'web' || entry.type === 'scene' ? { type: entry.type } : {}), renderer: 'direct-gpu', failed: entry.failed === true,
         requestedFps: integer(entry.requestedFps, 60),
         targets: (Array.isArray(entry.targets) ? entry.targets : []).slice(0, 16).flatMap((target) => {
           if (!target || typeof target !== 'object' || Array.isArray(target)) return [];
@@ -374,7 +387,7 @@ function publicActionResult(result) {
             ...(entry.type === 'web' ? { paintFrames: integer(target.paintFrames, 1e9), animationFrames: integer(target.animationFrames, 1e9) } : {}) }];
         }) }];
     }
-    return [{ id: entry.id, paused: entry.paused === true, failed: entry.failed === true,
+    return [{ id: entry.id, ...publicHostEndpoint(entry), paused: entry.paused === true, failed: entry.failed === true,
       delivered: Number.isSafeInteger(entry.delivered) && entry.delivered >= 0 ? entry.delivered : 0,
       samples: (Array.isArray(entry.samples) ? entry.samples : []).slice(-128).flatMap((sample) => {
         const keys = ['sequence', 'acknowledged', 'stateMs', 'controlMs', 'captureMs', 'ackMs', 'totalMs', 'startedAt', 'endedAt'];
@@ -1187,25 +1200,28 @@ export class MediaServer {
       return;
     }
     if (this.#library?.busy && body.action === 'inject') {
-      json(response, 409, { ok: false, error: '资源任务正在进行，请等待或取消后应用' });
+      json(response, 409, { ok: false, notExecuted: true, error: '资源任务正在进行，请等待或取消后应用' });
       return;
     }
     // Validated native injection may initialize several renderers before any
     // response bytes exist. Keep its socket alive for the desktop's bounded wait.
     if (body.action === 'inject') response.setTimeout(60_000);
     try {
-      if (body.action === 'restore') await this.#playlists.manage({ action: 'settings', enabled: false });
       const result = await this.#onAction(body.action, body, {
         config: normalizeConfig(await this.#configStore.get()),
       });
+      if (body.action === 'restore' && result?.ok !== false && result?.injectorActive !== true) {
+        await this.#playlists.manage({ action: 'settings', enabled: false });
+      }
       if (body.action === 'rescan') this.#playlists.resetFailures();
-      await this.#playlists.refresh();
+      if (body.action !== 'injection-status') await this.#playlists.refresh();
       json(response, 200, publicActionResult(result));
     } catch (error) {
       const message = typeof error?.message === 'string' && error.message
         ? error.message.slice(0, 500)
         : 'Action failed';
-      json(response, 500, { ok: false, error: message });
+      const registeredHosts = Array.isArray(error?.registeredHosts) ? publicHostEndpoints(error.registeredHosts) : undefined;
+      json(response, 500, { ok: false, error: message, registeredHosts });
     }
   }
 

@@ -18,6 +18,7 @@ function gpuFixture(t, { verified = true, lateTheme = false, hidden = new Set(),
     onStatus: (status) => statuses.push(status),
     socketFactory: url => {
       const globals = {}, events = new Map();
+      globals.top = globals;
       let themePrepared = false, themeChecks = 0;
       const socket = { ws: new EventEmitter(), closed: false,
         async connect() {
@@ -30,7 +31,11 @@ function gpuFixture(t, { verified = true, lateTheme = false, hidden = new Set(),
         async call(method, params = {}) {
           calls.push(method);
           if (method === 'Page.enable' && url.endsWith('/' + goneTarget)) { targetGone = removeGone; throw Error('CDP Page.enable timed out'); }
-          if (method === 'Page.reload') { delete globals.__cwbDocumentReload; return {}; }
+          if (method === 'Page.reload') {
+            delete globals.__cwbDocumentReload;
+            runInNewContext(params.scriptToEvaluateOnLoad, { globalThis: globals });
+            return {};
+          }
           if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 'hook' };
           if (method === 'Runtime.callFunctionOn') {
             if (params.objectId === 'boot') return { result: params.returnByValue ? { value: true } : { objectId: 'receiver' } };
@@ -72,6 +77,7 @@ function gpuFixture(t, { verified = true, lateTheme = false, hidden = new Set(),
   });
   injector.sceneDelivery = {
     warm: async () => { calls.push('warm'); return true; },
+    fail: () => { calls.push('fail'); },
     prepare: async (session, key) => {
       calls.push('prepare');
       if (broken) throw Error(brokenError);
@@ -82,7 +88,7 @@ function gpuFixture(t, { verified = true, lateTheme = false, hidden = new Set(),
   };
   injector.listTargets = async ({ includeAll = false } = {}) => [target('main'), ...(goneTarget && !targetGone ? [target(goneTarget)]
     : goneTarget && navigatesAway && includeAll ? [{ ...target(goneTarget), url: 'https://example.invalid/' }] : [])];
-  t.after(() => injector.close({ restore: true }));
+  t.after(() => injector.close({ restore: true, allowEndpointUnavailable: !verified }));
   return { injector, calls, statuses, sockets, hidden };
 }
 
@@ -144,6 +150,16 @@ test('GPU fallback cannot convert receiver loss or a restoration/identity failur
     const result = await f.injector.start({ ...gpuPlan, fallbackScripts: [{ reason: 'empty', script: 'fallback-good' }] });
     assert.equal(result.failed, 1); assert.equal(result.timings.length, 0);
   }
+});
+
+test('GPU first-frame failure uses the existing fallback without restarting application or reloading', async t => {
+  const f = gpuFixture(t, { visibleFailure: true });
+  const result = await f.injector.start({ ...gpuPlan, fallbackScripts: [{ reason: 'preview', script: 'fallback-good' }] });
+  assert.equal(result.failed, 0);
+  assert.equal(result.timings[0].fallbackReason, 'preview');
+  assert.equal(f.calls.filter(call => call === 'apply').length, 1);
+  assert.equal(f.calls.filter(call => call === 'Page.reload').length, 1);
+  assert.equal(f.calls.filter(call => call === 'fail').length, 1);
 });
 
 test('GPU becoming hidden during first-frame wait is deferred, frees its candidate and reopens only after visibility', async t => {
@@ -253,14 +269,14 @@ test('identity failure prevents even a multi-window visibility probe', async (t)
 
 test('reload ignores a stale document and does not require loadEventFired or all subresources', async () => {
   const globals = {}; let probes = 0, reloads = 0;
+  globals.top = globals;
+  let reloadScript;
   const injector = new CdpWallpaperInjector();
   const session = { runtimeInstalled: true, socket: { async call(method, params) {
-    if (method === 'Page.reload') { reloads++; return {}; }
+    if (method === 'Page.reload') { reloads++; reloadScript = params.scriptToEvaluateOnLoad; return {}; }
     if (method === 'Runtime.evaluate') {
-      if (params.expression.includes('!==')) {
-        probes++;
-        if (probes === 2) delete globals.__cwbDocumentReload;
-      }
+      probes++;
+      if (probes === 2) runInNewContext(reloadScript, { globalThis: globals });
       return { result: { value: runInNewContext(params.expression, { globalThis: globals,
         location: { origin: 'app://-' }, document: { body: {}, readyState: 'interactive', hidden: true } }) } };
     }
@@ -268,6 +284,33 @@ test('reload ignores a stale document and does not require loadEventFired or all
   } } };
   await injector.reloadDocument(session);
   assert.equal(probes, 2); assert.equal(reloads, 1); assert.equal(session.runtimeInstalled, false);
+});
+
+test('reload tracks document and context changes before sending the command and discards a raced probe', async () => {
+  const handlers = new Map(), globals = {};
+  globals.top = globals;
+  let probes = 0;
+  const injector = new CdpWallpaperInjector();
+  const session = { runtimeInstalled: true, socket: {
+    onEvent(method, handler) { handlers.set(method, handler); return () => handlers.delete(method); },
+    async call(method, params) {
+      if (method === 'Page.reload') {
+        assert.ok(handlers.has('Page.frameNavigated') && handlers.has('Runtime.executionContextsCleared'));
+        handlers.get('Page.frameNavigated')({ frame: { id: 'main' } });
+        runInNewContext(params.scriptToEvaluateOnLoad, { globalThis: globals });
+        return {};
+      }
+      assert.equal(method, 'Runtime.evaluate');
+      const value = runInNewContext(params.expression, { globalThis: globals,
+        location: { origin: 'app://-' }, document: { body: {}, readyState: 'interactive' } });
+      probes++;
+      if (probes === 1) handlers.get('Runtime.executionContextsCleared')();
+      return { result: { value } };
+    },
+  } };
+  await injector.reloadDocument(session);
+  assert.equal(probes, 2);
+  assert.equal(handlers.size, 0);
 });
 
 test('visible target is applied before hidden ones and hidden concurrency is bounded at two', async (t) => {
@@ -309,7 +352,7 @@ test('visible target is applied before hidden ones and hidden concurrency is bou
 test('serialized theme preflight exposes the same restore-aware theme implementation', () => {
   const bootstrap = buildBootstrapScript({ directSceneEnabled: true });
   assert.match(bootstrap, /prepareTheme: ensureDarkTheme/);
-  assert.match(bootstrap, /m3-media-policy-v4/);
+  assert.match(bootstrap, /m3-media-policy-v6/);
 });
 
 test('all-hidden startup serializes the first successful theme capture before parallel followers', async (t) => {

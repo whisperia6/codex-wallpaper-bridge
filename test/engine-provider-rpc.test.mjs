@@ -13,11 +13,11 @@ function png() {
   bytes.writeUInt32BE(13, 8); bytes.write('IHDR', 12); bytes.writeUInt32BE(800, 16); bytes.writeUInt32BE(450, 20);
   return bytes;
 }
-function fixture(t, { resolveProject, pendingReady = false, captureGate, invalidFrame = false, invalidEncoded = false, timeoutMs = 1000 } = {}) {
+function fixture(t, { resolveProject, verifyEndpoint, pendingReady = false, captureGate, invalidFrame = false, invalidEncoded = false, timeoutMs = 1000 } = {}) {
   const peer = new EventEmitter(), port = new EventEmitter(), owners = [], resolutions = [], responses = [];
   peer.postMessage = (data) => { responses.push(data); queueMicrotask(() => port.emit('message', { data: structuredClone(data) })); };
   port.postMessage = (data) => { queueMicrotask(() => peer.emit('message', structuredClone(data))); };
-  const server = serveEngineProvider({ peer, resolveProject: resolveProject ?? (async (id) => {
+  const server = serveEngineProvider({ peer, verifyEndpoint, resolveProject: resolveProject ?? (async (id) => {
     resolutions.push(id); return id === 'registered' ? { project: { id, type: 'scene', rootPath: 'parent-only-path' }, config: { marker: 1 }, properties: { enabled: true } } : null;
   }), createOwner: (snapshot) => {
     const ready = deferred(), owner = { snapshot, ready: ready.promise, closed: false, releases: 0, captures: 0, writes: 0,
@@ -38,6 +38,22 @@ function fixture(t, { resolveProject, pendingReady = false, captureGate, invalid
   t.after(async () => { client.close(); await server.close(); });
   return { peer, port, owners, resolutions, responses, server, client };
 }
+test('endpoint verification forwards an optional known host type and fails closed on mismatches', async (t) => {
+  const checks = [];
+  const f = fixture(t, { verifyEndpoint: async (port, hostType, purpose) => {
+    checks.push([port, hostType, purpose]);
+    return { verified: hostType === undefined || hostType === 'antigravity' };
+  } });
+  assert.deepEqual(await f.client.verifyEndpoint(9336, 'antigravity'), { verified: true });
+  await assert.rejects(f.client.verifyEndpoint(9336, 'codex'), /endpoint_unverified/);
+  await assert.rejects(f.client.verifyEndpoint(9336, 'unknown'), /invalid_request/);
+  assert.deepEqual(await f.client.verifyEndpoint(9336), { verified: true });
+  assert.deepEqual(await f.client.verifyEndpoint(9336, 'antigravity', 'restore'), { verified: true });
+  await assert.rejects(f.client.verifyEndpoint(9336, 'antigravity', 'attach'), /invalid_request/);
+  await assert.rejects(f.client.verifyEndpoint(9336, undefined, 'restore'), /invalid_request/);
+  assert.deepEqual(checks, [[9336, 'antigravity', undefined], [9336, 'codex', undefined],
+    [9336, undefined, undefined], [9336, 'antigravity', 'restore']]);
+});
 async function raw(f, request) {
   const count = f.responses.length; f.port.postMessage({ channel: 'cwb-engine-provider-v1', ...request });
   for (let i = 0; i < 100 && f.responses.length === count; i++) await tick();

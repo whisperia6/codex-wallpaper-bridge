@@ -10,6 +10,9 @@ const SCRIPT_TIMEOUT_MS = 15_000;
 // report failure and dispose the candidate before the CDP request expires.
 const MEDIA_APPLY_TIMEOUT_MS = 20_000;
 const GPU_APPLY_TIMEOUT_MS = 105_000;
+const COLD_START_RETRY_DELAY_MS = 250;
+const RENDERER_DOM_FAILURE = "Renderer DOM application verification failed";
+const standaloneRestoration = Symbol("standalone restoration");
 let nextTimingId = 0;
 const STAGE_LABELS = {
   owner: "身份核验", connect: "CDP连接", visibility: "可见性探测", runtime: "Runtime安装",
@@ -72,13 +75,51 @@ function runtimeValue(result) {
 
 function appliedMediaReady(value) {
   return value?.ok === true && value.runtimeReady === true && value.domReady === true
-    && value.switchResult?.ok !== false && !['loading', 'error', 'play-rejected'].includes(value.media?.state || value.mediaState);
+    && value.disposed !== true && value.switchResult?.ok !== false
+    && !['loading', 'error', 'play-rejected'].includes(value.media?.state || value.mediaState);
+}
+
+function rendererDomFailure(apply) {
+  return Object.assign(new Error(RENDERER_DOM_FAILURE), {
+    cwbMediaState: apply?.media?.state || apply?.mediaState,
+    cwbSwitchFailure: apply?.switchResult?.error,
+    cwbDisposed: apply?.disposed === true,
+    cwbDomReady: apply?.domReady === true,
+  });
+}
+
+function mediaFailureDetail(error) {
+  const switchFailures = new Map([
+    ["Media load timed out", "media-load-timeout"],
+    ["Media failed to load or decode", "media-load-or-decode"],
+    ["Media commit failed", "media-commit"],
+    ["native_source_failed", "native-source-failed"],
+    ["native_source_capacity", "native-source-capacity"],
+    ["native_source_closing", "native-source-closing"],
+  ]);
+  return {
+    mediaState: ["idle", "loading", "ready", "error", "play-rejected"].includes(error?.cwbMediaState) ? error.cwbMediaState : "unknown",
+    switchFailure: switchFailures.get(error?.cwbSwitchFailure) || "unknown",
+  };
+}
+
+function attachErrorDetail(error) {
+  if (error.message === RENDERER_DOM_FAILURE) {
+    return { message: RENDERER_DOM_FAILURE, detail: {
+      ...mediaFailureDetail(error), disposed: error.cwbDisposed === true, domReady: error.cwbDomReady === true,
+    } };
+  }
+  return { message: error.message };
+}
+
+function isSocketDisconnectedError(error) {
+  return error?.message === "CDP socket closed" || error?.message === "CDP socket is not connected";
 }
 
 function isTargetConnectionFailure(error) {
   return [404, 500].includes(error?.cwbHandshakeStatus)
-    || ['CDP WebSocket connection timed out', 'CDP Page.enable timed out', 'CDP Runtime.enable timed out',
-      'CDP socket closed', 'CDP socket is not connected'].includes(error?.message);
+    || ['CDP WebSocket connection timed out', 'CDP Page.enable timed out', 'CDP Runtime.enable timed out'].includes(error?.message)
+    || isSocketDisconnectedError(error);
 }
 
 function isEndpointUnavailableError(error) {
@@ -92,7 +133,7 @@ function injectionFailureDetail(error, targetIndex) {
   const message = typeof error?.message === "string" ? error.message : "";
   const cdpCode = Number.isInteger(error?.cdpCode) ? error.cdpCode : null;
   const categories = new Map([
-    ["Renderer DOM application verification failed", "renderer-dom-not-ready"],
+    [RENDERER_DOM_FAILURE, "renderer-dom-not-ready"],
     ["Renderer runtime readiness verification failed", "renderer-runtime-not-ready"],
     ["Native renderer bootstrap failed", "native-bootstrap-failed"],
     ["Native renderer runtime is not ready", "native-runtime-not-ready"],
@@ -116,17 +157,7 @@ function injectionFailureDetail(error, targetIndex) {
   } else if (/^CDP (?:Runtime\.(?:evaluate|callFunctionOn|releaseObject)|Page\.(?:enable|reload|addScriptToEvaluateOnNewDocument|setBypassCSP)) timed out$/.test(message)) {
     category = "cdp-timeout";
   }
-  const switchFailures = new Map([
-    ["Media load timed out", "media-load-timeout"],
-    ["Media failed to load or decode", "media-load-or-decode"],
-    ["Media commit failed", "media-commit"],
-    ["native_source_failed", "native-source-failed"],
-    ["native_source_capacity", "native-source-capacity"],
-    ["native_source_closing", "native-source-closing"],
-  ]);
-  return { targetIndex, category, cdpCode,
-    mediaState: ["idle", "loading", "ready", "error"].includes(error?.cwbMediaState) ? error.cwbMediaState : "unknown",
-    switchFailure: switchFailures.get(error?.cwbSwitchFailure) || "unknown" };
+  return { targetIndex, category, cdpCode, ...mediaFailureDetail(error) };
 }
 
 class CdpSocket {
@@ -225,8 +256,10 @@ export class CdpWallpaperInjector {
     installOnNewDocument = true,
     socketFactory = (url) => new CdpSocket(url),
     nativeProvider = null,
+    sharedNativeDelivery = null,
     sceneProvider = null,
-    verifyEndpoint = nativeProvider ? (port) => nativeProvider.verifyEndpoint(port) : null
+    verifyEndpoint = typeof nativeProvider?.verifyEndpoint === "function"
+      ? (port, purpose) => nativeProvider.verifyEndpoint(port, hostType, purpose) : null
   } = {}) {
     this.host = host;
     this.port = Number(port);
@@ -235,16 +268,10 @@ export class CdpWallpaperInjector {
     this.onStatus = onStatus;
     this.installOnNewDocument = installOnNewDocument;
     this.socketFactory = socketFactory;
-    this.nativeDelivery = nativeProvider ? new NativeEngineDelivery({ provider: nativeProvider,
+    this.ownsNativeDelivery = !sharedNativeDelivery;
+    this.nativeDelivery = sharedNativeDelivery ?? (nativeProvider ? new NativeEngineDelivery({ provider: nativeProvider,
       onFailure: (failure) => this.status('native-frame-error', { message: JSON.stringify(failure) }),
-      onReceiverLost: (session) => {
-        if (!this.running || this.restoring) return;
-        session.runtimeInstalled = false;
-        this.status('native-receiver-retired', { message: 'Private renderer context was disposed' });
-        void this.releaseSessionNative(session).then(() => this.rehydrateSession(session)).catch(() => {
-          this.status('native-cleanup-error', { message: 'Native receiver cleanup incomplete' });
-        });
-      } }) : null;
+      onReceiverLost: (session) => this.onNativeReceiverLost(session) }) : null);
     this.verifyEndpoint = verifyEndpoint;
     this.sceneDelivery = sceneProvider ? new DirectSceneDelivery({ ...sceneProvider,
       onPreloadReady: (elapsedMs) => this.status('scene-preload-ready', { message: `候选首帧已预加载：${elapsedMs} ms` }),
@@ -291,6 +318,15 @@ export class CdpWallpaperInjector {
     return `http://${this.host}:${this.port}`;
   }
 
+  onNativeReceiverLost(session) {
+    if (!this.running || this.restoring) return;
+    session.runtimeInstalled = false;
+    this.status('native-receiver-retired', { message: 'Private renderer context was disposed' });
+    void this.releaseSessionNative(session).then(() => this.rehydrateSession(session)).catch(() => {
+      this.status('native-cleanup-error', { message: 'Native receiver cleanup incomplete' });
+    });
+  }
+
   status(type, detail = {}) {
     try { this.onStatus({ type, at: new Date().toISOString(), ...detail }); } catch {}
   }
@@ -321,6 +357,14 @@ export class CdpWallpaperInjector {
     return operation.finally(() => this.attachments.delete(operation));
   }
 
+  assertDebuggerSocketEndpoint(address) {
+    const url = new URL(address);
+    if (this.host !== "127.0.0.1" || url.protocol !== "ws:" || url.hostname !== "127.0.0.1"
+      || Number(url.port) !== this.port || url.username || url.password || url.href.includes("#")) {
+      throw new Error("Native CDP socket is outside the verified endpoint");
+    }
+  }
+
   async attachInternal(target, { deferHidden = false, refreshTarget = false } = {}) {
     if (this.sessions.has(target.id)) return this.sessions.get(target.id);
     const socket = this.socketFactory(target.webSocketDebuggerUrl);
@@ -332,9 +376,7 @@ export class CdpWallpaperInjector {
     let attachmentVerified = false;
     try {
       if (this.nativeEnabled || this.directSceneEnabled) {
-        const url = new URL(target.webSocketDebuggerUrl);
-        if (this.host !== "127.0.0.1" || url.protocol !== "ws:" || url.hostname !== "127.0.0.1"
-          || Number(url.port) !== this.port || url.username || url.password || url.hash) throw new Error("Native CDP socket is outside the verified endpoint");
+        this.assertDebuggerSocketEndpoint(target.webSocketDebuggerUrl);
         if ((this.nativeEnabled && !this.nativeDelivery) || (this.directSceneEnabled && !this.sceneDelivery)
           || typeof this.verifyEndpoint !== "function"
           || (await this.measureStage(timing, "owner", () => this.verifyEndpoint(this.port)))?.verified !== true) throw new Error("Native CDP endpoint is not identity-verified");
@@ -553,7 +595,20 @@ export class CdpWallpaperInjector {
     } finally { await session.socket.call("Runtime.releaseObject", { objectId }).catch(() => {}); }
   }
 
-  async connectRestorationTargets(targets, compatibilityRestoreScript) {
+  async verifyRestorationEndpoint() {
+    try {
+      return (await this.verifyEndpoint(this.port, "restore"))?.verified === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async connectRestorationTargets(targets, compatibilityRestoreScript, mode) {
+    const hasLiveConnection = (target) => {
+      const session = this.sessions.get(target.id);
+      return session && session.socket.closed !== true
+        && session.target.webSocketDebuggerUrl === target.webSocketDebuggerUrl;
+    };
     const liveIds = new Set(targets.map((target) => target.id));
     const errors = [];
     const missingIds = new Set([...this.sessions.keys(), ...this.disconnectedSessions.keys()].filter(id => !liveIds.has(id)));
@@ -572,10 +627,16 @@ export class CdpWallpaperInjector {
     }
     for (const target of targets) {
       const current = this.sessions.get(target.id);
-      if (current && current.socket.closed !== true) continue;
-      const previous = this.disconnectedSessions.get(target.id) || current;
-      const socket = this.socketFactory(target.webSocketDebuggerUrl);
+      if (hasLiveConnection(target)) continue;
+      if (typeof this.verifyEndpoint === "function") {
+        if (!await this.verifyRestorationEndpoint()) return null;
+      } else if (mode !== standaloneRestoration) return null;
+      let socket;
       try {
+        this.assertDebuggerSocketEndpoint(target.webSocketDebuggerUrl);
+        const previous = this.disconnectedSessions.get(target.id) || current;
+        current?.socket.close();
+        socket = this.socketFactory(target.webSocketDebuggerUrl);
         await socket.connect();
         await socket.call("Page.enable");
         // A recovery connection deliberately does not install the bootstrap,
@@ -594,7 +655,7 @@ export class CdpWallpaperInjector {
         this.disconnectedSessions.delete(target.id);
         this.trackSessionDisconnect(session);
       } catch (error) {
-        socket.close();
+        socket?.close();
         errors.push({ targetId: target.id, message: `${target.id}: ${error.message}`, connectionFailure: isTargetConnectionFailure(error) });
       }
     }
@@ -612,26 +673,42 @@ export class CdpWallpaperInjector {
   }
 
   async reloadDocument(session) {
-    // A load event can be queued for the previous document. Require the old
-    // document marker to disappear as well; do not alter visibility or focus.
-    const marker = randomUUID();
-    await this.evaluateScript(session, `globalThis.__cwbDocumentReload=${JSON.stringify(marker)};true`);
-    await session.socket.call("Page.reload", { ignoreCache: false }, SCRIPT_TIMEOUT_MS);
+    const { socket } = session;
+    const marker = JSON.stringify(randomUUID());
     const originCheck = this.hostType === "antigravity"
       ? `/^https:\\/\\/127\\.0\\.0\\.1:\\d{1,5}$/.test(location.origin)`
       : `location.origin==='app://-'`;
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline) {
-      try {
-        // DOM readiness is sufficient for bootstrap; unrelated subresources
-        // need not finish. The marker proves this is not a queued old load.
-        if (await this.evaluateScript(session, `globalThis.__cwbDocumentReload!==${JSON.stringify(marker)}&&${originCheck}&&document.readyState!=='loading'&&Boolean(document.body)`, Math.min(1000, Math.max(1, deadline - Date.now()))) === true) {
-          session.runtimeInstalled = false; return;
+    let documentVersion = 0;
+    const removeNavigation = socket.onEvent?.("Page.frameNavigated", ({ frame }) => {
+      if (frame && !frame.parentId) documentVersion += 1;
+    });
+    const removeContextsCleared = socket.onEvent?.("Runtime.executionContextsCleared", () => { documentVersion += 1; });
+    try {
+      // A preceding navigation may already have replaced the old document.
+      // Require a marker installed by this reload, even on sockets without events.
+      await socket.call("Page.reload", {
+        ignoreCache: false,
+        scriptToEvaluateOnLoad: `if (globalThis === globalThis.top) globalThis.__cwbDocumentReload=${marker}`,
+      }, SCRIPT_TIMEOUT_MS);
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        const version = documentVersion;
+        try {
+          const ready = await this.evaluateScript(session, `globalThis.__cwbDocumentReload===${marker}&&${originCheck}&&document.readyState!=='loading'&&Boolean(document.body)`, Math.min(1000, Math.max(1, deadline - Date.now())));
+          if (ready === true && documentVersion === version) {
+            session.runtimeInstalled = false;
+            return;
+          }
+        } catch (error) {
+          if (socket.closed === true || isSocketDisconnectedError(error)) throw error;
         }
-      } catch {}
-      await delay(35);
+        await delay(35);
+      }
+      throw new Error("GPU Scene document initialization failed");
+    } finally {
+      removeNavigation?.();
+      removeContextsCleared?.();
     }
-    throw new Error("GPU Scene document initialization failed");
   }
 
   queueSessionWork(session, task) {
@@ -743,6 +820,7 @@ export class CdpWallpaperInjector {
   async installScriptInternal(session, injectionValue, {
     updateReloadHook = true,
     allowThemeReload = true,
+    allowColdStartRetry = true,
     timing = createInjectionTiming()
   } = {}) {
     const injection = normalizeInjection(injectionValue);
@@ -793,7 +871,7 @@ export class CdpWallpaperInjector {
         if (beforeReload) {
           await this.installScriptInternal(session, beforeReload, { updateReloadHook: false, allowThemeReload: false, timing });
           const prepared = await this.evaluateScript(session, "globalThis.__codexWallpaperBridgeRuntime.waitForMedia()", GPU_APPLY_TIMEOUT_MS);
-          if (prepared?.ok !== true) throw new Error("Renderer DOM application verification failed");
+          if (prepared?.ok !== true) throw rendererDomFailure(prepared);
         }
       } finally { session.themeReloading = false; }
     }
@@ -813,7 +891,7 @@ export class CdpWallpaperInjector {
           await this.measureStage(timing, "reload", () => this.reloadDocument(session));
           timing.reloads += 1;
           session.themeReloadHandled = true;
-          return await this.installScriptInternal(session, injection, { updateReloadHook: false, allowThemeReload: false, timing });
+          return await this.installScriptInternal(session, injection, { updateReloadHook: false, allowThemeReload: false, allowColdStartRetry, timing });
         } finally { session.themeReloading = false; }
       }
     }
@@ -844,17 +922,35 @@ export class CdpWallpaperInjector {
         }
         if (this.restoring) throw new Error("Renderer restoration is in progress");
         const applyTimeout = injection.directSceneId ? GPU_APPLY_TIMEOUT_MS : MEDIA_APPLY_TIMEOUT_MS;
-        apply = await this.measureStage(timing, "apply", () => this.evaluateScript(session, injection.applyScript, applyTimeout));
+        const applyMedia = () => this.measureStage(timing, "apply", () => this.evaluateScript(session, injection.applyScript, applyTimeout));
+        apply = await applyMedia();
         if (injection.directSceneId && apply?.deferred === true) {
           if (sceneCandidate) await sceneCandidate.release();
           return defer();
         }
-        if (!appliedMediaReady(apply)) {
-          throw Object.assign(new Error("Renderer DOM application verification failed"), {
-            cwbMediaState: apply?.media?.state || apply?.mediaState,
-            cwbSwitchFailure: apply?.switchResult?.error,
-          });
+        if (!appliedMediaReady(apply) && !injection.directSceneId && !injection.nativeWallpaperId
+          && session.gpuCspInitialized && !session.lastApplied && allowColdStartRetry && !this.restoring) {
+          allowColdStartRetry = false;
+          const wasReloading = session.themeReloading;
+          session.themeReloading = true;
+          try {
+            await delay(COLD_START_RETRY_DELAY_MS);
+            if (this.restoring) throw new Error("Renderer restoration is in progress");
+            await this.releaseSessionNative(session);
+            if (this.restoring) throw new Error("Renderer restoration is in progress");
+            await session.socket.call("Page.setBypassCSP", { enabled: true });
+            session.cspBypassActive = true;
+            await this.measureStage(timing, "reload", () => this.reloadDocument(session));
+            timing.reloads += 1;
+            if (this.restoring) throw new Error("Renderer restoration is in progress");
+            await this.ensureRuntime(session, injection, timing);
+            if (this.restoring) throw new Error("Renderer restoration is in progress");
+            apply = await applyMedia();
+          } finally {
+            session.themeReloading = wasReloading;
+          }
         }
+        if (!appliedMediaReady(apply)) throw rendererDomFailure(apply);
         if (candidate) { session.nativeLease = candidate; session.pendingNativeLease = null; }
         else if (!injection.nativeWallpaperId) session.nativeLease = null;
         if (previous && previous !== session.nativeLease) await previous.release();
@@ -892,7 +988,7 @@ export class CdpWallpaperInjector {
       if (!apply?.degraded) session.fallbackFor = null;
       timing.applyMs += performance.now() - applyStartedAt;
       if (!appliedMediaReady(apply)) {
-        throw new Error("Renderer DOM application verification failed");
+        throw rendererDomFailure(apply);
       }
       if (allowThemeReload && !session.themeReloadHandled && apply.theme?.reloadRequired === true) {
         session.themeReloading = true;
@@ -915,6 +1011,7 @@ export class CdpWallpaperInjector {
           return await this.installScriptInternal(session, injection, {
             updateReloadHook: false,
             allowThemeReload: false,
+            allowColdStartRetry,
             timing
           });
         } finally {
@@ -987,29 +1084,41 @@ export class CdpWallpaperInjector {
     await session.rehydrating;
   }
 
-  async retryNative(key) {
+  async retryNative(key, { retrySource = true } = {}) {
     if (!this.running || !this.nativeDelivery || this.restoring) throw new Error("Native retry unavailable");
-    await this.nativeDelivery.retry(key);
+    let cleared = retrySource && this.nativeDelivery.hasSourceFailure(key);
+    if (cleared) await this.nativeDelivery.retry(key);
     for (const session of this.sessions.values()) {
-      if (session.nativeLease?.closed) session.nativeLease = null;
-      if (session.pendingNativeLease?.closed) session.pendingNativeLease = null;
-      if (session.engineTransportId) await session.socket.call("Runtime.callFunctionOn", {
-        objectId: session.engineTransportId, functionDeclaration: "function(key){return this.retry(key)}",
-        arguments: [{ value: key }], returnByValue: true
-      });
+      for (const field of ["nativeLease", "pendingNativeLease"]) {
+        const lease = session[field];
+        if (!lease?.closed) continue;
+        if (lease.key === key) cleared = true;
+        session[field] = null;
+      }
+      if (session.engineTransportId) {
+        const result = await session.socket.call("Runtime.callFunctionOn", {
+          objectId: session.engineTransportId, functionDeclaration: "function(key){return this.retry(key)}",
+          arguments: [{ value: key }], returnByValue: true
+        });
+        if (runtimeValue(result) === true) cleared = true;
+      }
     }
-    return { cleared: true };
+    return { cleared };
   }
 
   async retryScene(key) {
     if (!this.running || !this.sceneDelivery || this.restoring) throw new Error("GPU Scene retry unavailable");
-    await this.sceneDelivery.retry(key);
+    try { await this.sceneDelivery.retry(key); }
+    catch (error) {
+      if (error.message === "gpu_source_not_failed") return { cleared: false };
+      throw error;
+    }
     for (const session of this.sessions.values()) {
       if (session.sceneLease?.closed) session.sceneLease = null;
-      if (session.sceneTransportId) await session.socket.call("Runtime.callFunctionOn", {
+      if (session.sceneTransportId) runtimeValue(await session.socket.call("Runtime.callFunctionOn", {
         objectId: session.sceneTransportId, functionDeclaration: "function(key){return this.retry(key)}",
         arguments: [{ value: key }], returnByValue: true
-      });
+      }));
     }
     return { cleared: true };
   }
@@ -1169,7 +1278,7 @@ export class CdpWallpaperInjector {
           }
         } catch (error) {
           this.lastScanFailures += 1;
-          this.status("attach-error", { targetId: id, message: error.message });
+          this.status("attach-error", { targetId: id, ...attachErrorDetail(error) });
         }
       }
     }
@@ -1193,7 +1302,7 @@ export class CdpWallpaperInjector {
           }
         }
         this.lastScanFailures += 1;
-        this.status("attach-error", { targetId: target.id, message: error.message });
+        this.status("attach-error", { targetId: target.id, ...attachErrorDetail(error) });
       }
     };
     let hasReadyTarget = false;
@@ -1250,7 +1359,7 @@ export class CdpWallpaperInjector {
     return { sessions: [...this.sessions.values()].filter(session => !session.deferred).length, failed: this.lastScanFailures, deferred: this.lastScanDeferred, timings: this.lastScanTimings };
   }
 
-  async restore({ allowEndpointUnavailable = false } = {}) {
+  async restore({ allowEndpointUnavailable = false } = {}, mode) {
     this.scenePreloadVersion += 1;
     this.scenePreloadKey = null;
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
@@ -1270,6 +1379,16 @@ export class CdpWallpaperInjector {
       session.removeContextListener?.();
       session.removeContextListener = null;
     }
+    const skipUnverifiedEndpoint = () => {
+      // An unverified endpoint may belong to another installation.
+      for (const session of this.sessions.values()) session.socket.close();
+      this.sessions.clear();
+      this.disconnectedSessions.clear();
+      this.status("restoration-owner-unverified");
+      if (!allowEndpointUnavailable) {
+        throw Object.assign(new Error("恢复连接的 CDP 端口未通过身份核验"), { code: "CDP_RESTORATION_OWNER_UNVERIFIED" });
+      }
+    };
     try {
       await Promise.all([...this.sessions.values()].map((session) => this.releaseSessionNative(session)));
       // Finish already-sent CDP work before clearing DOM so a late apply cannot
@@ -1277,41 +1396,17 @@ export class CdpWallpaperInjector {
       while (this.installations.size > 0 || this.attachments.size > 0) {
         await Promise.allSettled([...this.installations, ...this.attachments]);
       }
-      let targets;
-      try {
-        targets = await this.listTargets();
-      } catch (error) {
-        if (allowEndpointUnavailable && isEndpointUnavailableError(error)) {
-          this.disconnectedSessions.clear();
-          this.status("restored", { sessions: 0, endpointUnavailable: true });
-          return;
-        }
-        throw error;
-      }
-      if (targets.length === 0) {
-        if (allowEndpointUnavailable) {
-          let allIds = new Set();
-          try {
-            allIds = new Set((await this.listTargets({ includeAll: true })).map((t) => t.id));
-          } catch (error) {
-            if (!isEndpointUnavailableError(error)) throw error;
-          }
-          const trackedIds = [...this.sessions.keys(), ...this.disconnectedSessions.keys()];
-          if (!trackedIds.some((id) => allIds.has(id))) {
-            this.disconnectedSessions.clear();
-            this.status("restored", { sessions: 0, endpointUnavailable: true });
-            return;
-          }
-        }
-        throw new Error(`没有找到可完整恢复的 ${hostDisplayName(this.hostType)} renderer`);
-      }
       const coverageErrors = [];
-      let cohortSettled = false;
-      for (let round = 0; round < 3; round++) {
-        const connectionErrors = await this.connectRestorationTargets(targets, compatibilityRestoreScript);
-        let current;
+      let targets;
+      if (typeof this.verifyEndpoint !== "function" && mode !== standaloneRestoration) {
+        // An implicit restore can clean up established sessions without trusting a new endpoint.
+        targets = [...this.sessions.values()].filter(({ socket }) => socket.closed !== true).map(({ target }) => target);
+      } else {
+        if (typeof this.verifyEndpoint === "function" && ![...this.sessions.values()].some(({ socket }) => socket.closed !== true)) {
+          if (!await this.verifyRestorationEndpoint()) return skipUnverifiedEndpoint();
+        }
         try {
-          current = await this.listTargets();
+          targets = await this.listTargets();
         } catch (error) {
           if (allowEndpointUnavailable && isEndpointUnavailableError(error)) {
             this.disconnectedSessions.clear();
@@ -1320,7 +1415,7 @@ export class CdpWallpaperInjector {
           }
           throw error;
         }
-        if (current.length === 0) {
+        if (targets.length === 0) {
           if (allowEndpointUnavailable) {
             let allIds = new Set();
             try {
@@ -1337,26 +1432,59 @@ export class CdpWallpaperInjector {
           }
           throw new Error(`没有找到可完整恢复的 ${hostDisplayName(this.hostType)} renderer`);
         }
-        const currentIds = new Set(current.map(t => t.id));
-        const removed = targets.filter(t => !currentIds.has(t.id));
-        const allIds = removed.length ? new Set((await this.listTargets({ includeAll: true })).map(t => t.id)) : currentIds;
-        for (const error of connectionErrors) {
-          if (error.connectionFailure && !allIds.has(error.targetId)) {
-            this.status('restoration-target-gone', { message: '恢复连接期间目标已消失，复核新目标覆盖' });
-          } else coverageErrors.push(error.message);
+        let cohortSettled = false;
+        for (let round = 0; round < 3; round++) {
+          const connectionErrors = await this.connectRestorationTargets(targets, compatibilityRestoreScript, mode);
+          if (!connectionErrors) return skipUnverifiedEndpoint();
+          let current;
+          try {
+            current = await this.listTargets();
+          } catch (error) {
+            if (allowEndpointUnavailable && isEndpointUnavailableError(error)) {
+              this.disconnectedSessions.clear();
+              this.status("restored", { sessions: 0, endpointUnavailable: true });
+              return;
+            }
+            throw error;
+          }
+          if (current.length === 0) {
+            if (allowEndpointUnavailable) {
+              let allIds = new Set();
+              try {
+                allIds = new Set((await this.listTargets({ includeAll: true })).map((t) => t.id));
+              } catch (error) {
+                if (!isEndpointUnavailableError(error)) throw error;
+              }
+              const trackedIds = [...this.sessions.keys(), ...this.disconnectedSessions.keys()];
+              if (!trackedIds.some((id) => allIds.has(id))) {
+                this.disconnectedSessions.clear();
+                this.status("restored", { sessions: 0, endpointUnavailable: true });
+                return;
+              }
+            }
+            throw new Error(`没有找到可完整恢复的 ${hostDisplayName(this.hostType)} renderer`);
+          }
+          const currentIds = new Set(current.map(t => t.id));
+          const removed = targets.filter(t => !currentIds.has(t.id));
+          const allIds = removed.length ? new Set((await this.listTargets({ includeAll: true })).map(t => t.id)) : currentIds;
+          for (const error of connectionErrors) {
+            if (error.connectionFailure && !allIds.has(error.targetId)) {
+              this.status('restoration-target-gone', { message: '恢复连接期间目标已消失，复核新目标覆盖' });
+            } else coverageErrors.push(error.message);
+          }
+          for (const target of removed) if (allIds.has(target.id)) {
+            coverageErrors.push(`${target.id}: live target outside renderer cohort`);
+          }
+          const stable = targets.length === current.length && targets.every(t => current.some(c =>
+            c.id === t.id && c.webSocketDebuggerUrl === t.webSocketDebuggerUrl));
+          targets = current;
+          if (stable) { cohortSettled = true; break; }
         }
-        for (const target of removed) if (allIds.has(target.id)) {
-          coverageErrors.push(`${target.id}: live target outside renderer cohort`);
-        }
-        const stable = targets.length === current.length && targets.every(t => current.some(c =>
-          c.id === t.id && c.webSocketDebuggerUrl === t.webSocketDebuggerUrl));
-        targets = current;
-        if (stable) { cohortSettled = true; break; }
+        if (!cohortSettled) coverageErrors.push('Renderer restoration target cohort did not settle');
       }
-      if (!cohortSettled) coverageErrors.push('Renderer restoration target cohort did not settle');
       const restorationSessions = targets.flatMap((target) => {
         const session = this.sessions.get(target.id);
-        if (!session || session.socket.closed === true) {
+        if (!session || session.socket.closed === true || session.target.webSocketDebuggerUrl !== target.webSocketDebuggerUrl) {
           coverageErrors.push(`${target.id}: restoration target disconnected`);
           return [];
         }
@@ -1467,7 +1595,7 @@ export class CdpWallpaperInjector {
       }
     } finally {
       const cleanupResults = await Promise.allSettled([
-        this.nativeDelivery?.close(), this.sceneDelivery?.close(), ...this.nativeCleanups
+        this.ownsNativeDelivery ? this.nativeDelivery?.close() : undefined, this.sceneDelivery?.close(), ...this.nativeCleanups
       ]);
       for (const session of this.sessions.values()) {
         session.removeLoadListener?.();
@@ -1485,11 +1613,11 @@ export class CdpWallpaperInjector {
   }
 }
 
-export async function restoreCdpWallpaper({ port = 9335, host = "127.0.0.1", hostType = "codex", onStatus, compatibilityRestoreScript = "" } = {}) {
-  const injector = new CdpWallpaperInjector({ port, host, hostType, onStatus });
+export async function restoreCdpWallpaper({ port = 9335, host = "127.0.0.1", hostType = "codex", onStatus, verifyEndpoint, compatibilityRestoreScript = "" } = {}) {
+  const injector = new CdpWallpaperInjector({ port, host, hostType, onStatus, verifyEndpoint });
   injector.compatibilityRestoreScript = compatibilityRestoreScript;
   try {
-    await injector.restore();
+    await injector.restore({}, standaloneRestoration);
   } finally {
     await injector.close();
   }

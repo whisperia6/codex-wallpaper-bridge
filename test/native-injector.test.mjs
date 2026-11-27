@@ -173,6 +173,20 @@ test('explicit injector retry clears both caches, requests private same-identity
   assert.equal(f.injector.sessions.get('target').nativeLease.key, 'broken');
   assert.ok(f.calls.some((call) => call.params?.functionDeclaration?.includes('this.retry')));
 });
+test('native retry distinguishes an unchanged renderer, a retired lease, and a CDP evaluation failure', async (t) => {
+  const f = fixture(t);
+  await f.injector.start(f.plan('scene'));
+  const call = f.socket.call;
+  let response = { result: { value: false } };
+  f.socket.call = async (method, params) => params?.functionDeclaration?.includes('this.retry') ? response : call(method, params);
+  assert.deepEqual(await f.injector.retryNative('scene'), { cleared: false });
+  const session = f.injector.sessions.get('target');
+  await session.nativeLease.release();
+  assert.deepEqual(await f.injector.retryNative('scene'), { cleared: true });
+  assert.equal(session.nativeLease, null);
+  response = { exceptionDetails: { text: 'CDP retry evaluation failed' } };
+  await assert.rejects(f.injector.retryNative('scene'), /CDP retry evaluation failed/);
+});
 test('native injection plans contain project identity only, never author URL/path/property index', () => {
   const server = { origin: 'http://127.0.0.1:18700', basePath: '/0123456789abcdefghijklmnop' };
   const inventory = { projects: [{ id: 'scene', type: 'scene', rootPath: 'D:/private',

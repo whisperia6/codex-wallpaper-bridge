@@ -28,3 +28,26 @@ test('GPU diagnostics cannot export unbounded target lists or nonfinite dimensio
   assert.deepEqual(result.engine[0].targets[0], { active: false, preloaded: false, width: 0, height: 0, fps: 0, renderCompletions: 0,
     pointerReceived: 0, pointerForwarded: 0, pointerBlocked: 'none' });
 });
+
+test('HTTP action responses carry both hosts and sanitize cleanup state and diagnostics', async (t) => {
+  const activeHosts = [{ hostType: 'codex', port: 9335 }, { hostType: 'antigravity', port: 9336 }];
+  const server = createMediaServer({ onAction: async (action) => {
+    if (action === 'inject') throw Object.assign(new Error('inject failed'), { registeredHosts: [{ ...activeHosts[1], path: 'secret' }] });
+    return { ok: true, activeHosts: activeHosts.map((entry) => ({ ...entry, path: 'secret' })), injectorActive: true,
+      engine: activeHosts.flatMap((endpoint) => ['scene', 'preload'].map((id) => ({ ...endpoint, id, renderer: 'direct-gpu' }))) };
+  } });
+  await server.start();
+  t.after(() => server.close());
+  const invoke = (action) => invokeBridgeAction({ controlUrl: server.baseUrl, action });
+  const result = await invoke('engine-status');
+  assert.deepEqual(result.activeHosts, activeHosts);
+  assert.equal(result.injectorActive, true);
+  assert.deepEqual(result.engine.map(({ hostType, port }) => ({ hostType, port })), [
+    activeHosts[0], activeHosts[0], activeHosts[1], activeHosts[1],
+  ]);
+  await assert.rejects(invoke('inject'), (error) => {
+    assert.equal(error.message, 'inject failed');
+    assert.deepEqual(error.registeredHosts, [activeHosts[1]]);
+    return true;
+  });
+});

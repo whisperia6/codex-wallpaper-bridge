@@ -9,6 +9,7 @@ import { createConfigStore } from "./config-store.mjs";
 import { buildCurrentInjection } from "./injection-plan.mjs";
 import { createMediaServer } from "./media-server.mjs";
 import { openNativeEngineProvider } from "./native-engine-provider.mjs";
+import { NativeEngineDelivery } from "../../bridge-runtime/src/native-engine-delivery.mjs";
 import { scanWallpaperProjects } from "./scanner.mjs";
 import { eligibleProjects } from "../../bridge-runtime/src/library-policy.mjs";
 import { buildCompatibilityRestoreScript, buildCompatibilityScript } from "../../src/compatibility-script.mjs";
@@ -16,7 +17,8 @@ import { sceneAssetCache } from "../../bridge-runtime/src/scene-asset-cache.mjs"
 import { validateWebWallpaperInput } from "../../bridge-runtime/src/web-wallpaper-input.mjs";
 import { MediaMiddleware } from "../../bridge-runtime/src/media-middleware.mjs";
 import { LyricsStore } from "../../bridge-runtime/src/media-lyrics.mjs";
-import { hostDisplayName, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
+import { defaultCdpPort, hostDisplayName, hostPortConflict, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
+import { validateCdpPort } from "../../src/installations.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
@@ -31,7 +33,7 @@ function parseArguments(argv) {
   const firstArgument = args.shift();
   const command = firstArgument && !firstArgument.startsWith("-") ? firstArgument : "preview";
   if (firstArgument?.startsWith("-")) args.unshift(firstArgument);
-  const options = { command, cdpPort: 9335, hostType: "codex", open: true, once: false, keepOnExit: false };
+  const options = { command, hostType: "codex", open: true, once: false, keepOnExit: false };
   while (args.length) {
     const argument = args.shift();
     if (argument === "--no-open") options.open = false;
@@ -43,6 +45,7 @@ function parseArguments(argv) {
     else if (argument === "--help" || argument === "-h") options.help = true;
     else throw new Error(`未知参数：${argument}`);
   }
+  options.cdpPort ??= defaultCdpPort(options.hostType);
   if (!Number.isInteger(options.cdpPort) || options.cdpPort < 1024 || options.cdpPort > 65535) {
     throw new Error("--cdp-port 必须在 1024 到 65535 之间");
   }
@@ -95,16 +98,17 @@ async function chooseDefault(configStore, projects) {
   return config;
 }
 
-async function writeRuntime(server, options, scanResult, injectorActive) {
+async function writeRuntime(server, options, scanResult, { activeHosts, injectorActive }) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(runtimePath, JSON.stringify({
     schemaVersion: 1,
     pid: process.pid,
     command: options.command,
-    cdpPort: options.cdpPort,
+    cdpPort: activeHosts.length === 1 ? activeHosts[0].port : options.cdpPort,
     bridgeOrigin: server?.origin || null,
     projectRoot,
     injectorActive,
+    activeHosts,
     nativeEngineProviderConfigured: options.nativeEngineProviderConfigured === true,
     nativeSceneSelectionIntegrated: options.nativeEngineProviderConfigured === true,
     sceneRenderer: options.sceneRenderer || "preview-only",
@@ -159,10 +163,8 @@ async function main() {
   const directSceneEnabled = Boolean(nativeProvider) && sceneRenderer === "gpu";
   options.sceneRenderer = nativeProvider ? (directSceneEnabled ? "direct-gpu" : "vp8") : "preview-only";
 
-  let injector = null;
-  let activeHostType = options.hostType;
+  const injectors = new Map();
   let server;
-  let compatibility = null;
   let stopping = false;
   let operationQueue = Promise.resolve();
   const enqueueOperation = (task) => {
@@ -174,50 +176,130 @@ async function main() {
     operationQueue = operation.catch(() => {});
     return operation;
   };
-  const currentInjection = async () => ({
+  const activeInjectors = () => [...injectors.values()].filter(({ injector }) => injector.running);
+  // VP8 consumers share the provider's two source slots across both hosts.
+  const sharedNativeDelivery = nativeProvider && !directSceneEnabled ? new NativeEngineDelivery({
+    provider: nativeProvider,
+    onFailure: (failure) => console.log(`[CDP] native-frame-error：${JSON.stringify(failure)}`),
+    onReceiverLost: (session) => {
+      const owner = activeInjectors().find(({ injector }) => injector.sessions.get(session.target.id) === session);
+      owner?.injector.onNativeReceiverLost(session);
+    },
+  }) : null;
+  const runtimeState = () => {
+    const activeHosts = activeInjectors().map(({ hostType, port }) => ({ hostType, port }));
+    return { activeHosts, injectorActive: activeHosts.length > 0 };
+  };
+  const registeredHosts = () => [...injectors.values()].map(({ hostType, port }) => ({ hostType, port }));
+  const saveRuntime = () => writeRuntime(server, options, scanResult, runtimeState());
+  const runInjectorAction = async (task) => {
+    try {
+      const result = await task();
+      await saveRuntime();
+      return result;
+    } catch (error) {
+      error.registeredHosts = registeredHosts();
+      await saveRuntime().catch(() => console.error("桥接运行状态保存失败"));
+      throw error;
+    }
+  };
+  const assertPortAvailable = (hostType, port) => {
+    const owner = [...injectors.values()].find((entry) => entry.port === port && entry.hostType !== hostType);
+    if (owner) throw hostPortConflict(port, owner.hostType);
+  };
+  const verifyActionEndpoint = async (port, hostType) => {
+    if (nativeProvider?.verifyEndpoint && (await nativeProvider.verifyEndpoint(port, hostType))?.verified !== true) {
+      throw new Error("目标应用的 CDP 端口未通过身份核验");
+    }
+  };
+  const closeInjector = async ({ hostType, injector }, allowEndpointUnavailable = false) => {
+    injector.compatibilityRestoreScript ||= buildCompatibilityRestoreScript();
+    try {
+      await injector.close({ restore: true, ...(allowEndpointUnavailable ? { allowEndpointUnavailable } : {}) });
+    } catch (error) {
+      if (error.code === "CDP_RESTORATION_OWNER_UNVERIFIED") injectors.delete(hostType);
+      throw error;
+    }
+    injectors.delete(hostType);
+  };
+  const settleAll = (entries, operation) => Promise.allSettled(entries.map(async (entry) => operation(entry)));
+  const closeInjectors = async (allowEndpointUnavailable = false) => {
+    const results = await settleAll([...injectors.values()], (entry) => closeInjector(entry, allowEndpointUnavailable));
+    const errors = results.filter(({ status }) => status === "rejected");
+    if (errors.length) throw new Error(errors.map(({ reason }) => reason.message).join("；"));
+  };
+  const currentInjection = async ({ hostType, compatibility }) => ({
     ...await buildCurrentInjection(server, configStore, {
       nativeEnabled: Boolean(nativeProvider),
       directSceneEnabled,
-      hostType: activeHostType,
+      hostType,
     }),
     ...compatibility,
   });
   const media = new MediaMiddleware({ getConfig: () => configStore.get(),
     lyrics: new LyricsStore({ root: path.join(path.dirname(configStore.filePath), "media-lyrics") }),
-    onPower: power => injector?.updatePower(power),
-    dispatch: (id, input) => !stopping && injector?.running && directSceneEnabled
-      ? injector.sceneDelivery?.input(id, input) : null });
+    onPower: (power) => settleAll(activeInjectors(), ({ injector }) => injector.updatePower(power)),
+    dispatch: (id, input) => !stopping && directSceneEnabled ? dispatchInput(id, input) : null });
 
-  const refreshInjection = async ({ scan = false, allowDetached = false } = {}) => {
+  async function dispatchInput(id, input) {
+    const results = await settleAll(activeInjectors(), ({ injector }) => injector.sceneDelivery?.input(id, input));
+    const delivered = results.reduce((total, { value }) => total + (value?.delivered || 0), 0);
+    const status = delivered ? "dispatched" : results.some(({ value }) => value?.status === "unchanged") ? "unchanged" : "unavailable";
+    return { ok: true, status, delivered };
+  }
+
+  const refreshInjection = async ({ entries = activeInjectors(), scan = false, allowDetached = false, allowPartial = false, onDegraded } = {}) => {
     // Saving is a disk/renderer transaction, not an OS capture readiness gate.
     // The middleware owns this queued startup and close waits for it separately.
     void media.configure().catch(() => console.error("系统媒体初始化未完成；可在媒体状态中查看"));
-    if (!injector) return { ok: true, status: "preview-only" };
-    const injection = await currentInjection();
-    const result = scan ? await injector.update(injection, { scan: true }) : await injector.update(injection);
-    if (result.failed > 0 || (!allowDetached && result.sessions === 0 && !(result.deferred > 0))) {
-      throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
+    const results = await settleAll(entries, async (entry) => {
+      const injection = await currentInjection(entry);
+      const result = scan ? await entry.injector.update(injection, { scan: true }) : await entry.injector.update(injection);
+      if (result.failed > 0 || (!allowDetached && result.sessions === 0 && !(result.deferred > 0))) {
+        throw new Error(`一个或多个 ${hostDisplayName(entry.hostType)} renderer 未能完成注入验证`);
+      }
+      return {
+        ok: true,
+        applied: result.sessions,
+        status: result.sessions > 0 ? `updated:${result.sessions}` : result.deferred > 0 ? `deferred:${result.deferred}` : "detached",
+        deferred: result.deferred || 0,
+        metrics: injection.metrics,
+        timings: result.timings || [],
+      };
+    });
+    const applied = [];
+    const deferred = [];
+    const detached = [];
+    const failed = [];
+    for (const [index, result] of results.entries()) {
+      const { hostType } = entries[index];
+      if (result.status === "rejected") {
+        failed.push({ error: result.reason, hostType });
+        continue;
+      }
+      if (onDegraded && result.value.timings.some(({ degraded }) => degraded === true)) onDegraded(hostType);
+      if (result.value.applied > 0) applied.push(result.value);
+      else if (result.value.deferred > 0) deferred.push(result.value);
+      else detached.push(result.value);
     }
-    return {
-      ok: true,
-      status: result.sessions > 0 ? `updated:${result.sessions}` : result.deferred > 0 ? `deferred:${result.deferred}` : "detached",
-      deferred: result.deferred || 0,
-      metrics: injection.metrics,
-      timings: result.timings || []
-    };
+    if (failed.length && (!allowPartial || !applied.length)) throw failed[0].error;
+    for (const { error, hostType } of failed) console.error(`未能同步到 ${hostDisplayName(hostType)}：${error.message}`);
+    return applied[0] || deferred[0] || detached[0] || { ok: true, status: "preview-only" };
   };
 
-  const ensureInjector = async () => {
-    if (injector && (injector.hostType || "codex") !== activeHostType) {
-      await injector.close({ restore: false, allowEndpointUnavailable: true }).catch(() => {});
-      injector = null;
+  const ensureInjector = async ({ hostType, port, adaptive }) => {
+    let entry = injectors.get(hostType);
+    if (entry && entry.port !== port) {
+      await closeInjector(entry, true);
+      entry = null;
     }
-    if (!injector || injector.running === false) {
-      injector ||= new CdpWallpaperInjector({
-        port: options.cdpPort,
-        hostType: activeHostType,
+    if (!entry) {
+      const injector = new CdpWallpaperInjector({
+        port,
+        hostType,
         installOnNewDocument: !options.once,
         nativeProvider,
+        sharedNativeDelivery,
         sceneProvider: directSceneEnabled ? {
           onMediaControl: (id, value) => media.control({ ...value, projectId: id }),
           authorFiles: server.authorFiles,
@@ -230,29 +312,37 @@ async function main() {
         } : null,
         onStatus: (status) => {
           const suffix = status.message ? `：${status.message}` : "";
-          console.log(`[CDP] ${status.type}${suffix}`);
+          const detail = status.type === "attach-error" ? status.detail : null;
+          const diagnostic = detail ? ` (mediaState=${detail.mediaState}, switchFailure=${detail.switchFailure}, disposed=${detail.disposed}, domReady=${detail.domReady})` : "";
+          console.log(`[CDP] ${status.type}${suffix}${diagnostic}`);
         }
       });
-      try {
-        const injection = await currentInjection();
-        const result = await injector.start(injection);
-        await injector.updatePower((await media.snapshot()).power);
-        if (result.failed > 0) throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
-        if (result.sessions === 0 && !(result.deferred > 0)) {
-          throw new Error(`没有在 127.0.0.1:${options.cdpPort} 找到 ${hostDisplayName(activeHostType)} renderer；可先使用预览页`);
-        }
-        return { injector, started: true, deferred: result.deferred || 0, metrics: injection.metrics, timings: result.timings };
-      } catch (error) {
-        let cleanupFailed = false;
-        await injector.close({ restore: true }).catch((cleanupError) => {
-          cleanupFailed = true;
-          console.error(`清理失败：${cleanupError.message}`);
-        });
-        if (!cleanupFailed) injector = null;
-        throw error;
-      }
+      entry = { hostType, port, injector, compatibility: null };
+      injectors.set(hostType, entry);
     }
-    return { injector, started: false, metrics: null };
+    if (adaptive !== undefined) {
+      entry.compatibility = {
+        compatibilityScript: buildCompatibilityScript({ adaptive, hostType }),
+        compatibilityRestoreScript: buildCompatibilityRestoreScript(),
+      };
+    }
+    const { injector } = entry;
+    if (injector.running) return refreshInjection({ entries: [entry], scan: true });
+    try {
+      const injection = await currentInjection(entry);
+      const result = await injector.start(injection);
+      await injector.updatePower((await media.snapshot()).power);
+      if (result.failed > 0) throw new Error(`一个或多个 ${hostDisplayName(hostType)} renderer 未能完成注入验证`);
+      if (result.sessions === 0 && !(result.deferred > 0)) {
+        throw new Error(`没有在 127.0.0.1:${port} 找到 ${hostDisplayName(hostType)} renderer；可先使用预览页`);
+      }
+      return { deferred: result.deferred || 0, timings: result.timings || [] };
+    } catch (error) {
+      await closeInjector(entry).catch((cleanupError) => {
+        console.error(`清理失败：${cleanupError.message}`);
+      });
+      throw error;
+    }
   };
 
   try {
@@ -261,39 +351,46 @@ async function main() {
     publicDir,
     configStore,
     media,
-    onAuthorProperties: ({ operation, project, values }) => {
-      const delivery = directSceneEnabled && ["scene", "web"].includes(project.type) ? injector?.sceneDelivery : injector?.nativeDelivery;
-      return delivery ? delivery.properties(project.id, operation === "apply" ? values : null)
-        : { phase: "unavailable", method: "none", values: {} };
+    onAuthorProperties: async ({ operation, project, values }) => {
+      if (sharedNativeDelivery) return sharedNativeDelivery.properties(project.id, operation === "apply" ? values : null);
+      const results = await settleAll(activeInjectors(), ({ injector }) => {
+        const delivery = directSceneEnabled && ["scene", "web"].includes(project.type) ? injector.sceneDelivery : injector.nativeDelivery;
+        return delivery?.properties(project.id, operation === "apply" ? values : null);
+      });
+      const unavailable = { phase: "unavailable", method: "none", values: {} };
+      if (results.some(({ status }) => status === "rejected")) return { ...unavailable, phase: "failed" };
+      const reports = results.flatMap(({ value }) => value ? [value] : []);
+      const problem = reports.find(({ phase }) => phase !== "ready");
+      if (problem) return problem;
+      const first = reports[0];
+      return first && reports.every(({ values }) => JSON.stringify(values) === JSON.stringify(first.values)) ? first : unavailable;
     },
-    onConfigChange: () => enqueueOperation(() => refreshInjection({ allowDetached: true })),
+    onConfigChange: () => enqueueOperation(() => refreshInjection({ allowDetached: true, allowPartial: true })),
     // Speculation does not join the apply queue or install/reload any renderer.
-    onScenePreload: directSceneEnabled ? (id) => stopping || !injector?.running
-      ? { ok: true, status: "skipped", targets: 0 } : injector.preloadScene(id) : null,
+    onScenePreload: directSceneEnabled ? async (id) => {
+      const results = stopping ? [] : await settleAll(activeInjectors(), ({ injector }) => injector.preloadScene(id));
+      const targets = results.reduce((total, { value }) => total + (value?.targets || 0), 0);
+      const status = targets ? "preparing" : results.some(({ value }) => value?.status === "busy") ? "busy" : "skipped";
+      return { ok: true, status, targets };
+    } : null,
     onAction: (action, body = {}) => enqueueOperation(async () => {
       if (action === "inject") {
-        if (Object.hasOwn(body, "hostType")) {
-          activeHostType = normalizeHostType(body.hostType, { strict: true });
-        }
-        if (Object.hasOwn(body, "adaptive")) {
-          if (typeof body.adaptive !== "boolean") throw new Error("兼容模式必须是布尔值");
-          compatibility = {
-            compatibilityScript: buildCompatibilityScript({ adaptive: body.adaptive, hostType: activeHostType }),
-            compatibilityRestoreScript: buildCompatibilityRestoreScript(),
-          };
-        }
+        const hostType = normalizeHostType(body.hostType, { strict: true, fallback: options.hostType });
+        const port = validateCdpPort(Object.hasOwn(body, "port") ? body.port
+          : Object.hasOwn(body, "hostType") ? injectors.get(hostType)?.port ?? defaultCdpPort(hostType) : options.cdpPort);
+        if (body.adaptive !== undefined && typeof body.adaptive !== "boolean") throw new Error("兼容模式必须是布尔值");
         const startedAt = performance.now();
-        const state = await ensureInjector();
-        const update = state.started
-          ? { ok: true, metrics: state.metrics, timings: state.timings }
-          : await refreshInjection({ scan: true });
-        if (!update.ok) throw new Error(`一个或多个 ${hostDisplayName(activeHostType)} renderer 未能完成注入验证`);
-        await writeRuntime(server, options, scanResult, true);
+        const update = await runInjectorAction(async () => {
+          assertPortAvailable(hostType, port);
+          await verifyActionEndpoint(port, hostType);
+          return ensureInjector({ hostType, port, adaptive: body.adaptive });
+        });
         const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
-        const deferredTargets = update.deferred || state.deferred || 0;
+        const deferredTargets = update.deferred || 0;
         const degradedTargets = update.timings.filter(timing => timing.degraded === true).length;
         return {
           ok: true,
+          ...runtimeState(),
           message: `${degradedTargets ? `引擎失败，${degradedTargets} 个页面使用降级背景（需显式重试）` : "Runtime 与背景 DOM 已注入"}：${elapsedMs} ms；Scene 路径：${options.sceneRenderer}${deferredTargets ? `；${deferredTargets} 个隐藏页面等待显示后自动应用` : ""}`,
           deferredTargets,
           sceneRenderer: options.sceneRenderer,
@@ -302,62 +399,104 @@ async function main() {
         };
       }
       if (action === "restore") {
-        const restoreHostType = Object.hasOwn(body, "hostType")
-          ? normalizeHostType(body.hostType, { strict: true })
-          : activeHostType;
-        compatibility = null;
-        if (injector && (injector.hostType || "codex") === restoreHostType) {
-          const activeInjector = injector;
-          activeInjector.compatibilityRestoreScript ||= buildCompatibilityRestoreScript();
-          await activeInjector.close({ restore: true });
-          injector = null;
+        const hasHostType = Object.hasOwn(body, "hostType");
+        const requestedPort = Object.hasOwn(body, "port") ? validateCdpPort(body.port) : undefined;
+        let hostType = options.hostType;
+        if (hasHostType) {
+          hostType = normalizeHostType(body.hostType, { strict: true, fallback: options.hostType });
         } else {
-          if (injector) {
-            await injector.close({ restore: false, allowEndpointUnavailable: true }).catch(() => {});
-            injector = null;
+          const matchingEntry = requestedPort === undefined ? undefined
+            : [...injectors.values()].find(({ port }) => port === requestedPort);
+          if (matchingEntry) {
+            hostType = matchingEntry.hostType;
+          } else {
+            const active = activeInjectors();
+            if (active.length === 1) hostType = active[0].hostType;
           }
-          await restoreCdpWallpaper({
-            port: options.cdpPort,
-            hostType: restoreHostType,
-            compatibilityRestoreScript: buildCompatibilityRestoreScript(),
-          });
         }
-        await writeRuntime(server, options, scanResult, false);
-        return { ok: true, message: "已恢复官方外观", status: "restored" };
+        const entry = injectors.get(hostType);
+        const port = requestedPort ?? entry?.port ?? (hasHostType ? defaultCdpPort(hostType) : options.cdpPort);
+        assertPortAvailable(hostType, port);
+        if (entry && entry.port !== port) throw new Error(`${hostDisplayName(hostType)} 当前使用 CDP 端口 ${entry.port}，请用该端口恢复`);
+        await verifyActionEndpoint(port, hostType);
+        await runInjectorAction(async () => {
+          if (entry) await closeInjector(entry);
+          else await restoreCdpWallpaper({
+            port, hostType, compatibilityRestoreScript: buildCompatibilityRestoreScript(),
+            verifyEndpoint: nativeProvider?.verifyEndpoint
+              ? (selectedPort, purpose) => nativeProvider.verifyEndpoint(selectedPort, hostType, purpose)
+              : null,
+          });
+        });
+        return { ok: true, ...runtimeState(), message: "已恢复官方外观", status: "restored" };
       }
       if (action === "rescan") {
-        await injector?.preloadScene(null);
+        await settleAll(activeInjectors(), ({ injector }) => injector.preloadScene(null));
         sceneAssetCache.clear();
         scanResult = await scanWallpaperProjects({ explicitRoots: options.steamRoots, steamRoots: options.steamRoots });
         server.setProjects(scanResult.projects);
-        await chooseDefault(configStore, await server.projects());
-        await refreshInjection();
-        await writeRuntime(server, options, scanResult, Boolean(injector));
+        try {
+          await chooseDefault(configStore, await server.projects());
+          await refreshInjection({ allowDetached: true });
+        } finally {
+          await saveRuntime();
+        }
         return { ok: true, message: `已发现 ${scanResult.projects.length} 个项目`, status: "rescanned" };
       }
       if (action === "play" || action === "pause") {
         await configStore.set({ effects: { playing: action === "play" } });
-        await refreshInjection();
+        await refreshInjection({ allowDetached: true });
         return { ok: true, status: action };
       }
-      if (action === "engine-status") return { ok: true, sceneRenderer: options.sceneRenderer,
-        engine: [...(injector?.sceneDelivery?.diagnostics() || []), ...(injector?.nativeDelivery?.diagnostics() || []).map((entry) => ({ ...entry, renderer: "vp8" }))] };
+      if (action === "engine-status") {
+        const vp8Diagnostics = (delivery) => (delivery?.diagnostics() || []).map((entry) => ({ ...entry, renderer: "vp8" }));
+        const engine = [
+          ...vp8Diagnostics(sharedNativeDelivery),
+          ...activeInjectors().flatMap(({ hostType, port, injector }) => [
+            ...(injector.sceneDelivery?.diagnostics() || []),
+            ...vp8Diagnostics(sharedNativeDelivery ? null : injector.nativeDelivery),
+          ].map((entry) => ({ ...entry, hostType, port }))),
+        ];
+        return { ok: true, ...runtimeState(), sceneRenderer: options.sceneRenderer, engine };
+      }
+      if (action === "injection-status") {
+        return { ok: true, registeredHosts: registeredHosts() };
+      }
       if (action === "web-input") {
         const selectedId = configStore.get().selectedId;
-        if (!directSceneEnabled || !injector?.running || !injector.sceneDelivery || body.projectId !== selectedId
+        if (!directSceneEnabled || !activeInjectors().some(({ injector }) => injector.sceneDelivery) || body.projectId !== selectedId
           || Object.keys(body).some(key => !["action", "projectId", "input"].includes(key))) throw Error("web_input_unavailable");
         const selected = (await server.projects()).find(project => project.id === selectedId);
         if (selected?.type !== "web" || selected.eligible === false || selected.hidden) throw Error("web_input_unavailable");
-        return injector.sceneDelivery.input(selectedId, validateWebWallpaperInput(body.input));
+        return dispatchInput(selectedId, validateWebWallpaperInput(body.input));
       }
       if (action === "retry-engine") {
         const selectedId = configStore.get().selectedId;
-        if (!selectedId || (body.projectId !== undefined && body.projectId !== selectedId) || !injector?.nativeDelivery) throw new Error("当前场景无法重试");
+        const entries = activeInjectors().filter(({ injector }) => injector.nativeDelivery);
+        if (!selectedId || (body.projectId !== undefined && body.projectId !== selectedId) || !entries.length) throw new Error("当前场景无法重试");
         const selected = (await server.projects()).find((project) => project.id === selectedId);
-        if (directSceneEnabled && ["scene", "web"].includes(selected?.type)) await injector.retryScene(selectedId);
-        else await injector.retryNative(selectedId);
-        const update = await refreshInjection();
-        if (!update.ok) throw new Error("场景重试未完成，保留现有画面");
+        const retryScene = directSceneEnabled && ["scene", "web"].includes(selected?.type);
+        const sourceCleared = sharedNativeDelivery?.hasSourceFailure(selectedId) === true;
+        if (sourceCleared) await sharedNativeDelivery.retry(selectedId);
+        const results = await settleAll(entries, ({ injector }) => retryScene ? injector.retryScene(selectedId)
+          : injector.retryNative(selectedId, { retrySource: !sharedNativeDelivery }));
+        const failures = [];
+        const retried = entries.filter(({ hostType }, index) => {
+          const result = results[index];
+          if (result.status === "fulfilled") return sourceCleared || result.value.cleared;
+          failures.push(`${hostDisplayName(hostType)}：${result.reason.message}`);
+          return false;
+        });
+        if (retried.length) {
+          try {
+            await refreshInjection({
+              entries: retried,
+              onDegraded: (hostType) => failures.push(`${hostDisplayName(hostType)}：场景仍在使用降级背景`),
+            });
+          } catch (error) { failures.push(error.message); }
+        }
+        if (failures.length) throw new Error(`场景重试失败：${failures.join("；")}`);
+        if (!retried.length) return { ok: true, status: "engine-retry-skipped", message: "当前宿主场景无需重试" };
         return { ok: true, status: "engine-retried", message: "场景已显式重试" };
       }
       return { ok: false, message: `不支持的操作：${action}`, status: "unsupported" };
@@ -372,8 +511,8 @@ async function main() {
   if (scanResult.warnings.length) console.log(`扫描警告：${scanResult.warnings.length} 条（不会阻止可用项目）`);
 
   await enqueueOperation(async () => {
-    if (options.command === "inject") await ensureInjector();
-    await writeRuntime(server, options, scanResult, Boolean(injector));
+    if (options.command === "inject") await ensureInjector({ hostType: options.hostType, port: options.cdpPort });
+    await saveRuntime();
   });
   if (options.open) openExternal(server.baseUrl);
 
@@ -382,12 +521,11 @@ async function main() {
     stopping = true;
     console.log(`\n收到 ${signal}，正在清理...`);
     await operationQueue;
-    const activeInjector = injector;
-    injector = null;
     const errors = [];
     for (const cleanup of [
       () => media.close(),
-      () => activeInjector?.close({ restore: true, allowEndpointUnavailable: true }),
+      () => closeInjectors(true),
+      () => sharedNativeDelivery?.close(),
       () => server.close(),
       () => nativeProvider?.close(),
       () => rm(runtimePath, { force: true }),
@@ -403,7 +541,7 @@ async function main() {
   process.on("SIGTERM", () => void stop("SIGTERM"));
   await new Promise(() => {});
   } catch (error) {
-    for (const cleanup of [() => media.close(), () => injector?.close({ restore: true }), () => server?.close(), () => nativeProvider?.close()]) {
+    for (const cleanup of [() => media.close(), () => closeInjectors(), () => sharedNativeDelivery?.close(), () => server?.close(), () => nativeProvider?.close()]) {
       try { await cleanup(); } catch { console.error("启动失败后的自有资源清理未完成"); }
     }
     throw error;

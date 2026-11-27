@@ -44,6 +44,14 @@ export function hostDisplayName(hostType) {
   return normalizeHostType(hostType) === "antigravity" ? "Antigravity" : "Codex";
 }
 
+export function defaultCdpPort(hostType) {
+  return normalizeHostType(hostType) === "antigravity" ? 9336 : 9335;
+}
+
+export function hostPortConflict(port, hostType) {
+  return new Error(`CDP 端口 ${port} 已被 ${hostDisplayName(hostType)} 占用，请为两个应用使用不同的端口`);
+}
+
 export function isAllowedHostOrigin(origin, hostType = "codex") {
   const normalizedHost = normalizeHostType(hostType);
   if (typeof origin !== "string" || !origin) return false;

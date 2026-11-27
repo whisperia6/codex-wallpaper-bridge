@@ -3,6 +3,9 @@ import { hostDisplayName, isValidTargetUrlForHost, normalizeHostType } from "../
 
 const CDP_HOST = "127.0.0.1";
 const TARGET_SCORE_THRESHOLD = 10;
+const CODEX_TITLE_PATTERN = /\bcodex\b/i;
+const CHATGPT_TITLE_PATTERN = /\bchatgpt\b/i;
+const STORE_ENTRY_URL_PATTERN = /^app:\/\/-\/(?:index\.html)?$/i;
 const PROBE_EXPRESSION = `(() => {
   const semanticSelectors = [
     "[data-app-shell-left-panel-appearance]",
@@ -167,13 +170,20 @@ export function isAuxiliaryTarget(target, { hostType = "codex" } = {}) {
 
 export function scoreCodexTarget(target, probe = {}) {
   if (isAuxiliaryTarget(target, { hostType: "codex" })) return Number.NEGATIVE_INFINITY;
-  let score = 0;
-  if (/^app:\/\//i.test(String(target.url || ""))) score += 5;
-  if (/codex/i.test(String(target.title || ""))) score += 3;
-  if (probe.hasRoot) score += 3;
-  score += Math.min(6, Math.max(0, Number(probe.semanticHookCount) || 0));
-  score += Math.min(3, Math.max(0, Number(probe.composerHookCount) || 0) * 2);
-  if ((Number(probe.descendantCount) || 0) >= 200) score += 2;
+  const url = String(target.url || "");
+  if (!probe.hasRoot || /^app:\/\/settings(?:[/?#]|$)/i.test(url)) return Number.NEGATIVE_INFINITY;
+  const title = String(target.title || "");
+  const semanticHooks = Math.max(0, Number(probe.semanticHookCount) || 0);
+  const composerHooks = Math.max(0, Number(probe.composerHookCount) || 0);
+  const hasMainInterfaceSize = Number(probe.descendantCount) >= 200;
+  const storeRendererReady = STORE_ENTRY_URL_PATTERN.test(url) && CHATGPT_TITLE_PATTERN.test(title)
+    && (semanticHooks > 0 || composerHooks > 0 || hasMainInterfaceSize);
+  let score = 3;
+  if (/^app:\/\//i.test(url)) score += 5;
+  if (CODEX_TITLE_PATTERN.test(title) || storeRendererReady) score += 3;
+  score += Math.min(6, semanticHooks);
+  score += Math.min(3, composerHooks * 2);
+  if (hasMainInterfaceSize) score += 2;
   return score;
 }
 
@@ -295,7 +305,7 @@ export async function collectCdpDiagnostics(port, { hostType = "codex" } = {}) {
       id: target.id,
       titleMatchesCodex: normalizedHost === "antigravity"
         ? /antigravity/i.test(String(target.title || ""))
-        : /codex/i.test(String(target.title || "")),
+        : CODEX_TITLE_PATTERN.test(String(target.title || "")),
       type: target.type,
       url: target.url,
       score,
@@ -316,9 +326,9 @@ export async function isCdpEndpointReady(port) {
 }
 
 export async function waitForCodexTarget(port, {
-  timeoutMs = 30_000,
-  intervalMs = 150,
   hostType = "codex",
+  timeoutMs = normalizeHostType(hostType) === "codex" ? 45_000 : 30_000,
+  intervalMs = 150,
   inspectTargets = (selectedPort) => inspectCodexTargets(selectedPort, { hostType }),
   delayFn = delay,
   signal,

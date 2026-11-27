@@ -4,12 +4,13 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import { CdpWallpaperInjector } from '../bridge-overrides/src/cdp-injector.mjs';
 import { buildInjectionPlan } from '../bridge-overrides/src/injection-plan.mjs';
+import { buildRestoreScript } from '../bridge-overrides/src/injected-renderer.mjs';
 
 const descriptor = { origin: 'http://127.0.0.1:43123', basePath: '/1234567890abcdef1234567890abcdef' };
 const target = id => ({ id, type: 'page', url: 'app://-',
   webSocketDebuggerUrl: `ws://127.0.0.1:9335/devtools/page/${id}` });
 const source = await readFile(new URL('../bridge-overrides/src/injected-renderer.mjs', import.meta.url), 'utf8');
-const applySource = source.slice(source.indexOf('const apply = (payload) =>'), source.indexOf('const restore = async (options'));
+const applySource = source.slice(source.indexOf('const apply = (payload) =>'), source.indexOf('const restoreRuntime = async'));
 
 function mediaPlan(type = 'video', options = { nativeEnabled: true, directSceneEnabled: true }) {
   const project = { id: type, type, mediaUrl: `${descriptor.basePath}/api/video/${type}`,
@@ -18,19 +19,24 @@ function mediaPlan(type = 'video', options = { nativeEnabled: true, directSceneE
   return { ...plan, bootstrapScript: 'bootstrap', applyScript: 'apply' };
 }
 
-function fixture(t, { verified = true, decodeFailure = false, reportedState = null, forgedSuccess = false } = {}) {
+function fixture(t, { verified = true, decodeFailure = false, reportedState = null, forgedSuccess = false, applyFailures = [] } = {}) {
   const calls = [], statuses = [], sockets = [], targets = [target('main')];
   const injector = new CdpWallpaperInjector({ pollIntervalMs: 60000,
     verifyEndpoint: async () => { calls.push({ method: 'verify' }); return { verified }; },
     onStatus: event => statuses.push(event), socketFactory: () => {
       const globals = {};
+      globals.top = globals;
       let bypass = false, documentBypass = false;
       const socket = { closed: false, async connect() {},
         resetDocument() { documentBypass = false; },
         async call(method, params = {}, timeout) {
           calls.push({ method, params, timeout });
           if (method === 'Page.setBypassCSP') bypass = params.enabled;
-          if (method === 'Page.reload') { documentBypass = bypass; delete globals.__cwbDocumentReload; }
+          if (method === 'Page.reload') {
+            documentBypass = bypass;
+            delete globals.__cwbDocumentReload;
+            if (params.scriptToEvaluateOnLoad) runInNewContext(params.scriptToEvaluateOnLoad, { globalThis: globals });
+          }
           if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 'hook' };
           if (method === 'Runtime.callFunctionOn') return { result: params.returnByValue ? { value: true } : { objectId: 'receiver' } };
           if (method === 'Runtime.evaluate') {
@@ -39,6 +45,7 @@ function fixture(t, { verified = true, decodeFailure = false, reportedState = nu
             if (expression === 'bootstrap') return { result: params.returnByValue === false ? { objectId: 'boot' } : { value: { ready: true } } };
             if (expression.endsWith('.prepareTheme()')) return { result: { value: { state: 'dark', reloadRequired: false } } };
             if (expression === 'apply') {
+              if (applyFailures.length) return { result: { value: applyFailures.shift() } };
               const ok = documentBypass && !decodeFailure;
               return { result: { value: { ok: forgedSuccess || ok, runtimeReady: true, domReady: true, theme: { reloadRequired: false },
                 media: { state: reportedState || (ok ? 'ready' : 'error') }, switchResult: { ok, error: ok ? null : 'Media failed to load or decode' } } } };
@@ -113,11 +120,122 @@ test('unverified owned-media startup fails before any document mutation', async 
 
 test('first-media decode failure never emits injection-ready and cleans the initialized document', async t => {
   const f = fixture(t, { decodeFailure: true });
-  const result = await f.injector.start(mediaPlan());
+  const attach = f.injector.attach.bind(f.injector);
+  let attachError;
+  f.injector.attach = (...args) => attach(...args).catch(error => { attachError = error; throw error; });
+  const result = await f.injector.start({ ...mediaPlan(), compatibilityRestoreScript: 'restore-compatibility' });
   assert.equal(result.failed, 1); assert.equal(result.sessions, 0);
   assert.equal(f.statuses.some(event => event.type === 'injection-ready'), false);
-  assert.equal(f.calls.filter(c => c.method === 'Page.reload').length, 2);
+  assert.equal(f.calls.filter(c => c.params?.expression === 'apply').length, 2);
+  const reloads = f.calls.filter(c => c.method === 'Page.reload');
+  assert.equal(reloads.length, 3, 'initial reload, one retry, and CSP rollback');
   assert.equal(f.calls.findLast(c => c.method === 'Page.setBypassCSP').params.enabled, false);
+  const rollbackCsp = f.calls.findLastIndex(c => c.method === 'Page.setBypassCSP');
+  assert.ok(rollbackCsp < f.calls.indexOf(reloads[2]));
+  assert.ok(f.calls.slice(0, rollbackCsp).some(c => c.method === 'Page.removeScriptToEvaluateOnNewDocument' && c.params.identifier === 'hook'));
+  assert.ok(f.calls.slice(0, rollbackCsp).some(c => c.params?.expression === 'restore-compatibility'));
+  assert.ok(f.calls.slice(0, rollbackCsp).some(c => c.params?.expression === buildRestoreScript()));
+  assert.equal(f.sockets[0].closed, true);
+  assert.equal(attachError.message, 'Renderer DOM application verification failed');
+  assert.equal(attachError.cwbDisposed, false);
+  assert.equal(attachError.cwbDomReady, true);
+  assert.deepEqual(f.statuses.find(event => event.type === 'attach-error').detail, {
+    mediaState: 'error', switchFailure: 'media-load-or-decode', disposed: false, domReady: true,
+  });
+});
+
+for (const [kind, failure] of [
+  ['video', { ok: false, runtimeReady: true, domReady: true, mediaState: 'error', switchResult: { ok: false, error: 'Media failed to load or decode' } }],
+  ['image', { ok: false, disposed: true, domReady: false }],
+]) {
+  test(`cold-start ${kind} retries the first failed apply after refreshing CSP and reinstalling the runtime`, async t => {
+    const f = fixture(t, { applyFailures: [failure] });
+    const result = await f.injector.start(mediaPlan(kind));
+    assert.equal(result.failed, 0);
+    assert.equal(result.sessions, 1);
+    assert.equal(result.timings[0].reloads, 2);
+    assert.equal(f.statuses.some(event => event.type === 'attach-error'), false);
+    const firstApply = f.calls.findIndex(c => c.params?.expression === 'apply');
+    const lastApply = f.calls.findLastIndex(c => c.params?.expression === 'apply');
+    assert.equal(f.calls.filter(c => c.params?.expression === 'apply').length, 2);
+    assert.ok(lastApply > firstApply);
+    const retry = f.calls.slice(firstApply + 1, lastApply);
+    const [bypass, reload] = retry.filter(c => c.method === 'Page.reload' || c.method === 'Page.setBypassCSP');
+    assert.equal(bypass.method, 'Page.setBypassCSP');
+    assert.equal(bypass.params.enabled, true);
+    assert.equal(reload.method, 'Page.reload');
+    assert.ok(retry.findIndex(c => c.params?.expression === 'bootstrap') > retry.findIndex(c => c.method === 'Page.reload'));
+  });
+}
+
+test('cold-start retry skips runtime installation when restoration starts during reload', async t => {
+  const f = fixture(t, { applyFailures: [{ ok: false }] });
+  const evaluate = f.injector.evaluateScript.bind(f.injector);
+  const ensureRuntime = f.injector.ensureRuntime.bind(f.injector);
+  let restoreStart;
+  let runtimeCallsDuringRestore = 0;
+  f.injector.evaluateScript = async (session, expression, ...args) => {
+    const result = await evaluate(session, expression, ...args);
+    if (restoreStart === undefined && result === true && expression.startsWith('globalThis.__cwbDocumentReload')
+      && f.calls.some(c => c.params?.expression === 'apply')) {
+      restoreStart = f.calls.length;
+      f.injector.restoring = true;
+    }
+    return result;
+  };
+  f.injector.ensureRuntime = (...args) => {
+    if (f.injector.restoring) runtimeCallsDuringRestore += 1;
+    return ensureRuntime(...args);
+  };
+
+  const result = await f.injector.start(mediaPlan());
+
+  assert.equal(result.failed, 1);
+  assert.ok(restoreStart > 0, 'restoration started during the retry readiness probe');
+  assert.equal(f.statuses.find(event => event.type === 'attach-error')?.message, 'Renderer restoration is in progress');
+  assert.equal(runtimeCallsDuringRestore, 0);
+  assert.equal(f.calls.slice(restoreStart).some(c => c.method === 'Page.setBypassCSP' && c.params.enabled), false);
+  assert.equal(f.calls.filter(c => c.params?.expression === 'apply').length, 1);
+});
+
+test('reload readiness fails on the first probe after a CDP disconnect', async () => {
+  const injector = new CdpWallpaperInjector();
+  for (const [closed, message] of [
+    [true, 'Execution context was destroyed'],
+    [false, 'CDP socket closed'],
+    [false, 'CDP socket is not connected'],
+  ]) {
+    const disconnect = new Error(message);
+    const calls = [];
+    const socket = {
+      closed: false,
+      async call(method) {
+        calls.push(method);
+        if (method === 'Page.reload') {
+          this.closed = closed;
+          return {};
+        }
+        throw disconnect;
+      },
+    };
+    const started = performance.now();
+
+    await assert.rejects(injector.reloadDocument({ socket }), error => error === disconnect);
+
+    assert.deepEqual(calls, ['Page.reload', 'Runtime.evaluate']);
+    assert.ok(performance.now() - started < 1000, 'disconnect should reject well before the 8 s deadline');
+  }
+});
+
+test('attach-error sanitizes renderer values and reports a disposed document', async t => {
+  const privateValue = 'http://127.0.0.1:1234/private-path-and-body';
+  const failure = { ok: false, disposed: true, domReady: false, mediaState: privateValue, switchResult: { error: privateValue } };
+  const f = fixture(t, { applyFailures: [failure, failure] });
+  assert.equal((await f.injector.start(mediaPlan('image', {}))).failed, 1);
+  const event = f.statuses.find(status => status.type === 'attach-error');
+  assert.equal(event.message, 'Renderer DOM application verification failed');
+  assert.deepEqual(event.detail, { mediaState: 'unknown', switchFailure: 'unknown', disposed: true, domReady: false });
+  assert.ok(!JSON.stringify(event).includes(privateValue));
 });
 
 for (const reportedState of ['loading', 'error', 'play-rejected']) {
@@ -138,10 +256,11 @@ test('CDP verification rejects a failed switch even with a stale ready media sta
 function applyFixture() {
   let resolve;
   const gate = new Promise(done => { resolve = done; });
-  const context = { currentMediaIdentity: '', current: null, lastMediaOperation: null,
+  const context = { currentMediaIdentity: '', current: null, lastMediaOperation: null, disposed: false, pendingDomApply: null,
     normalizeEffects: v => v || {}, ensureDarkTheme: async () => ({ state: 'dark', reloadRequired: false }),
     document: { body: {}, hidden: false, documentElement: { dataset: {} }, getElementById: () => ({ dataset: {} }) },
-    ids: { root: 'root', media: 'media' }, ensureStyle() {}, ensureRoot() {}, applyVariables() {}, syncPlayback() {},
+    ids: { root: 'root', media: 'media' }, ensureStyle() {},
+    ensureRoot: () => ({ dataset: {} }), withoutShellObservation: write => write(), applyVariables() {}, syncPlayback() {},
     applyShellOverrides() {}, updateVisibilityHandler() {}, startObserver() {}, mediaState: { state: 'loading' },
     mediaIdentity: wallpaper => wallpaper?.id || '',
     mountMedia: () => gate.then(result => { context.mediaState.state = result.ok ? 'ready' : 'error'; return result; }),

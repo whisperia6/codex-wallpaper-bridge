@@ -61,6 +61,24 @@ test("preview URL is parsed from Chinese bridge output", () => {
   assert.equal(parseControlUrl(output), "http://127.0.0.1:43100/token/");
 });
 
+test("resident actions forward a validated optional CDP port", async (context) => {
+  const received = [];
+  context.mock.method(globalThis, "fetch", async (_url, { body }) => {
+    received.push(JSON.parse(body));
+    return { ok: true, json: async () => ({ ok: true }) };
+  });
+  const controlUrl = "http://127.0.0.1:43123/1234567890abcdef1234567890abcdef/";
+  await invokeBridgeAction({ controlUrl, action: "inject", port: "9336", hostType: "antigravity" });
+  await invokeBridgeAction({ controlUrl, action: "restore", port: 65535 });
+  for (const port of [1023, 65536, 9335.1, [9335], "port", null]) {
+    await assert.rejects(invokeBridgeAction({ controlUrl, action: "inject", port }), /端口/);
+  }
+  assert.deepEqual(received, [
+    { action: "inject", hostType: "antigravity", port: 9336 },
+    { action: "restore", port: 65535 },
+  ]);
+});
+
 test("resident injection forwards only a validated adaptive boolean, never arbitrary scripts", async (context) => {
   const received = [];
   context.mock.method(globalThis, "fetch", async (url, options) => {

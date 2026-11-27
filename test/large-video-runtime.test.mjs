@@ -47,6 +47,7 @@ function injection(id = "large-video") {
 function fakeSession() {
   const calls = [];
   const globals = {};
+  globals.top = globals;
   const eventHandlers = new Map();
   const session = {
     target: { id: "target-1" },
@@ -57,6 +58,7 @@ function fakeSession() {
         calls.push({ method, params });
         if (method === "Page.reload") {
           delete globals.__cwbDocumentReload;
+          if (params.scriptToEvaluateOnLoad) runInNewContext(params.scriptToEvaluateOnLoad, { globalThis: globals });
           queueMicrotask(() => {
             for (const handler of eventHandlers.get("Page.loadEventFired") || []) handler({});
           });
@@ -343,7 +345,7 @@ test("runtime switches to dark and restores the saved Codex appearance theme", (
   const bootstrap = buildBootstrapScript();
   const apply = buildApplyScript({ wallpaper: null });
   const restore = buildRestoreScript();
-  assert.match(bootstrap, /0\.6\.0-m3-media-policy-v4/);
+  assert.match(bootstrap, /0\.6\.0-m3-media-policy-v6/);
   assert.match(bootstrap, /vscode:\/\/codex\/\$\{operation\}/);
   assert.match(bootstrap, /get-setting/);
   assert.match(bootstrap, /set-setting/);

@@ -14,6 +14,8 @@ const currentTarget = {
   url: "app://-/index.html",
   webSocketDebuggerUrl: "ws://127.0.0.1/current",
 };
+const storeTarget = { ...currentTarget, id: "store-chatgpt", title: "ChatGPT" };
+const splashProbe = { hasRoot: true, semanticHookCount: 0, composerHookCount: 0, descendantCount: 17 };
 
 test('renderer wait stops on cancellation, including cancellation during inspection', async () => {
   const controller = new AbortController(); let queries = 0;
@@ -69,6 +71,36 @@ test("target scoring favors Codex semantic DOM instead of installation origin", 
   assert.ok(unrelatedScore < 10);
 });
 
+test("selectCodexTargets requires the Store renderer's main interface to mount", () => {
+  for (const url of [storeTarget.url, "app://-/"]) {
+    const target = { ...storeTarget, url };
+    for (const probe of [splashProbe, { ...splashProbe, descendantCount: 199 }]) {
+      assert.ok(scoreCodexTarget(target, probe) < 10);
+      assert.deepEqual(selectCodexTargets([{ target, probe }]), []);
+    }
+
+    for (const readyProbe of [{ semanticHookCount: 1 }, { composerHookCount: 1 }, { descendantCount: 200 }]) {
+      const probe = { ...splashProbe, ...readyProbe };
+      const score = scoreCodexTarget(target, probe);
+      assert.ok(score >= 10);
+      assert.deepEqual(selectCodexTargets([{ target, probe }]), [{ target, probe, score }]);
+    }
+  }
+});
+
+test("settings pages and pages without a root are below the renderer selection threshold", () => {
+  const probe = { ...splashProbe, semanticHookCount: 2, descendantCount: 200 };
+  const settings = { ...storeTarget, url: "app://settings/", title: "ChatGPT Settings" };
+  const rootlessProbe = { ...probe, hasRoot: false };
+
+  assert.ok(scoreCodexTarget(settings, probe) < 10);
+  assert.ok(scoreCodexTarget(storeTarget, rootlessProbe) < 10);
+  assert.deepEqual(selectCodexTargets([
+    { target: settings, probe },
+    { target: storeTarget, probe: rootlessProbe },
+  ]), []);
+});
+
 test("selectCodexTargets retains all renderer targets that pass the semantic threshold", () => {
   const targets = selectCodexTargets([
     { target: currentTarget, probe: { hasRoot: true, semanticHookCount: 6, composerHookCount: 1, descendantCount: 1000 } },
@@ -85,18 +117,21 @@ test("selectCodexTargets retains all renderer targets that pass the semantic thr
   assert.deepEqual(targets.map(({ target }) => target.id), ["current", "store"]);
 });
 
-test("waitForCodexTarget waits until a semantic renderer is ready", async () => {
+test("waitForCodexTarget keeps polling the Store splash page until the main interface mounts", async () => {
   let attempts = 0;
+  const readyProbe = { ...splashProbe, semanticHookCount: 2 };
   const targets = await waitForCodexTarget(9335, {
     timeoutMs: 1_000,
     intervalMs: 0,
     inspectTargets: async () => {
       attempts += 1;
-      return attempts < 3 ? [] : [{ target: currentTarget }];
+      const probe = attempts < 3 ? splashProbe : readyProbe;
+      return selectCodexTargets([{ target: storeTarget, probe }]);
     },
     delayFn: async () => {},
   });
 
   assert.equal(attempts, 3);
-  assert.equal(targets[0].target.id, "current");
+  assert.equal(targets[0].target.id, storeTarget.id);
+  assert.equal(targets[0].probe, readyProbe);
 });

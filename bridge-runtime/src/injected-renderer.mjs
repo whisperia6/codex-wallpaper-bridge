@@ -27,7 +27,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       return { ok: false, ready: false, version: null };
     }
     const KEY = "__codexWallpaperBridgeRuntime";
-    const VERSION = "0.6.0-m3-media-policy-v4";
+    const VERSION = "0.6.0-m3-media-policy-v6";
     let nativeController = null;
     let sceneController = null;
 
@@ -39,10 +39,17 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         style: "codex-wallpaper-bridge-style"
       };
       let current = null;
+      let disposed = false;
+      let restorePromise = null;
+      let pendingDomApply = null;
       const nativeMedia = nativeEnabled && !directSceneEnabled ? createEngineMediaTransport(resolvePlayback) : null;
       const sceneMedia = directSceneEnabled ? createDirectSceneTransport(createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput, resolvePlayback) : null;
       if (nativeMedia) nativeController = { accept: nativeMedia.accept, fail: nativeMedia.fail, state: nativeMedia.state, retry: nativeMedia.retry, close: nativeMedia.close };
       let observer = null;
+      let shellTimer = null;
+      let writingShellDom = false;
+      let needsShellMount = false;
+      const dirtyShellRoots = new Set();
       let visibilityHandler = null;
       let currentMediaIdentity = null;
       let scenePreload = null;
@@ -52,9 +59,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const themeStorageKey = "__codexWallpaperBridgeOriginalThemeV1";
       const allowedThemes = new Set(["system", "light", "dark"]);
       let themeActivationPromise = null;
+      let themeActivationController = null;
       let themeState = "idle";
       let fallbackThemeClasses = null;
       let themeObserver = null;
+      let themeTimer = null;
 
       const createChunkAssembler = () => {
         const unset = Symbol("unset");
@@ -175,7 +184,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         return transfer.assembler.finish();
       };
 
-      const requestHostSetting = (operation, params, timeoutMs = 1_500) => {
+      const requestHostSetting = (operation, params, signal) => {
         const bridge = globalThis.electronBridge;
         if (typeof bridge?.sendMessageFromView !== "function") {
           return Promise.reject(new Error("Codex host bridge is unavailable"));
@@ -190,8 +199,10 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             settled = true;
             clearTimeout(timer);
             removeEventListener("message", onMessage);
+            signal?.removeEventListener("abort", onAbort);
             callback(value);
           };
+          const onAbort = () => finish(reject, signal.reason);
           const onMessage = (event) => {
             let message;
             try { message = receiveChunk(transfers, event.data); }
@@ -212,17 +223,22 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           };
           const timer = setTimeout(
             () => finish(reject, new Error(`Codex ${operation} request timed out`)),
-            timeoutMs
+            1_500
           );
           addEventListener("message", onMessage);
-          Promise.resolve(bridge.sendMessageFromView({
-            type: "fetch",
-            requestId,
-            method: "POST",
-            url: `vscode://codex/${operation}`,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(params)
-          })).catch((error) => finish(reject, error));
+          signal?.addEventListener("abort", onAbort, { once: true });
+          try {
+            Promise.resolve(bridge.sendMessageFromView({
+              type: "fetch",
+              requestId,
+              method: "POST",
+              url: `vscode://codex/${operation}`,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(params)
+            })).catch((error) => finish(reject, error));
+          } catch (error) {
+            finish(reject, error);
+          }
         });
       };
 
@@ -253,6 +269,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const stopThemeObserver = () => {
         themeObserver?.disconnect();
         themeObserver = null;
+        if (themeTimer !== null) clearTimeout(themeTimer);
+        themeTimer = null;
       };
 
       const syncFallbackThemeDom = (theme) => {
@@ -277,11 +295,28 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             colorSchemePriority: html.style?.getPropertyPriority("color-scheme") || ""
           };
         }
-        syncFallbackThemeDom(theme);
         stopThemeObserver();
-        if (theme === "dark" && typeof MutationObserver === "function") {
+        syncFallbackThemeDom(theme);
+        if (!disposed && theme === "dark" && typeof MutationObserver === "function") {
+          const needsDarkTheme = () => html.getAttribute?.("data-theme") !== "dark" ||
+            !html.classList.contains("electron-dark") || html.classList.contains("electron-light");
           themeObserver = new MutationObserver(() => {
-            if (fallbackThemeClasses) syncFallbackThemeDom("dark");
+            if (themeTimer !== null || !needsDarkTheme()) return;
+            themeTimer = setTimeout(() => {
+              themeTimer = null;
+              if (!needsDarkTheme()) return;
+              try {
+                syncFallbackThemeDom("dark");
+              } finally {
+                themeObserver?.takeRecords();
+              }
+              // Let host observers settle before checking whether they rejected
+              // the correction. Yield to the host if it keeps overriding us.
+              themeTimer = setTimeout(() => {
+                themeTimer = null;
+                if (needsDarkTheme()) stopThemeObserver();
+              }, 16);
+            }, 16);
           });
           themeObserver.observe(html, { attributes: true, attributeFilter: ["data-theme", "class"] });
         }
@@ -306,36 +341,55 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         fallbackThemeClasses = null;
       };
 
-      const waitForThemePaint = () => new Promise((resolve) => setTimeout(resolve, 35));
+      const waitForThemePaint = (signal) => new Promise((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, 35);
+        signal?.addEventListener("abort", finish, { once: true });
+      });
+      const disposedTheme = { state: "disposed", originalTheme: null, reloadRequired: false };
 
       const ensureDarkTheme = () => {
+        if (disposed) return Promise.resolve(disposedTheme);
         if (isAntigravity) {
           themeState = "host-managed";
           return Promise.resolve({ state: themeState, originalTheme: null, reloadRequired: false });
         }
         if (themeActivationPromise) return themeActivationPromise;
+        themeActivationController = new AbortController();
+        const { signal } = themeActivationController;
         themeActivationPromise = (async () => {
           themeState = "reading";
           let saved = readSavedTheme();
           if (!saved) {
             let originalTheme;
             try {
-              const result = await requestHostSetting("get-setting", { key: "appearanceTheme" });
-              originalTheme = allowedThemes.has(result?.value) ? result.value : effectiveTheme();
-            } catch {
-              originalTheme = effectiveTheme();
+              const result = await requestHostSetting("get-setting", { key: "appearanceTheme" }, signal);
+              originalTheme = result?.value;
+            } catch {}
+            if (disposed) return disposedTheme;
+            if (!allowedThemes.has(originalTheme)) {
+              applyFallbackTheme("dark");
+              themeState = "dark-fallback";
+              return { state: themeState, originalTheme: null, reloadRequired: false };
             }
             saved = { originalTheme, effectiveTheme: effectiveTheme() };
             saveOriginalTheme(saved);
           }
           try {
             themeState = "switching";
-            await requestHostSetting("set-setting", { key: "appearanceTheme", value: "dark" });
+            await requestHostSetting("set-setting", { key: "appearanceTheme", value: "dark" }, signal);
+            if (disposed) return disposedTheme;
             restoreFallbackTheme();
-            if (effectiveTheme() !== "dark") await waitForThemePaint();
+            if (effectiveTheme() !== "dark") await waitForThemePaint(signal);
+            if (disposed) return disposedTheme;
             if (effectiveTheme() === "dark") themeState = "dark";
             else themeState = "dark-reload-required";
           } catch {
+            if (disposed) return disposedTheme;
             applyFallbackTheme("dark");
             themeState = "dark-fallback";
           }
@@ -390,36 +444,48 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         sidebar: 'aside:is(.app-shell-left-panel, [data-app-shell-left-panel-appearance], [data-ds-part="sidebar"])',
         header: 'header:is(.app-header-tint, [data-app-shell-application-menu-bar], [data-app-shell-header-edge-scroll], [data-pip-obstacle="app-shell-header"], [data-ds-part="header"], [class*="_Header_"])'
       };
+      const shellSelector = `${shellSelectors.sidebar}, ${shellSelectors.header}`;
+      const clearShellSurface = `
+        background-color: transparent !important;
+        background-image: none !important;
+        border-color: transparent !important;
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+        box-shadow: none !important;
+      `;
+      const composerChrome = `:is(.composer-surface-chrome, [class*="_ComposerLayoutRoot_"],
+        [data-composer-surface-variant][data-composer-radius-variant])`;
+      const threadBackdrop = `
+        div:has(> [data-thread-scroll-footer]),
+        div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
+        div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop])
+      `;
+      const outsideDialogs = ":not(dialog, [role=\"dialog\"], [role=\"alertdialog\"], dialog *, [role=\"dialog\"] *, [role=\"alertdialog\"] *)";
 
+      const transparentShell = {
+        "background-color": "transparent",
+        "background-image": "none",
+        "border-top-color": "transparent",
+        "border-right-color": "transparent",
+        "border-bottom-color": "transparent",
+        "border-left-color": "transparent",
+        "backdrop-filter": "none",
+        "-webkit-backdrop-filter": "none",
+        "box-shadow": "none"
+      };
+      const frostedBackdrop = "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)";
       const shellInlineStyles = {
-        sidebar: {
-          "background-color": "transparent",
-          "background-image": "none",
-          "border-color": "transparent",
-          "border-right-color": "transparent",
-          "backdrop-filter": "none",
-          "-webkit-backdrop-filter": "none",
-          "box-shadow": "none"
-        },
+        sidebar: transparentShell,
+        header: transparentShell,
         sidebarFrosted: {
+          ...transparentShell,
           "background-color": "rgba(12, 16, 24, 0.22)",
-          "background-image": "none",
-          "border-color": "transparent",
           "border-right-color": "rgba(255, 255, 255, 0.07)",
-          "backdrop-filter": "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)",
-          "-webkit-backdrop-filter": "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)",
-          "box-shadow": "none"
-        },
-        header: {
-          "background-color": "transparent",
-          "background-image": "none",
-          "border-color": "transparent",
-          "border-bottom-color": "transparent",
-          "backdrop-filter": "none",
-          "-webkit-backdrop-filter": "none",
-          "box-shadow": "none"
+          "backdrop-filter": frostedBackdrop,
+          "-webkit-backdrop-filter": frostedBackdrop
         }
       };
+      const normalizedShellStyles = new Map();
 
       let power = { onBattery: false };
       const defaults = {
@@ -576,34 +642,12 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               border-color: transparent !important;
               box-shadow: none !important;
             }
-            html[data-codex-wallpaper-bridge="active"] body > #root aside:is(
-              .app-shell-left-panel,
-              [data-app-shell-left-panel-appearance],
-              [data-ds-part="sidebar"]
-            ),
-            html[data-codex-wallpaper-bridge="active"] aside:is(
-              .app-shell-left-panel,
-              [data-app-shell-left-panel-appearance],
-              [data-ds-part="sidebar"]
-            ) {
-              background-color: transparent !important;
-              background-image: none !important;
-              border-color: transparent !important;
-              -webkit-backdrop-filter: none !important;
-              backdrop-filter: none !important;
-              box-shadow: none !important;
+            html[data-codex-wallpaper-bridge="active"] body > #root ${shellSelectors.sidebar},
+            html[data-codex-wallpaper-bridge="active"] ${shellSelectors.sidebar} {
+              ${clearShellSurface}
             }
-            html[data-codex-wallpaper-bridge="active"] :is(
-              .composer-surface-chrome,
-              [class*="_ComposerLayoutRoot_"],
-              [data-composer-surface-variant][data-composer-radius-variant]
-            ) {
-              background-color: transparent !important;
-              background-image: none !important;
-              border-color: transparent !important;
-              -webkit-backdrop-filter: none !important;
-              backdrop-filter: none !important;
-              box-shadow: none !important;
+            html[data-codex-wallpaper-bridge="active"] ${composerChrome} {
+              ${clearShellSurface}
             }
             /* Restore the native composer surface so the input and controls share one tone. */
             html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] [data-composer-body] {
@@ -623,33 +667,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               + [data-pip-obstacle="thread-footer"]
             ),
             html[data-codex-wallpaper-bridge="active"] [data-above-composer-portal] [class*="bg-gradient-to-t"][class*="from-surface"],
-            html[data-codex-wallpaper-bridge="active"] :is(
-              div:has(> [data-thread-scroll-footer]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop])
-            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *),
-            html[data-codex-wallpaper-bridge="active"] :is(
-              div:has(> [data-thread-scroll-footer]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop]),
-              [data-thread-scroll-footer]
-            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *)::before,
-            html[data-codex-wallpaper-bridge="active"] :is(
-              div:has(> [data-thread-scroll-footer]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
-              div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop]),
-              [data-thread-scroll-footer]
-            ):not(dialog, [role="dialog"], [role="alertdialog"], dialog *, [role="dialog"] *, [role="alertdialog"] *)::after,
-            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] :is(
-              .composer-surface-chrome,
-              [class*="_ComposerLayoutRoot_"],
-              [data-composer-surface-variant][data-composer-radius-variant]
-            )::before,
-            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] :is(
-              .composer-surface-chrome,
-              [class*="_ComposerLayoutRoot_"],
-              [data-composer-surface-variant][data-composer-radius-variant]
-            )::after {
+            html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop})${outsideDialogs},
+            html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop}, [data-thread-scroll-footer])${outsideDialogs}::before,
+            html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop}, [data-thread-scroll-footer])${outsideDialogs}::after,
+            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}::before,
+            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}::after {
               background: transparent !important;
               background-color: transparent !important;
               background-image: none !important;
@@ -662,12 +684,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               [class*="bg-surface-elevated-secondary/50"],
               [class*="bg-background-primary-soft/50"]
             ) {
-              background-color: transparent !important;
-              background-image: none !important;
-              border-color: transparent !important;
-              -webkit-backdrop-filter: none !important;
-              backdrop-filter: none !important;
-              box-shadow: none !important;
+              ${clearShellSurface}
             }
             html[data-codex-wallpaper-bridge="active"] [data-app-shell-page-surface] {
               --app-shell-content-fade: none !important;
@@ -679,35 +696,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               [class*="app-shell-content-fade"]
             ) {
               background: transparent !important;
-              background-color: transparent !important;
-              background-image: none !important;
-              border-color: transparent !important;
-              -webkit-backdrop-filter: none !important;
-              backdrop-filter: none !important;
-              box-shadow: none !important;
+              ${clearShellSurface}
             }
-            html[data-codex-wallpaper-bridge="active"] body > #root header:is(
-              .app-header-tint,
-              [data-app-shell-application-menu-bar],
-              [data-app-shell-header-edge-scroll],
-              [data-pip-obstacle="app-shell-header"],
-              [data-ds-part="header"],
-              [class*="_Header_"]
-            ),
-            html[data-codex-wallpaper-bridge="active"] header:is(
-              .app-header-tint,
-              [data-app-shell-application-menu-bar],
-              [data-app-shell-header-edge-scroll],
-              [data-pip-obstacle="app-shell-header"],
-              [data-ds-part="header"],
-              [class*="_Header_"]
-            ) {
-              background-color: transparent !important;
-              background-image: none !important;
-              border-color: transparent !important;
-              -webkit-backdrop-filter: none !important;
-              backdrop-filter: none !important;
-              box-shadow: none !important;
+            html[data-codex-wallpaper-bridge="active"] body > #root ${shellSelectors.header},
+            html[data-codex-wallpaper-bridge="active"] ${shellSelectors.header} {
+              ${clearShellSurface}
             }
           `;
           (document.head || document.documentElement).appendChild(style);
@@ -718,11 +711,31 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const restoreShellElement = (element) => {
         const saved = shellInlineState.get(element);
         if (!saved) return;
-        for (const [property, previous] of saved) {
-          if (previous.value) {
-            element.style.setProperty(property, previous.value, previous.priority);
-          } else {
-            element.style.removeProperty(property);
+        if (saved.originalText !== null) {
+          const style = element.style;
+          // Keep whole declarations so pending var() shorthands survive the merge.
+          const host = document.createElement("div").style;
+          host.cssText = style.cssText;
+          for (const property of saved.properties.keys()) host.removeProperty(property);
+          const currentProperties = new Set(Array.from(style));
+          const hostProperties = new Set(Array.from(host));
+          const restored = document.createElement("div").style;
+          restored.cssText = saved.originalText;
+          for (const property of Array.from(restored)) {
+            // Current CSSOM may still contain pending longhands of an original
+            // shorthand that it can no longer serialize after our overrides.
+            if (!saved.properties.has(property) && (
+              !currentProperties.has(property) || hostProperties.has(property)
+            )) restored.removeProperty(property);
+          }
+          style.cssText = restored.cssText + " " + host.cssText;
+        } else {
+          for (const [property, previous] of saved.properties) {
+            if (previous.value) {
+              element.style.setProperty(property, previous.value, previous.priority);
+            } else {
+              element.style.removeProperty(property);
+            }
           }
         }
         shellInlineState.delete(element);
@@ -730,18 +743,32 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
 
       const applyShellElement = (element, kind) => {
         if (!element?.style) return;
-        let saved = shellInlineState.get(element);
-        if (!saved) {
-          saved = new Map();
-          shellInlineState.set(element, saved);
-        }
-        for (const [property, value] of Object.entries(shellInlineStyles[kind])) {
-          if (!saved.has(property)) {
-            saved.set(property, {
-              value: element.style.getPropertyValue(property),
-              priority: element.style.getPropertyPriority(property)
-            });
+        let properties = normalizedShellStyles.get(kind);
+        if (!properties) {
+          // Compare using the same CSSOM serialization as the host's inline styles.
+          const style = document.createElement("div").style;
+          for (const [property, value] of Object.entries(shellInlineStyles[kind])) {
+            style.setProperty(property, value, "important");
           }
+          properties = Object.keys(shellInlineStyles[kind])
+            .map((property) => [property, style.getPropertyValue(property)])
+            .filter(([, value]) => value !== "");
+          normalizedShellStyles.set(kind, properties);
+        }
+        if (!shellInlineState.has(element)) {
+          // Snapshot every original longhand before writing any CSSOM aliases.
+          const previous = new Map(properties.map(([property]) => [property, {
+            value: element.style.getPropertyValue(property),
+            priority: element.style.getPropertyPriority(property)
+          }]));
+          const hasPendingValue = Array.from(element.style).some((property) =>
+            previous.get(property)?.value === "");
+          shellInlineState.set(element, {
+            properties: previous,
+            originalText: hasPendingValue ? element.getAttribute("style") : null
+          });
+        }
+        for (const [property, value] of properties) {
           if (
             element.style.getPropertyValue(property) !== value ||
             element.style.getPropertyPriority(property) !== "important"
@@ -766,12 +793,25 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         }
       };
 
+      const withoutShellObservation = (write) => {
+        const activeObserver = observer;
+        if (!activeObserver || writingShellDom) return write();
+        writingShellDom = true;
+        try {
+          // Keep host records queued before this synchronous bridge write.
+          collectShellMutations(activeObserver.takeRecords());
+          return write();
+        } finally {
+          activeObserver.takeRecords();
+          writingShellDom = false;
+        }
+      };
+
       const applyShellOverrides = (scope = document) => {
         if (isAntigravity) return;
         if (scope?.nodeType === 1) refreshShellElement(scope);
         if (!scope?.querySelectorAll) return;
-        const selector = `${shellSelectors.sidebar}, ${shellSelectors.header}`;
-        for (const element of scope.querySelectorAll(selector)) refreshShellElement(element);
+        for (const element of scope.querySelectorAll(shellSelector)) refreshShellElement(element);
       };
 
       const restoreShellOverrides = () => {
@@ -1111,7 +1151,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         document.documentElement.setAttribute("data-cwb-sidebar-blur", effects.sidebarBlur === false ? "off" : "on");
       };
 
-      const ensureMounted = () => {
+      const ensureMounted = () => withoutShellObservation(() => {
+        if (disposed) return;
         ensureStyle();
         const root = ensureRoot();
         if (!root || !current) return;
@@ -1122,7 +1163,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           mediaSwitcher.clear(); void mountMedia(current.wallpaper);
         }
         applyVariables(current.effects);
-      };
+      });
 
       const updateVisibilityHandler = () => {
         if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
@@ -1138,55 +1179,54 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         document.addEventListener("visibilitychange", visibilityHandler);
       };
 
-      const startObserver = () => {
-        if (observer || !document.body) return;
-        let queued = false;
-        let needsEnsure = false;
-        const dirtyRoots = new Set();
+      const collectShellMutations = (mutations) => {
         const markDirty = (node) => {
-          if (node?.nodeType === 1 || node?.nodeType === 9 || node?.nodeType === 11) {
-            dirtyRoots.add(node);
-          }
+          if (node?.nodeType === 1) dirtyShellRoots.add(node);
         };
         const containsBridgeMedia = (node) => {
           if (node?.nodeType !== 1) return false;
           return node.id === ids.root || node.id === ids.media ||
             Boolean(node.querySelector?.(`#${ids.root}, #${ids.media}`));
         };
-        observer = new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            if (mutation.type === "childList") {
-              for (const removed of mutation.removedNodes) {
-                if (containsBridgeMedia(removed)) needsEnsure = true;
-                if (removed?.nodeType === 1) {
-                  for (const element of [...shellInlineState.keys()]) {
-                    if (removed === element || removed.contains(element)) restoreShellElement(element);
-                  }
+        for (const mutation of mutations) {
+          if (mutation.type === "childList") {
+            for (const removed of mutation.removedNodes) {
+              if (containsBridgeMedia(removed)) needsShellMount = true;
+              if (removed?.nodeType === 1) {
+                for (const element of shellInlineState.keys()) {
+                  if (removed.contains(element)) markDirty(element);
                 }
               }
-              for (const added of mutation.addedNodes) markDirty(added);
-            } else if (mutation.type === "attributes") {
-              if (
-                mutation.attributeName !== "style" ||
-                shellInlineState.has(mutation.target) ||
-                mutation.target.matches?.(`${shellSelectors.sidebar}, ${shellSelectors.header}`)
-              ) {
-                markDirty(mutation.target);
-              }
             }
+            for (const added of mutation.addedNodes) markDirty(added);
+          } else if (mutation.type === "attributes" && (
+            mutation.attributeName !== "style" ||
+            shellInlineState.has(mutation.target) ||
+            mutation.target.matches?.(shellSelector)
+          )) {
+            markDirty(mutation.target);
           }
-          if (queued || (!needsEnsure && dirtyRoots.size === 0)) return;
-          queued = true;
-          queueMicrotask(() => {
-            queued = false;
-            const ensure = needsEnsure;
-            needsEnsure = false;
-            const roots = [...dirtyRoots];
-            dirtyRoots.clear();
+        }
+        if (shellTimer !== null || (!needsShellMount && dirtyShellRoots.size === 0)) return;
+        shellTimer = setTimeout(() => {
+          withoutShellObservation(() => {
+            shellTimer = null;
+            const ensure = needsShellMount;
+            needsShellMount = false;
+            const roots = [...dirtyShellRoots];
+            dirtyShellRoots.clear();
             if (ensure) ensureMounted();
-            for (const root of roots) applyShellOverrides(root);
+            for (const root of roots) {
+              if (document.body?.contains(root)) applyShellOverrides(root);
+              else restoreShellElement(root);
+            }
           });
-        });
+        }, 16);
+      };
+
+      const startObserver = () => {
+        if (observer || !document.body) return;
+        observer = new MutationObserver(collectShellMutations);
         observer.observe(document.body, {
           childList: true,
           subtree: true,
@@ -1204,6 +1244,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       };
 
       const apply = (payload) => {
+        const wallpaperId = payload?.wallpaper?.id || null;
+        const disposedResult = { ok: false, disposed: true, wallpaperId };
+        if (disposed) return disposedResult;
+        if (pendingDomApply) removeEventListener("DOMContentLoaded", pendingDomApply);
+        pendingDomApply = null;
         const requested = {
           wallpaper: payload?.wallpaper || null,
           fallbackReason: ["embedded_video", "custom_static", "preview", "empty"].includes(payload?.fallbackReason) ? payload.fallbackReason : null,
@@ -1212,44 +1257,64 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         current = requested;
         const themePromise = ensureDarkTheme();
         const run = async () => {
-          document.documentElement.dataset.codexWallpaperBridge = "active";
-          ensureStyle();
-          ensureRoot();
-          const root = document.getElementById(ids.root);
-          if (requested.fallbackReason) root.dataset.cwbFallback = requested.fallbackReason;
-          else delete root.dataset.cwbFallback;
-          const mediaOperation = mountMedia(current.wallpaper);
-          lastMediaOperation = mediaOperation;
-          applyVariables(current.effects);
-          syncPlayback();
-          applyShellOverrides();
+          if (disposed) return disposedResult;
+          const mediaOperation = withoutShellObservation(() => {
+            document.documentElement.dataset.codexWallpaperBridge = "active";
+            ensureStyle();
+            const root = ensureRoot();
+            if (requested.fallbackReason) root.dataset.cwbFallback = requested.fallbackReason;
+            else delete root.dataset.cwbFallback;
+            const operation = mountMedia(current.wallpaper);
+            lastMediaOperation = operation;
+            applyVariables(current.effects);
+            syncPlayback();
+            applyShellOverrides();
+            return operation;
+          });
           updateVisibilityHandler();
           startObserver();
           const theme = await themePromise;
+          if (disposed) return disposedResult;
           const switchResult = await mediaOperation;
+          if (disposed) return disposedResult;
           return {
             ok: switchResult?.ok === true,
             deferred: requested === current && requested.wallpaper?.playable === "direct-gpu"
               && document.hidden && switchResult?.cancelled === true,
             switchResult,
-            wallpaperId: payload?.wallpaper?.id || null,
+            wallpaperId,
             domReady: Boolean(document.getElementById(ids.root) && document.getElementById(ids.media)),
             mediaState: mediaState.state,
             theme
           };
         };
         if (document.body) return run();
-        addEventListener("DOMContentLoaded", () => { void run(); }, { once: true });
-        return { ok: true, pendingDom: true, wallpaperId: payload?.wallpaper?.id || null };
+        pendingDomApply = () => {
+          pendingDomApply = null;
+          void run();
+        };
+        addEventListener("DOMContentLoaded", pendingDomApply, { once: true });
+        return { ok: true, pendingDom: true, wallpaperId };
       };
 
-      const restore = async (options = {}) => {
+      const restoreRuntime = async (options) => {
+        if (pendingDomApply) removeEventListener("DOMContentLoaded", pendingDomApply);
+        pendingDomApply = null;
+        observer?.disconnect();
+        observer = null;
+        if (shellTimer !== null) clearTimeout(shellTimer);
+        shellTimer = null;
+        needsShellMount = false;
+        dirtyShellRoots.clear();
         stopThemeObserver();
+        if (options.preserveTheme) {
+          themeActivationController?.abort();
+          if (fallbackThemeClasses && !readSavedTheme()) restoreFallbackTheme();
+        }
         const theme = options.preserveTheme
           ? { state: themeState, preserved: true, reloadRequired: false }
           : await restoreOriginalTheme();
-        observer?.disconnect();
-        observer = null;
+        stopThemeObserver();
         if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
         visibilityHandler = null;
         restoreShellOverrides();
@@ -1270,7 +1335,17 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         document.documentElement.style.removeProperty("--cwb-shell-sheen-bottom");
         current = null;
         themeActivationPromise = null;
+        themeActivationController = null;
         return { ok: true, theme, cspReloadRequired: sceneMedia?.used() === true };
+      };
+
+      const restore = (options = {}) => {
+        if (!restorePromise) {
+          // Once teardown starts, only a fresh runtime can accept another apply.
+          disposed = true;
+          restorePromise = restoreRuntime(options);
+        }
+        return restorePromise;
       };
 
       return {
@@ -1288,18 +1363,24 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         waitForMedia: () => lastMediaOperation,
         status: () => ({ ...mediaState, switch: mediaSwitcher.status(), theme: themeState,
           playback: resolvePlayback(current?.effects || {}, { hidden: document.hidden === true, inactive: !current }) }),
-        ready: true,
+        get ready() { return !disposed; },
         hostType,
         version: VERSION
       };
     };
 
     let runtime = globalThis[KEY];
-    if (!runtime || runtime.version !== VERSION || runtime.hostType !== hostType || nativeEnabled || directSceneEnabled) {
+    while (!runtime?.ready || runtime.version !== VERSION || runtime.hostType !== hostType || nativeEnabled || directSceneEnabled) {
       // Finish the previous runtime's DOM teardown before installing a new one.
       try { await runtime?.restore?.({ preserveTheme: true }); } catch {}
+      const installed = globalThis[KEY];
+      if (installed && installed !== runtime) {
+        runtime = installed;
+        continue;
+      }
       runtime = createRuntime();
       globalThis[KEY] = runtime;
+      break;
     }
     return { ok: true, ready: runtime.ready === true, version: runtime.version, hostType: runtime.hostType, transport: nativeController, sceneTransport: sceneController };
 }
@@ -1315,7 +1396,10 @@ export function buildBootstrapScript({ nativeEnabled = false, directSceneEnabled
   const engine = nativeEnabled && !directSceneEnabled ? createEngineMediaTransport.toString() : 'null';
   const gpu = directSceneEnabled ? [createDirectSceneTransport, createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput]
     .map(fn => fn.toString()).join(', ') : 'null, null, null, null, null';
-  return `(${rendererBootstrap.toString()})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true}, ${JSON.stringify(normalizedHostType)})`;
+  // The bootstrap's multiline literals contain CSS and iframe markup where
+  // leading indentation is insignificant. Omit it from the CDP payload.
+  const bootstrap = rendererBootstrap.toString().replace(/^ {4}/gm, "");
+  return `(${bootstrap})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true}, ${JSON.stringify(normalizedHostType)})`;
 }
 
 export function buildApplyScript(payload = {}) {
@@ -1325,14 +1409,14 @@ export function buildApplyScript(payload = {}) {
       throw new Error("Codex wallpaper runtime is not ready");
     }
     const result = await runtime.apply(${safePayload(payload)});
-    const fallback = ${JSON.stringify(payload.waitForMedia === true)};
+    const fallback = !result.disposed && ${JSON.stringify(payload.waitForMedia === true)};
     const loaded = fallback ? await runtime.waitForMedia() : null;
     return {
       ...result,
       ...(fallback ? { ok: loaded?.ok === true, degraded: true, fallbackReason: ${JSON.stringify(payload.fallbackReason || null)} } : {}),
       runtimeReady: true,
       runtimeVersion: runtime.version,
-      domReady: Boolean(
+      domReady: !result.disposed && Boolean(
         document.getElementById("codex-wallpaper-bridge-root") &&
         (document.getElementById("codex-wallpaper-bridge-media") || (fallback && ${JSON.stringify(payload.fallbackReason === 'empty')}))
       ),
@@ -1349,7 +1433,9 @@ export function buildRestoreScript() {
   return `(async () => {
     const runtime = globalThis[${JSON.stringify(GLOBAL_KEY)}];
     const result = await (runtime?.restore?.() || { ok: true, alreadyRestored: true });
-    try { delete globalThis[${JSON.stringify(GLOBAL_KEY)}]; } catch {}
+    if (globalThis[${JSON.stringify(GLOBAL_KEY)}] === runtime) {
+      try { delete globalThis[${JSON.stringify(GLOBAL_KEY)}]; } catch {}
+    }
     return result;
   })()`;
 }

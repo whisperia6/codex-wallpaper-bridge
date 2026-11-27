@@ -23,7 +23,18 @@ function validValues(values) {
 function validRequest(request) {
   if (!record(request) || request.channel !== CHANNEL || !Number.isSafeInteger(request.sequence) || request.sequence < 1) return false;
   let keys = ['channel', 'sequence', 'op'];
-  if (request.op === 'verify-endpoint') { keys.push('port'); if (!Number.isInteger(request.port) || request.port < 1024 || request.port > 65535) return false; }
+  if (request.op === 'verify-endpoint') {
+    keys.push('port');
+    if (!Number.isInteger(request.port) || request.port < 1024 || request.port > 65535) return false;
+    if (Object.hasOwn(request, 'hostType')) {
+      keys.push('hostType');
+      if (!['codex', 'antigravity'].includes(request.hostType)) return false;
+    }
+    if (Object.hasOwn(request, 'purpose')) {
+      keys.push('purpose');
+      if (request.purpose !== 'restore' || !request.hostType) return false;
+    }
+  }
   else if (['create', 'retry'].includes(request.op)) { keys.push('projectId'); if (!projectId(request.projectId)) return false; }
   else if (['ready', 'capture', 'capture-vp8', 'pause', 'resume', 'properties', 'release', 'pointer', 'volume'].includes(request.op)) {
     keys.push('handle'); if (!handleId(request.handle)) return false;
@@ -86,7 +97,7 @@ export function serveEngineProvider({ peer, resolveProject, createOwner, retryPr
       return { cleared: true };
     }
     if (request.op === 'verify-endpoint') {
-      try { if (typeof verifyEndpoint !== 'function' || (await verifyEndpoint(request.port))?.verified !== true || closed) throw Error(); }
+      try { if (typeof verifyEndpoint !== 'function' || (await verifyEndpoint(request.port, request.hostType, request.purpose))?.verified !== true || closed) throw Error(); }
       catch { throw failure('endpoint_unverified'); }
       return { verified: true };
     }
@@ -234,6 +245,10 @@ export function createEngineProviderClient({ port, timeoutMs = 60000 }) {
   port.on('message', receive);
   return { create, close,
     retry: (projectId) => request('retry', { projectId }),
-    async verifyEndpoint(port) { const result = await request('verify-endpoint', { port }); if (result?.verified !== true) throw failure('endpoint_unverified'); return result; },
+    async verifyEndpoint(port, hostType, purpose) {
+      const result = await request('verify-endpoint', { port, ...(hostType === undefined ? {} : { hostType }), ...(purpose === undefined ? {} : { purpose }) });
+      if (result?.verified !== true) throw failure('endpoint_unverified');
+      return result;
+    },
     status: () => ({ closed, pending: pending.size }) };
 }

@@ -1,37 +1,44 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { runInNewContext } from 'node:vm';
+import { embeddedHostHarness as harness, embeddedTargetControls } from '../test-support/desktop-ui.mjs';
 import test from 'node:test';
 
-async function harness({ saving = false, error = false } = {}) {
-  const source = await readFile(new URL('../bridge-overrides/public/electron-host.js', import.meta.url), 'utf8');
-  const handlers = {};
-  const messages = [];
-  const fetches = [];
-  const requests = [];
-  let time = 1000;
-  const indicator = { classList: { contains: (name) => name === 'is-saving' ? saving : name === 'is-error' ? error : false } };
-  const window = {
-    parent: { postMessage: (value, origin) => messages.push({ ...value, _targetOrigin: origin }) }, location: { href: 'http://127.0.0.1:30000/secret/' },
-    addEventListener: (name, handler) => { handlers[name] = handler; },
-    setTimeout: (callback, duration) => { time += duration; queueMicrotask(callback); }, clearTimeout() {},
-    fetch: (...args) => { requests.push(args); return new Promise((resolve) => fetches.push(resolve)); },
-  };
-  const documentHandlers = {};
-  class Element { closest(selector) { this.selector = selector; return true; } }
-  const document = { documentElement: { dataset: {} }, head: { append() {} }, createElement: () => ({}),
-    addEventListener(name, handler) { documentHandlers[name] = handler; }, querySelector: (selector) => selector === '#saveIndicator' ? indicator : null };
-  runInNewContext(source, { window, document, URL, Date: { now: () => time }, Element, MutationObserver: class {}, Set, Map });
-  async function flush(id) {
-    handlers.message({ source: window.parent, origin: 'cwb-desktop://shell', data: { channel: 'cwb-control', action: 'flush-config', requestId: id } });
-    for (let count = 0; count < 600; count++) {
-      if (messages.some((item) => item.type === 'flush-complete' && item.requestId === id)) break;
-      await Promise.resolve();
-    }
-    return messages.find((item) => item.type === 'flush-complete' && item.requestId === id);
+test('embedded target dropdown recalls ports and forwards an occupied port only if reconciliation is pending', async () => {
+  const controls = embeddedTargetControls();
+  const h = await harness({ controls });
+  h.handlers.DOMContentLoaded();
+  const occupied = { installationId: 'codex', hostType: 'codex', port: 19335 };
+  const sendState = (target) => h.handlers.message({ source: h.window.parent, origin: 'cwb-desktop://shell', data: {
+    channel: 'cwb-control', type: 'desktop-state', state: {
+      installations: [{ id: 'codex' }, { id: 'store' }, { id: 'ag', hostType: 'antigravity' }],
+      selectedId: 'codex', port: 19335, portsByHost: { codex: 19335 },
+      activeInjectionTargets: [target],
+    },
+  } });
+  sendState(occupied);
+  const select = controls['#desktopInstallationSelect'], input = controls['#desktopPortInput'];
+  select.value = 'ag'; select.events.change();
+  assert.equal(input.value, '9336');
+  assert.equal(h.messages.at(-1).type, 'target-change');
+  assert.equal(h.messages.at(-1).port, 9336);
+  for (const id of ['ag', 'store']) {
+    select.value = id;
+    input.value = '19335';
+    controls['#desktopApplyButton'].events.click();
+    assert.match(controls['#desktopApplyStatus'].textContent, /19335.*Codex.*不同的端口/);
+    assert.equal(h.messages.some(({ type }) => type === 'desktop-request'), false);
   }
-  return { window, messages, fetches, requests, flush, documentHandlers, handlers, Element };
-}
+  select.value = 'codex'; select.events.change();
+  assert.equal(input.value, '19335');
+  sendState({ ...occupied, reconcilePending: true });
+  select.value = 'ag';
+  input.value = '19335';
+  controls['#desktopApplyButton'].events.click();
+  const request = h.messages.find(({ type }) => type === 'desktop-request');
+  assert.equal(request.action, 'apply');
+  assert.equal(request.payload.installationId, 'ag');
+  assert.equal(request.payload.port, 19335);
+});
 
 test('theme changes notify only a UI preference, never write configuration or request an apply', async () => {
   const h = await harness();

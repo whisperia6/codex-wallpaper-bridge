@@ -41,7 +41,7 @@ import { createPreviewSession, stopPreviewProcess } from "./preview-session.mjs"
 import { createDesktopEngineHost } from "./desktop-engine-host.mjs";
 import { registerDesktopRendererScheme, installDesktopRendererProtocol } from "./desktop-renderer-protocol.mjs";
 import { DESKTOP_RENDERER_URL } from "../bridge-runtime/src/desktop-origin.mjs";
-import { extractPreservedLaunchArgs, hostDisplayName, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
+import { defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName, hostPortConflict, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererRoot = path.join(here, "renderer");
@@ -58,29 +58,29 @@ let shutdownRequested = false;
 let shutdownComplete = false;
 let shutdownPromise = null;
 let hasShownTrayNotice = false;
+const defaultPortsByHost = () => Object.fromEntries(HOST_TYPES.map((hostType) => [hostType, defaultCdpPort(hostType)]));
+let migratedLegacyPort = null;
+let selectedHostType = "codex";
 let settings = {
   manualExecutables: [],
   selectedId: null,
-  port: 9335,
+  port: defaultCdpPort("codex"),
+  portsByHost: defaultPortsByHost(),
   adaptive: true,
   preservedLaunchArgs: {},
 };
 let activeOperation = null;
 let settingsPath = null;
+let settingsWriteQueue = Promise.resolve();
 let logsRoot = null;
 let bridgeRoot = null;
 let logWriteQueue = Promise.resolve();
 let nativeEngineHost = null;
-// Cache only the selected executable descriptor, never a successful PID/port
-// ownership result. Background CDP attachments still perform a fresh check.
-let verifiedEndpointInstallation = null;
-let pendingOwnerCheck = null;
-let codexTakeover = null;
-let codexProcessMonitor = null;
-let latestCodexSnapshot = null;
-let takeoverTask = null;
-let takeoverContext = null;
-let takeoverRunning = false;
+// Keep executable descriptors for the resident bridge. Every attachment still verifies ownership.
+const verifiedEndpointInstallations = new Map();
+const pendingOwnerChecks = new Map();
+const takeovers = new Map();
+let controlSessionPort = null;
 const preservedLaunchArgs = new Map();
 const previewSession = createPreviewSession({
   start: (port, { onChild }) => startBridgePreview({
@@ -94,6 +94,7 @@ const previewSession = createPreviewSession({
   stop: stopPreviewProcess,
   validateUrl: assertTrustedControlUrl,
   onDisconnected: () => {
+    verifiedEndpointInstallations.clear();
     if (!isQuitting) mainWindow?.webContents.send("cwb:tray-action", "control-disconnected");
   },
 });
@@ -108,16 +109,12 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
   const bridgeEnv = { ...process.env, ...acceptanceContext?.bridgeEnv };
   if (ownedNativeProvider) nativeEngineHost ??= createDesktopEngineHost({
     electron: { BrowserWindow, session, nativeImage, ipcMain }, env: bridgeEnv,
-    verifyEndpoint: async (port) => {
-      let installation = verifiedEndpointInstallation?.port === port
-        && verifiedEndpointInstallation.installation.id === settings.selectedId
-        ? verifiedEndpointInstallation.installation : null;
-      if (!installation) {
-        const state = await currentState();
-        installation = state.installations.find(({ id }) => id === state.selectedId);
+    verifyEndpoint: async (port, hostType, purpose) => {
+      const installation = verifiedEndpointInstallations.get(port)?.installation;
+      if (!installation || (hostType !== undefined && installationHostType(installation) !== hostType)) {
+        throw new Error("此 CDP 端口只允许连接已核验的目标应用");
       }
-      if (!installation) throw new Error("没有所选的目标应用");
-      await verifySelectedOwner(installation, port);
+      await verifySelectedOwner(installation, port, { restoring: purpose === "restore" });
       return { verified: true };
     },
   });
@@ -209,11 +206,13 @@ function getPreservedLaunchArgs(installationId) {
 async function loadSettings() {
   try {
     const parsed = JSON.parse(await readFile(settingsPath, "utf8"));
-    let savedPort = 9335;
-    try {
-      savedPort = validateCdpPort(parsed.port ?? 9335);
-    } catch {
-      savedPort = 9335;
+    const portsByHost = defaultPortsByHost();
+    for (const hostType of HOST_TYPES) {
+      try { portsByHost[hostType] = validateCdpPort(parsed.portsByHost?.[hostType]); } catch {}
+    }
+    // Resolve legacy port ownership once the saved installation has been discovered.
+    if (!parsed.portsByHost) {
+      try { migratedLegacyPort = validateCdpPort(parsed.port); } catch {}
     }
     const savedArgs = sanitizeSavedLaunchArgs(parsed.preservedLaunchArgs);
     preservedLaunchArgs.clear();
@@ -221,7 +220,8 @@ async function loadSettings() {
     settings = {
       manualExecutables: Array.isArray(parsed.manualExecutables) ? parsed.manualExecutables : [],
       selectedId: typeof parsed.selectedId === "string" ? parsed.selectedId : null,
-      port: savedPort,
+      port: migratedLegacyPort ?? portsByHost.codex,
+      portsByHost,
       adaptive: parsed.adaptive !== false,
       preservedLaunchArgs: savedArgs,
     };
@@ -230,16 +230,22 @@ async function loadSettings() {
     settings = {
       manualExecutables: [],
       selectedId: null,
-      port: 9335,
+      port: defaultCdpPort("codex"),
+      portsByHost: defaultPortsByHost(),
       adaptive: true,
       preservedLaunchArgs: {},
     };
   }
 }
 
-async function saveSettings() {
-  await mkdir(path.dirname(settingsPath), { recursive: true });
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+function saveSettings() {
+  const contents = JSON.stringify(settings, null, 2);
+  const write = settingsWriteQueue.then(async () => {
+    await mkdir(path.dirname(settingsPath), { recursive: true });
+    await writeFile(settingsPath, contents, "utf8");
+  });
+  settingsWriteQueue = write.catch(() => {});
+  return write;
 }
 
 async function currentState({ forceRefresh = false } = {}) {
@@ -247,19 +253,34 @@ async function currentState({ forceRefresh = false } = {}) {
     manualExecutables: settings.manualExecutables,
     forceRefresh,
   });
+  if (migratedLegacyPort !== null) {
+    const legacyHostType = installationHostType(installations.find(({ id }) => id === settings.selectedId));
+    settings.portsByHost[legacyHostType] = migratedLegacyPort;
+    migratedLegacyPort = null;
+  }
   settings.selectedId = selectInstallationId(installations, settings.selectedId);
+  selectedHostType = installationHostType(installations.find(({ id }) => id === settings.selectedId));
+  settings.port = settings.portsByHost[selectedHostType];
   return {
     installations,
     selectedId: settings.selectedId,
     hasStoreInstall: installations.some(({ kind }) => kind === "store"),
     activeOperation,
+    activeInjectionTargets: activeInjectionTargets(),
     port: settings.port,
+    portsByHost: { ...settings.portsByHost },
+    defaultPortsByHost: defaultPortsByHost(),
     adaptive: settings.adaptive,
   };
 }
 
-async function rememberOperationSettings({ port, adaptive } = {}) {
-  if (port !== undefined) settings.port = validateCdpPort(port);
+async function rememberOperationSettings({ installation, port, adaptive } = {}) {
+  if (installation) {
+    settings.selectedId = installation.id;
+    selectedHostType = installationHostType(installation);
+  }
+  if (port !== undefined) settings.portsByHost[selectedHostType] = validateCdpPort(port);
+  settings.port = settings.portsByHost[selectedHostType];
   if (adaptive !== undefined) settings.adaptive = Boolean(adaptive);
   await saveSettings();
 }
@@ -298,8 +319,6 @@ async function resolveInstallation(installationId, snapshot = null) {
   const state = snapshot ?? await currentState();
   const installation = state.installations.find(({ id }) => id === installationId);
   if (!installation) throw new Error("请选择有效的目标应用");
-  settings.selectedId = installation.id;
-  await saveSettings();
   return installation;
 }
 
@@ -337,6 +356,7 @@ async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
     createdAt: new Date().toISOString(),
     note: "自动兼容诊断不采集对话正文，仅包含版本、DOM 语义命中和表面样式摘要。",
     reason: sanitizeLogText(reason),
+    port: Number.isInteger(port) ? port : null,
     collectionError,
     installation: installation ? {
       id: installation.id,
@@ -354,19 +374,25 @@ async function writeCompatibilityDiagnostic({ port, installationId, reason }) {
   return diagnosticPath;
 }
 
-async function injectOnceAtPort({ port, adaptive, hostType = "codex", signal }) {
+async function injectOnceAtPort({ installation, port, adaptive, signal }) {
   signal?.throwIfAborted();
   assertNotQuitting();
   const startedAt = performance.now();
   const control = await measureStartupPhase("control", () => ensureControlPanel(port));
   assertNotQuitting();
   signal?.throwIfAborted();
+  const hostType = installationHostType(installation);
+  await reconcileEndpointRegistrations();
+  signal?.throwIfAborted();
+  assertNotQuitting();
+  const binding = rememberEndpoint(installation, port);
   const injection = await measureStartupPhase("apply", () => invokeBridgeAction({
-    controlUrl: control.url,
-    action: "inject",
-    adaptive: Boolean(adaptive),
-    hostType,
-  }));
+    controlUrl: control.url, action: "inject", adaptive: Boolean(adaptive), hostType, port,
+  })).catch(async (error) => {
+    await reconcileEndpointError(binding, error, control.url);
+    throw error;
+  });
+  forgetReleasedEndpoints(hostType, [{ hostType, port }]);
   const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
   return {
     compatibility: injection.compatibility || [],
@@ -482,33 +508,122 @@ function assertNotQuitting() {
   if (shutdownRequested) throw new Error("正在退出，不能启动新的壁纸操作");
 }
 
-async function verifySelectedOwner(installation, port) {
-  assertNotQuitting();
+async function verifySelectedOwner(installation, port, { restoring = false } = {}) {
+  if (!restoring) assertNotQuitting();
+  if (!installation) throw new Error("没有所选的目标应用");
+  assertAcceptanceTarget(installation, port);
+  const expected = acceptanceContext?.expectedHost;
+  const key = JSON.stringify([installation.id, path.win32.normalize(installation.path).toLowerCase(), port, restoring]);
+  // Coalesce overlapping identical queries only. A settled promise is removed,
+  // so reconnects and subsequent operations can never inherit stale ownership.
+  if (pendingOwnerChecks.has(key)) return pendingOwnerChecks.get(key);
+  const query = Promise.resolve().then(() => verifyCdpEndpointOwner({
+    installation, port,
+    ...(expected ? { expectedProcess: { pid: expected.pid, creation: expected.creation, profile: expected.profile } } : {}),
+  })).then((result) => {
+    if (!restoring) assertNotQuitting();
+    return result;
+  }).finally(() => {
+    pendingOwnerChecks.delete(key);
+  });
+  pendingOwnerChecks.set(key, query);
+  return query;
+}
+
+function assertAcceptanceTarget(installation, port) {
   const expected = acceptanceContext?.expectedHost;
   if (acceptanceContext && (!expected || port !== expected.port
     || path.win32.normalize(installation.path).toLowerCase() !== path.win32.normalize(expected.exe).toLowerCase())) {
     throw new Error("独立验收只允许 target.json 指定的测试宿主和端口");
   }
-  const key = JSON.stringify([installation.id, path.win32.normalize(installation.path).toLowerCase(), port]);
-  // Coalesce overlapping identical queries only. A settled promise is removed,
-  // so reconnects and subsequent operations can never inherit stale ownership.
-  if (pendingOwnerCheck?.key === key) return pendingOwnerCheck.promise;
-  const record = { key, promise: null };
-  record.promise = Promise.resolve().then(() => verifyCdpEndpointOwner({
-    installation, port,
-    ...(expected ? { expectedProcess: { pid: expected.pid, creation: expected.creation, profile: expected.profile } } : {}),
-  })).then((result) => {
-    assertNotQuitting();
-    verifiedEndpointInstallation = { port, installation: { id: installation.id, path: installation.path } };
-    return result;
-  }).catch((error) => {
-    verifiedEndpointInstallation = null;
-    throw error;
-  }).finally(() => {
-    if (pendingOwnerCheck === record) pendingOwnerCheck = null;
-  });
-  pendingOwnerCheck = record;
-  return record.promise;
+}
+
+function assertPortAvailable(installation, port) {
+  const assigned = verifiedEndpointInstallations.get(port)?.installation;
+  if (assigned && assigned.id !== installation.id) {
+    throw hostPortConflict(port, installationHostType(assigned));
+  }
+}
+
+function rememberEndpoint(installation, port) {
+  assertPortAvailable(installation, port);
+  const existing = verifiedEndpointInstallations.get(port);
+  if (existing) return existing;
+  const binding = { port, installation: {
+    id: installation.id, path: installation.path, hostType: installationHostType(installation),
+  }, registered: false };
+  verifiedEndpointInstallations.set(port, binding);
+  return binding;
+}
+
+function activeInjectionTargets() {
+  return [...verifiedEndpointInstallations.values()].filter(({ registered }) => registered)
+    .map(({ port, installation, reconcileUrl }) => ({
+      port, installationId: installation.id, hostType: installation.hostType,
+      ...(reconcileUrl ? { reconcilePending: true } : {}),
+    }));
+}
+
+function assertRestoreTarget(installation, port) {
+  const hostType = installationHostType(installation);
+  const owner = [...verifiedEndpointInstallations.values()].find((binding) =>
+    binding.registered && binding.installation.hostType === hostType
+    && (binding.port !== port || binding.installation.id !== installation.id));
+  if (owner) {
+    throw new Error(`${hostDisplayName(hostType)} 当前使用 CDP 端口 ${owner.port}，请选择原安装及该端口恢复`);
+  }
+  const takeover = takeovers.get(hostType);
+  if (takeover && !takeover.controller.signal.aborted
+    && (takeover.port !== port || takeover.installation.id !== installation.id)) {
+    throw new Error(`${hostDisplayName(hostType)} 正在 CDP 端口 ${takeover.port} 自动接管，请选择原安装及该端口恢复`);
+  }
+  assertPortAvailable(installation, port);
+}
+
+function forgetReleasedEndpoints(hostType, registeredHosts) {
+  for (const [port, binding] of verifiedEndpointInstallations) {
+    if (binding.installation.hostType !== hostType) continue;
+    if (!registeredHosts.some((entry) => entry.hostType === hostType && entry.port === port)) {
+      verifiedEndpointInstallations.delete(port);
+    } else {
+      binding.registered = true;
+      binding.reconcileUrl = null;
+    }
+  }
+}
+
+async function reconcileEndpointRegistrations() {
+  const pending = [...verifiedEndpointInstallations.values()].filter(({ reconcileUrl }) => reconcileUrl);
+  if (!pending.length) return;
+  try {
+    const status = await invokeBridgeAction({ controlUrl: pending[0].reconcileUrl, action: "injection-status" });
+    if (!Array.isArray(status.registeredHosts)) return;
+    for (const binding of pending) {
+      if (verifiedEndpointInstallations.get(binding.port) === binding) {
+        forgetReleasedEndpoints(binding.installation.hostType, status.registeredHosts);
+      }
+    }
+  } catch {
+    // Retain the verification binding while the bridge outcome is unknown.
+    // The next operation retries reconciliation or the child exit clears it.
+  }
+}
+
+async function reconcileEndpointError(binding, error, controlUrl) {
+  if (verifiedEndpointInstallations.get(binding.port) !== binding) return;
+  if (Array.isArray(error.registeredHosts)) {
+    forgetReleasedEndpoints(binding.installation.hostType, error.registeredHosts);
+  } else if (error.notExecuted === true || (error.statusCode >= 400 && error.statusCode < 500)) {
+    if (!binding.registered && !binding.reconcileUrl) verifiedEndpointInstallations.delete(binding.port);
+  } else {
+    binding.reconcileUrl = controlUrl;
+    for (const previous of verifiedEndpointInstallations.values()) {
+      if (previous.registered && previous.installation.hostType === binding.installation.hostType) {
+        previous.reconcileUrl = controlUrl;
+      }
+    }
+    await reconcileEndpointRegistrations();
+  }
 }
 
 function assertTrustedControlUrl(rawUrl) {
@@ -521,7 +636,8 @@ function assertTrustedControlUrl(rawUrl) {
 
 async function ensureControlPanel(port) {
   assertNotQuitting();
-  return previewSession.ensure(validateCdpPort(port));
+  controlSessionPort ??= validateCdpPort(port);
+  return previewSession.ensure(controlSessionPort);
 }
 
 function createApplicationTray() {
@@ -547,55 +663,63 @@ function createApplicationTray() {
   });
 }
 
-function stopCodexTakeover() {
-  takeoverContext?.controller.abort();
-  takeoverContext = null;
-  codexTakeover?.stop();
-  codexTakeover = null;
-  codexProcessMonitor?.stop();
-  codexProcessMonitor = null;
-  latestCodexSnapshot = null;
+function stopCodexTakeover(context) {
+  if (context.controller.signal.aborted) return;
+  context.controller.abort();
+  context.watcher?.stop();
+  context.monitor?.stop();
+  context.snapshot = null;
+  if (!context.task) takeovers.delete(context.hostType);
 }
 
-async function cancelCodexTakeover() {
-  stopCodexTakeover();
-  // Drain an already-started close/launch before restore changes its target.
-  await takeoverTask;
+async function cancelCodexTakeover(hostType) {
+  const contexts = hostType === undefined ? [...takeovers.values()] : [takeovers.get(hostType)].filter(Boolean);
+  for (const context of contexts) stopCodexTakeover(context);
+  await Promise.all(contexts.map(({ task }) => task));
+}
+
+async function drainTakeoverForTarget(installationId, port) {
+  const running = [...takeovers.values()].find(({ task }) => task);
+  if (!running) return;
+  const state = await currentState();
+  const installation = state.installations.find(({ id }) => id === (installationId || state.selectedId));
+  if (!installation || installationHostType(installation) !== running.hostType || takeovers.get(running.hostType) !== running) return;
+  try { assertPortAvailable(installation, validateCdpPort(port ?? settings.portsByHost[running.hostType])); }
+  catch { return; }
+  await cancelCodexTakeover(running.hostType);
 }
 
 function startCodexTakeover({ installation, port, adaptive, baselineProcessIds = [] }) {
-  stopCodexTakeover();
   if (acceptanceContext || shutdownRequested || !installation?.path) return;
   const hostType = installationHostType(installation);
   const hostName = hostDisplayName(hostType);
   const context = {
     installation: { ...installation }, port: validateCdpPort(port),
     adaptive: Boolean(adaptive), hostType, controller: new AbortController(),
+    watcher: null, monitor: null, snapshot: null, task: null,
   };
-  takeoverContext = context;
-  const isCurrent = () => takeoverContext === context && !shutdownRequested && !isQuitting
-    && settings.selectedId === context.installation.id && settings.port === context.port;
+  takeovers.set(hostType, context);
+  const isCurrent = () => takeovers.get(hostType) === context && !context.controller.signal.aborted && !shutdownRequested && !isQuitting;
   const failClosed = (error) => {
-    if (takeoverContext !== context) return;
-    stopCodexTakeover();
-    log({ stream: "stderr", text: `[自动接管] 已暂停，请重新应用壁纸后再试：${error.message}\n` });
+    if (!isCurrent()) return;
+    stopCodexTakeover(context);
+    log({ stream: "stderr", text: `[自动接管 ${hostName}] 已暂停，请重新应用壁纸后再试：${error.message}\n` });
   };
   try {
-    codexProcessMonitor = startCodexProcessMonitor({
+    context.monitor = startCodexProcessMonitor({
       executablePath: context.installation.path, port: context.port, intervalMs: 3_000,
-      onSnapshot: (snapshot) => { if (isCurrent()) latestCodexSnapshot = snapshot; },
+      onSnapshot: (snapshot) => { if (isCurrent()) context.snapshot = snapshot; },
       onError: failClosed,
     });
-    if (!isCurrent()) { stopCodexTakeover(); return; }
-    codexTakeover = createCodexTakeoverWatcher({
+    if (!isCurrent()) { context.monitor.stop(); return; }
+    context.watcher = createCodexTakeoverWatcher({
       port: context.port, intervalMs: 5_000,
       isEnabled: isCurrent,
-      isBusy: () => Boolean(activeOperation) || takeoverRunning,
+      isBusy: () => Boolean(activeOperation),
       ignoredProcessIds: baselineProcessIds,
-      listProcesses: async () => latestCodexSnapshot,
+      listProcesses: async () => context.snapshot,
       onTakeover: ({ ordinary }) => {
-        if (!isCurrent() || takeoverRunning) return;
-        takeoverRunning = true;
+        if (!isCurrent() || activeOperation) return;
         const extraArgs = extractPreservedLaunchArgs(ordinary.map((entry) => entry.commandLine));
         if (extraArgs.length) void rememberPreservedLaunchArgs(context.installation.id, extraArgs);
         const task = runOperation(`自动接管 ${hostName}`, async () => {
@@ -616,24 +740,24 @@ function startCodexTakeover({ installation, port, adaptive, baselineProcessIds =
             }),
             waitForTarget: (selectedPort, signal) => waitForCodexTarget(selectedPort, { signal, hostType: context.hostType }),
             verifyOwner: verifySelectedOwner,
-            injectOnce: (options) => injectOnceAtPort({ ...options, hostType: context.hostType }),
+            injectOnce: (options) => injectOnceAtPort({ ...options, installation: context.installation }),
           });
-          if (result.canceled || result.skipped) stopCodexTakeover();
+          if (result.canceled || result.skipped) stopCodexTakeover(context);
           return result;
         }).then((operation) => {
           if (!operation.ok) failClosed(new Error(operation.message));
           return operation;
         }).finally(() => {
-          if (takeoverContext === context) latestCodexSnapshot = null;
-          takeoverRunning = false;
-          if (takeoverTask === task) takeoverTask = null;
+          context.snapshot = null;
+          context.task = null;
+          if (context.controller.signal.aborted && takeovers.get(hostType) === context) takeovers.delete(hostType);
         });
-        takeoverTask = task;
+        context.task = task;
         return task;
       },
       onError: failClosed,
     });
-    codexTakeover.start();
+    context.watcher.start();
     log({ stream: "system", text: "[自动接管] 已启用监控：普通实例重开后需确认才重启；取消或失败将暂停接管\n" });
   } catch (error) { failClosed(error); }
 }
@@ -653,7 +777,6 @@ function registerIpcHandlers() {
       filters: [{ name: "Windows 可执行文件", extensions: ["exe"] }],
     });
     if (result.canceled || !result.filePaths[0]) return currentState();
-    await cancelCodexTakeover();
     assertNotQuitting();
     if (activeOperation) throw new Error("壁纸操作进行中，请稍后切换目标");
     const executablePath = await validateExecutable(result.filePaths[0]);
@@ -679,22 +802,29 @@ function registerIpcHandlers() {
     const state = await currentState({ forceRefresh: true });
     const selected = state.installations.find(({ path: entry }) => entry.toLowerCase() === executablePath.toLowerCase());
     settings.selectedId = selected?.id || settings.selectedId;
+    const updatedState = await currentState();
     await saveSettings();
-    return currentState();
+    return updatedState;
   });
   registerHandler("cwb:apply-codex", async ({ installationId, port, adaptive = true } = {}) => {
-    if (!activeOperation || takeoverRunning) await cancelCodexTakeover();
-    return runOperation("应用壁纸", async () => {
+    await drainTakeoverForTarget(installationId, port);
+    const result = await runOperation("应用壁纸", async () => {
     const operationStartedAt = performance.now();
     let completed = false;
+    let resolvedInstallationId = installationId;
+    let resolvedPort = port;
     try {
-      stopCodexTakeover();
-      await rememberOperationSettings({ port, adaptive });
       const snapshot = await measureStartupPhase("discovery", currentState);
-      const installation = await resolveInstallation(installationId, snapshot);
+      resolvedInstallationId = installationId || snapshot.selectedId;
+      const installation = await resolveInstallation(resolvedInstallationId, snapshot);
       const hostType = installationHostType(installation);
       const hostName = hostDisplayName(hostType);
-      const normalizedPort = validateCdpPort(port);
+      const normalizedPort = resolvedPort = validateCdpPort(port ?? settings.portsByHost[hostType]);
+      await reconcileEndpointRegistrations();
+      assertPortAvailable(installation, normalizedPort);
+      assertAcceptanceTarget(installation, normalizedPort);
+      await cancelCodexTakeover(hostType);
+      await rememberOperationSettings({ installation, port: normalizedPort, adaptive });
       // Reuse the process snapshot taken before applying. Every process that
       // already existed is ignored by the takeover watcher; only a target
       // process created after this point may trigger a reclaim.
@@ -739,7 +869,7 @@ function registerIpcHandlers() {
           });
         },
         waitForTarget: (selectedPort) => waitForCodexTarget(selectedPort, { hostType }),
-        injectOnce: (options) => injectOnceAtPort({ ...options, hostType }),
+        injectOnce: (options) => injectOnceAtPort({ ...options, installation }),
       });
       if (flow.canceled) return flow;
       completed = true;
@@ -752,6 +882,8 @@ function registerIpcHandlers() {
         result: flow.launch,
         compatibility: flow.injection.compatibility,
         adaptive: flow.injection.adaptive,
+        activeHosts: flow.injection.injection.activeHosts,
+        injectorActive: flow.injection.injection.injectorActive,
         closedCount: flow.closed?.closedCount || 0,
         message: flow.launch
           ? `${hostName} 已启动并应用壁纸；媒体服务将在托盘中保持运行`
@@ -760,8 +892,8 @@ function registerIpcHandlers() {
     } catch (error) {
       try {
         const diagnosticPath = await writeCompatibilityDiagnostic({
-          port,
-          installationId,
+          port: resolvedPort,
+          installationId: resolvedInstallationId,
           reason: error.message,
         });
         log({ stream: "system", text: `已自动写入兼容诊断：${diagnosticPath}\n` });
@@ -773,26 +905,48 @@ function registerIpcHandlers() {
       logStartupPhase({ phase: "total", elapsedMs: performance.now() - operationStartedAt, ok: completed });
     }
     });
+    return { ...result, activeInjectionTargets: activeInjectionTargets() };
   });
   registerHandler("cwb:restore", async ({ installationId, port } = {}) => {
-    if (!activeOperation || takeoverRunning) await cancelCodexTakeover();
-    return runOperation("恢复官方外观", async () => {
-    await rememberOperationSettings({ port });
-    const normalizedPort = validateCdpPort(port);
-    const installation = await resolveInstallation(installationId || settings.selectedId);
-    const hostType = installationHostType(installation);
-    await verifySelectedOwner(installation, normalizedPort);
-    assertNotQuitting();
-    const control = await ensureControlPanel(normalizedPort);
-    return invokeBridgeAction({ controlUrl: control.url, action: "restore", hostType });
+    const resolveTarget = async () => {
+      const snapshot = await currentState();
+      const installation = await resolveInstallation(installationId || snapshot.selectedId, snapshot);
+      const hostType = installationHostType(installation);
+      const normalizedPort = validateCdpPort(port ?? settings.portsByHost[hostType]);
+      await reconcileEndpointRegistrations();
+      assertRestoreTarget(installation, normalizedPort);
+      return { installation, hostType, normalizedPort };
+    };
+    let target;
+    if ([...takeovers.values()].some(({ task }) => task)) {
+      try { target = await resolveTarget(); }
+      catch (error) { return { ok: false, message: error.message, activeInjectionTargets: activeInjectionTargets() }; }
+      if (takeovers.get(target.hostType)?.task) await cancelCodexTakeover(target.hostType);
+    }
+    const operation = await runOperation("恢复官方外观", async () => {
+      const { installation, hostType, normalizedPort } = target ?? await resolveTarget();
+      assertRestoreTarget(installation, normalizedPort);
+      await verifySelectedOwner(installation, normalizedPort);
+      await cancelCodexTakeover(hostType);
+      await rememberOperationSettings({ installation, port: normalizedPort });
+      assertNotQuitting();
+      const control = await ensureControlPanel(normalizedPort);
+      const binding = rememberEndpoint(installation, normalizedPort);
+      try {
+        const result = await invokeBridgeAction({ controlUrl: control.url, action: "restore", hostType, port: normalizedPort });
+        verifiedEndpointInstallations.delete(normalizedPort);
+        return result;
+      } catch (error) {
+        await reconcileEndpointError(binding, error, control.url);
+        throw error;
+      }
     });
+    return { ...operation, activeInjectionTargets: activeInjectionTargets() };
   });
   registerHandler("cwb:open-control-panel", async ({ port } = {}) => {
-    const normalizedPort = validateCdpPort(port ?? settings.port);
-    if ((!activeOperation || takeoverRunning) && takeoverContext && normalizedPort !== takeoverContext.port) {
-      await cancelCodexTakeover();
-    }
     return runOperation("载入壁纸面板", async () => {
+      await currentState();
+      const normalizedPort = validateCdpPort(port ?? settings.port);
       await rememberOperationSettings({ port: normalizedPort });
       return ensureControlPanel(normalizedPort);
     });
@@ -836,13 +990,13 @@ if (!hasSingleInstanceLock || quitRunningInstanceRequested) {
 app.on("before-quit", (event) => {
   isQuitting = true;
   shutdownRequested = true;
-  stopCodexTakeover();
   if (shutdownComplete) return;
   event.preventDefault();
   if (shutdownPromise) return;
-  shutdownPromise = Promise.resolve(takeoverTask)
+  shutdownPromise = cancelCodexTakeover()
     .then(() => previewSession.shutdown())
     .then(() => nativeEngineHost?.close())
+    .then(() => settingsWriteQueue)
     .then(() => logWriteQueue)
     .then(() => {
       shutdownComplete = true;

@@ -6,6 +6,7 @@ import test from 'node:test';
 import { ConfigStore } from '../bridge-runtime/src/config-store.mjs';
 import { createMediaServer } from '../bridge-runtime/src/media-server.mjs';
 import { buildInjectionPlan } from '../bridge-overrides/src/injection-plan.mjs';
+import { invokeBridgeAction } from '../src/bridge-runner.mjs';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOZ8AAAAASUVORK5CYII=', 'base64');
 
@@ -65,6 +66,31 @@ test('image import -> inventory -> bounded injection -> token-scoped Range -> re
   assert.equal((await api('library/manage', { action: 'remove', ids: [id] })).ok, true);
   assert.deepEqual(await readFile(original), png);
   assert.equal(store.get().selectedId, 'we');
+});
+
+test('busy library explicitly rejects inject before the bridge action handler runs', async (t) => {
+  const handled = [];
+  const { server, store, upload } = await fixture(t, { onAction: async (action) => {
+    handled.push(action);
+    return { ok: true, registeredHosts: [] };
+  } });
+  let committing, finish;
+  const started = new Promise((resolve) => { committing = resolve; });
+  const commit = new Promise((resolve) => { finish = resolve; });
+  const set = store.set.bind(store);
+  store.set = async (...args) => { committing(); await commit; return set(...args); };
+  const uploading = upload();
+  await Promise.race([started, uploading]);
+  const invoke = (action) => invokeBridgeAction({ controlUrl: server.baseUrl, action });
+  try {
+    await assert.rejects(invoke('inject'), (error) => error.statusCode === 409 && error.notExecuted === true && !error.registeredHosts);
+    assert.deepEqual(handled, []);
+  } finally {
+    finish();
+    await uploading;
+  }
+  assert.deepEqual((await invoke('injection-status')).registeredHosts, []);
+  assert.deepEqual(handled, ['injection-status']);
 });
 
 test('hide/restore/rating/policy reconcile selection and exclude all blocked media paths', async (t) => {

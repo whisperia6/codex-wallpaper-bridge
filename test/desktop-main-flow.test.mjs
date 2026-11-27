@@ -13,9 +13,10 @@ import { runLaunchAndInjectFlow } from "../src/launch-flow.mjs";
 import { dailyLogFilename, formatLogEntry, sanitizeLogText } from "../src/local-logging.mjs";
 import { createPreviewSession, stopPreviewProcess } from "../src/preview-session.mjs";
 import { DESKTOP_RENDERER_URL } from "../bridge-runtime/src/desktop-origin.mjs";
-import { extractPreservedLaunchArgs, hostDisplayName, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
+import { defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName, hostPortConflict, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 import { registerDesktopRendererScheme } from "../src/desktop-renderer-protocol.mjs";
 import { desktopWindowChromeOptions, setWindowChromeTheme } from "../src/window-chrome.mjs";
+import { desktopRendererHarness, embeddedHostHarness, embeddedTargetControls } from "../test-support/desktop-ui.mjs";
 
 const mainUrl = new URL("../src/main.mjs", import.meta.url);
 const mainSource = (await readFile(mainUrl, "utf8"))
@@ -30,8 +31,9 @@ const installations = [
   { id: "local", kind: "local", path: "D:\\fixture-local\\ChatGPT.exe", label: "local", isRunning: true, processIds: [1001] },
   { id: "store", kind: "store", path: "C:\\fixture-store\\ChatGPT.exe", label: "store", isRunning: true, processIds: [1002] },
 ];
+const antigravity = { id: "antigravity", kind: "local", hostType: "antigravity", path: "D:\\fixture-ag\\Antigravity.exe", label: "Antigravity", isRunning: true, processIds: [1003] };
 
-async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", messageBoxResponse = 0, takeoverProcesses = [], duringClose = null, duringWrite = null } = {}) {
+async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", savedPortsByHost, messageBoxResponse = 0, takeoverProcesses = [], duringClose = null, duringWrite = null, endpointOwner } = {}) {
   const calls = { monitors: [], watchers: [], order: [], forks: [], starts: [], actions: [], launch: [], close: [], owner: [], collect: [], expectedProcess: [], reads: [], writes: [], appends: [], dialogs: [], prevented: [], errors: [], detects: 0, trayDestroyed: 0, nativeHosts: [], nativePeers: [], nativeCloses: 0 };
   const acceptanceRoot = path.join(root, "out", "live-acceptance", "main-flow-fixture");
   const acceptanceContext = acceptance ? {
@@ -91,7 +93,7 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
     Menu: {}, nativeImage: {}, session: {}, Tray: {}, shell: { openPath: async () => "" },
     protocol: { registerSchemesAsPrivileged: () => calls.order.push("register-desktop-scheme") },
     DESKTOP_RENDERER_URL, registerDesktopRendererScheme,
-    extractPreservedLaunchArgs, hostDisplayName, installationHostType,
+    defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName, hostPortConflict, installationHostType,
     desktopWindowChromeOptions, setWindowChromeTheme,
     installDesktopRendererProtocol: async () => calls.order.push("install-desktop-protocol"),
     createDesktopEngineHost: (options) => {
@@ -141,14 +143,14 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
     process: { platform: "win32", execPath: "C:\\fixture-electron\\electron.exe", resourcesPath: path.join(root, "fixture-resources"), env: { LOCALAPPDATA: path.join(root, "daily-local-app-data"), KEEP_EXISTING: "kept" } },
     appendFile: async (filePath, content) => calls.appends.push({ filePath, content }),
     mkdir: async () => {},
-    readFile: async (filePath) => { calls.reads.push(filePath); return JSON.stringify({ selectedId: savedSelectedId, port: 19335, adaptive: true }); },
+    readFile: async (filePath) => { calls.reads.push(filePath); return JSON.stringify({ selectedId: savedSelectedId, port: 19335, portsByHost: savedPortsByHost, adaptive: true }); },
     writeFile: async (filePath, content) => { calls.writes.push({ filePath, content }); await duringWrite?.(); },
     resolveBridgeRoot, resolveBridgeUtilityPath,
     invokeBridgeAction: async (options) => {
       calls.actions.push(copy(options));
-      await duringAction?.(calls, options);
-      if (actionFailure) throw new Error("fixture apply failed");
-      return { ok: true, compatibility: [] };
+      const result = await duringAction?.(calls, options);
+      if (actionFailure && options.action === "inject") throw Object.assign(new Error("fixture apply failed"), { notExecuted: true });
+      return result ?? { ok: true, compatibility: [] };
     },
     startBridgePreview: async (options) => {
       calls.starts.push(options.port);
@@ -176,7 +178,8 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
       calls.order.push("owner-query");
       calls.owner.push({ installationId: options.installation.id, port: options.port });
       if (options.expectedProcess) calls.expectedProcess.push(copy(options.expectedProcess));
-      const owner = options.port === 19335 ? installations[0] : installations[1];
+      const owner = endpointOwner?.(options.port) ?? (options.port === 9336 || options.port === 20336 ? antigravity
+        : options.port === 19335 ? installations[0] : installations[1]);
       return verifyCdpEndpointOwner({
         ...options, platform: "win32",
         processRunner: async () => ({ stdout: JSON.stringify({
@@ -524,6 +527,11 @@ test('restore cancels an in-flight takeover before launch and drains it before r
   ready = false;
   const takeover = f.calls.watchers[0].options.onTakeover({ ordinary: [takeoverOrdinary] });
   await turn(); assert.equal(f.calls.close.length, 1);
+  const wrongPort = f.ipc('cwb:restore', { installationId: 'local', port: 29334 });
+  await turn();
+  if (f.calls.watchers[0].stopped) releaseClose();
+  assert.equal(f.calls.watchers[0].stopped, false);
+  assert.match((await wrongPort).message, /Codex.*19335.*原安装/);
   const restoring = f.ipc('cwb:restore', { installationId: 'local', port: 19335 });
   await turn(); assert.equal(f.calls.watchers[0].stopped, true);
   assert.equal(f.calls.actions.filter(a => a.action === 'restore').length, 0);
@@ -585,16 +593,311 @@ test('busy apply and restore do not disable monitoring when a different operatio
   }
   block = false; releaseWrite(); assert.equal((await panel).ok, true);
 });
-test('opening a different panel port cancels and drains an active takeover', async context => {
+test('opening the control panel during takeover leaves its task and the resident utility alone', async context => {
   let ready = true, releaseClose;
   const f = await harness(context, { acceptance: false, endpointReady: () => ready,
     takeoverProcesses: [takeoverOrdinary], duringClose: () => new Promise(r => { releaseClose = r; }) });
   await f.ipc('cwb:apply-codex', { installationId: 'local', port: 19335 }); ready = false;
   const takeover = f.calls.watchers[0].options.onTakeover({ ordinary: [takeoverOrdinary] }); await turn();
-  const panel = f.ipc('cwb:open-control-panel', { port: '19336' }); await turn();
-  assert.equal(f.calls.watchers[0].stopped, true); assert.equal(f.calls.launch.length, 0);
-  releaseClose(); await takeover; assert.equal((await panel).ok, true);
-  assert.equal(f.calls.launch.length, 0); assert.equal(f.calls.starts.at(-1), 19336);
+  const panel = await f.ipc('cwb:open-control-panel', { port: '19336' });
+  assert.equal(panel.ok, false);
+  assert.equal(f.calls.watchers[0].stopped, false);
+  releaseClose();
+  await takeover;
+  assert.equal(f.calls.launch.length, 1);
+  assert.equal((await f.ipc('cwb:open-control-panel', { port: '19336' })).ok, true);
+  assert.deepEqual(f.calls.starts, [19335]);
+  assert.equal(f.children[0].killCount, 0);
+});
+
+test("Codex and Antigravity share a utility and retain independent ownership, ports and takeovers", async (context) => {
+  const f = await harness(context, { acceptance: false, detectedInstallations: [installations[0], antigravity] });
+  const apply = (installationId, port) => f.ipc("cwb:apply-codex", { installationId, port });
+  assert.equal((await apply("local", 19335)).ok, true);
+  assert.equal((await apply("antigravity", 20336)).ok, true);
+  assert.deepEqual(f.calls.starts, [19335]);
+  assert.equal(f.children[0].killCount, 0);
+  assert.deepEqual(f.calls.actions.map(({ hostType, port }) => ({ hostType, port })), [
+    { hostType: "codex", port: 19335 }, { hostType: "antigravity", port: 20336 },
+  ]);
+  assert.deepEqual(f.calls.watchers.map(({ options }) => options.isEnabled()), [true, true]);
+  assert.deepEqual(copy((await f.ipc("cwb:get-state")).portsByHost), { codex: 19335, antigravity: 20336 });
+  const check = f.calls.nativeHosts[0].verifyEndpoint;
+  await assert.rejects(check(19335, "antigravity"), /只允许/);
+  await Promise.all([check(19335), check(20336)]);
+  assert.deepEqual(f.calls.owner.slice(-2), [{ installationId: "local", port: 19335 }, { installationId: "antigravity", port: 20336 }]);
+  const conflict = await apply("antigravity", 19335);
+  assert.equal(conflict.ok, false);
+  assert.match(conflict.message, /19335.*Codex.*不同的端口/);
+  assert.equal(f.calls.actions.length, 2);
+  assert.equal((await f.ipc("cwb:restore", { installationId: "antigravity", port: 20336 })).ok, true);
+  assert.equal(f.calls.watchers[0].options.isEnabled(), true);
+  assert.equal(f.calls.watchers[1].stopped, true);
+  await check(19335);
+  f.app.quit();
+  await turn();
+  assert.equal(f.calls.watchers[0].stopped, true);
+});
+
+test("main rejects cross-host and same-host installation conflicts before settings writes or takeover changes", async (context) => {
+  const f = await harness(context, { acceptance: false, detectedInstallations: [...installations, antigravity] });
+  const apply = (installationId, port) => f.ipc("cwb:apply-codex", { installationId, port });
+  const target = { installationId: "local", hostType: "codex", port: 19335 };
+  const result = await apply("local", 19335);
+  assert.deepEqual(copy(result.activeInjectionTargets), [target]);
+  for (const id of ["antigravity", "store"]) {
+    const persisted = f.calls.writes.filter(({ filePath }) => !path.basename(filePath).startsWith("codex-compat-"));
+    assert.match((await apply(id, 19335)).message, /19335.*Codex.*不同的端口/);
+    const state = await f.ipc("cwb:get-state");
+    assert.deepEqual(copy(state.activeInjectionTargets), [target]);
+    assert.equal(state.selectedId, "local");
+    assert.deepEqual(f.calls.writes.filter(({ filePath }) => !path.basename(filePath).startsWith("codex-compat-")), persisted);
+    assert.equal(f.calls.watchers[0].stopped, false);
+    assert.equal(f.calls.actions.length, 1);
+  }
+});
+
+test("restore rejects another port or installation before verifying the owner, stopping takeover, or saving settings", async (context) => {
+  const f = await harness(context, { acceptance: false, endpointOwner: () => installations[0] });
+  assert.equal((await f.ipc("cwb:apply-codex", { installationId: "local", port: 19335 })).ok, true);
+  const writes = f.calls.writes.length;
+  const ownerChecks = f.calls.owner.length;
+  for (const [installationId, port] of [["local", 29334], ["store", 29335]]) {
+    const result = await f.ipc("cwb:restore", { installationId, port });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /Codex.*19335.*原安装/);
+  }
+  assert.equal(f.calls.owner.length, ownerChecks);
+  assert.equal(f.calls.actions.length, 1);
+  assert.equal(f.calls.writes.length, writes);
+  assert.equal(f.calls.watchers[0].stopped, false);
+  assert.equal(f.calls.monitors[0].stopped, false);
+  assert.equal((await f.ipc("cwb:get-state")).portsByHost.codex, 19335);
+});
+
+test("restore keeps the original takeover and saved port when the bridge has disconnected", async (context) => {
+  const f = await harness(context, { acceptance: false, endpointOwner: () => installations[0] });
+  const port = 19335;
+  assert.equal((await f.ipc("cwb:apply-codex", { installationId: "local", port })).ok, true);
+  const writes = f.calls.writes.length;
+  const ownerChecks = f.calls.owner.length;
+  f.children[0].finish();
+  assert.deepEqual(copy((await f.ipc("cwb:get-state")).activeInjectionTargets), []);
+  assert.equal(f.calls.watchers[0].options.isEnabled(), true);
+
+  const result = await f.ipc("cwb:restore", { installationId: "local", port: 19336 });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /Codex.*19335.*自动接管.*原安装/);
+  assert.equal(f.calls.owner.length, ownerChecks);
+  assert.equal(f.calls.actions.length, 1);
+  assert.equal(f.children.length, 1);
+  assert.equal(f.calls.writes.length, writes);
+  assert.equal(f.calls.watchers[0].options.isEnabled(), true);
+  assert.equal(f.calls.watchers[0].stopped, false);
+  assert.equal(f.calls.monitors[0].stopped, false);
+  assert.equal((await f.ipc("cwb:get-state")).portsByHost.codex, port);
+});
+
+for (const stillRegistered of [false, true]) {
+  test(`lost restore response marks the target pending and the next apply reconciles it (registered: ${stillRegistered})`, async (context) => {
+    let owner = installations[0], statusRequests = 0;
+    const f = await harness(context, {
+      acceptance: false,
+      detectedInstallations: [installations[0], antigravity],
+      endpointOwner: () => owner,
+      duringAction(_calls, { action }) {
+        if (action === "restore") throw Error("restore response timed out");
+        if (action === "injection-status") {
+          if (++statusRequests === 1) throw Error("bridge status unavailable");
+          return { ok: true, registeredHosts: stillRegistered ? [{ hostType: "codex", port: 19335 }] : [] };
+        }
+      },
+    });
+    const port = 19335;
+    assert.equal((await f.ipc("cwb:apply-codex", { installationId: "local", port })).ok, true);
+    const restore = await f.ipc("cwb:restore", { installationId: "local", port });
+    const pending = { installationId: "local", hostType: "codex", port, reconcilePending: true };
+    assert.equal(restore.ok, false);
+    assert.deepEqual(copy(restore.activeInjectionTargets), [pending]);
+    assert.deepEqual(copy((await f.ipc("cwb:get-state")).activeInjectionTargets), [pending]);
+    owner = antigravity;
+    const apply = await f.ipc("cwb:apply-codex", { installationId: "antigravity", port });
+    assert.equal(statusRequests, 2);
+    assert.equal(apply.ok, !stillRegistered);
+    if (stillRegistered) assert.match(apply.message, /19335.*Codex.*不同的端口/);
+    assert.deepEqual(copy(apply.activeInjectionTargets), [stillRegistered
+      ? { installationId: "local", hostType: "codex", port }
+      : { installationId: "antigravity", hostType: "antigravity", port }]);
+  });
+}
+
+for (const outcome of ["HTTP 409", "unknown and absent", "unknown and registered"]) {
+  test(`main reconciles an inject failure with outcome ${outcome}`, async (context) => {
+    let owner = installations[0];
+    const registered = outcome === "unknown and registered";
+    const f = await harness(context, {
+      acceptance: false,
+      detectedInstallations: [installations[0], antigravity],
+      endpointOwner: () => owner,
+      duringAction: (_calls, { action, hostType, port }) => {
+        if (action === "injection-status") return { ok: true, registeredHosts: registered ? [{ hostType: "codex", port: 19335 }] : [] };
+        if (hostType === "codex") {
+          if (outcome === "HTTP 409") throw Object.assign(new Error("资源任务繁忙"), { statusCode: 409 });
+          throw new Error("connection lost");
+        }
+        return { ok: true, activeHosts: [{ hostType, port }] };
+      },
+    });
+    assert.equal((await f.ipc("cwb:apply-codex", { installationId: "local", port: 19335 })).ok, false);
+    const targets = copy((await f.ipc("cwb:get-state")).activeInjectionTargets);
+    assert.deepEqual(targets, registered ? [{ installationId: "local", hostType: "codex", port: 19335 }] : []);
+    assert.equal(f.calls.actions.some(({ action }) => action === "injection-status"), outcome !== "HTTP 409");
+    owner = antigravity;
+    const next = await f.ipc("cwb:apply-codex", { installationId: "antigravity", port: 19335 });
+    assert.equal(next.ok, !registered);
+    if (registered) assert.match(next.message, /19335.*Codex.*不同的端口/);
+  });
+}
+
+test("HTTP rejection of a reapply preserves the existing active binding", async (context) => {
+  let rejectReapply = false;
+  const f = await harness(context, {
+    acceptance: false,
+    duringAction() {
+      if (rejectReapply) throw Object.assign(new Error("资源任务繁忙"), { statusCode: 409, notExecuted: true });
+    },
+  });
+  const apply = () => f.ipc("cwb:apply-codex", { installationId: "local", port: 19335 });
+  assert.equal((await apply()).ok, true);
+  rejectReapply = true;
+  assert.equal((await apply()).ok, false);
+  assert.deepEqual(copy((await f.ipc("cwb:get-state")).activeInjectionTargets), [{ installationId: "local", hostType: "codex", port: 19335 }]);
+  assert.equal((await f.calls.nativeHosts[0].verifyEndpoint(19335, "codex")).verified, true);
+});
+
+test("an unavailable registration check is retried before a later apply claims the same port", async (context) => {
+  let owner = installations[0], statusRequests = 0;
+  const f = await harness(context, {
+    acceptance: false,
+    detectedInstallations: [installations[0], antigravity],
+    endpointOwner: () => owner,
+    duringAction: (_calls, { action, hostType }) => {
+      if (action === "injection-status") {
+        statusRequests++;
+        if (statusRequests === 1) throw Error("bridge status unavailable");
+        return { ok: true, registeredHosts: [] };
+      }
+      if (hostType === "codex") throw Error("connection lost");
+    },
+  });
+  const apply = (installationId) => f.ipc("cwb:apply-codex", { installationId, port: 19335 });
+  assert.equal((await apply("local")).ok, false);
+  assert.equal(statusRequests, 1);
+  owner = antigravity;
+  assert.equal((await apply("antigravity")).ok, true);
+  assert.equal(statusRequests, 2);
+});
+
+test("both UI layers forward an old port claim after an unconfirmed same-host port change", async (context) => {
+  const oldPort = 19335;
+  const newPort = 19336;
+  let oldPortOwner = installations[0];
+  let statusRequests = 0;
+  const f = await harness(context, {
+    acceptance: false,
+    detectedInstallations: [installations[0], antigravity],
+    endpointOwner: (port) => port === oldPort ? oldPortOwner : installations[0],
+    duringAction: (_calls, { action, hostType, port }) => {
+      if (action === "injection-status") {
+        if (++statusRequests === 1) throw Error("bridge status unavailable");
+        return { ok: true, registeredHosts: [{ hostType: "codex", port: newPort }] };
+      }
+      if (action === "inject" && hostType === "codex" && port === newPort) throw Error("inject response lost");
+    },
+  });
+  const apply = (options) => f.ipc("cwb:apply-codex", options);
+  assert.equal((await apply({ installationId: "local", port: oldPort })).ok, true);
+  const renderer = await desktopRendererHarness(context, { desktopState: await f.ipc("cwb:get-state"), apply });
+  const move = renderer.execute("apply", { installationId: "local", port: newPort });
+  await turn();
+  renderer.completeFlush(true);
+  const failedMove = await move;
+  assert.equal(failedMove.ok, false);
+  assert.equal(statusRequests, 1);
+  const pending = { installationId: "local", hostType: "codex", port: oldPort, reconcilePending: true };
+  assert.deepEqual(copy(failedMove.activeInjectionTargets), [pending]);
+  assert.deepEqual(copy((await f.ipc("cwb:get-state")).activeInjectionTargets), [pending]);
+
+  const controls = embeddedTargetControls();
+  const embedded = await embeddedHostHarness({ controls });
+  embedded.handlers.DOMContentLoaded();
+  const { message } = renderer.messages.findLast(({ message }) => message.type === "desktop-state");
+  assert.deepEqual(message.state.activeInjectionTargets, [pending]);
+  embedded.handlers.message({ source: embedded.window.parent, origin: "cwb-desktop://shell", data: message });
+  oldPortOwner = antigravity;
+  controls["#desktopInstallationSelect"].value = antigravity.id;
+  controls["#desktopPortInput"].value = String(oldPort);
+  controls["#desktopApplyButton"].events.click();
+  const request = embedded.messages.find(({ type }) => type === "desktop-request");
+  assert.equal(request?.action, "apply");
+  assert.equal(request.payload.installationId, antigravity.id);
+  assert.equal(request.payload.port, oldPort);
+  renderer.emit(request);
+  await turn();
+  assert.equal(renderer.flushes().length, 2);
+  renderer.completeFlush(true);
+  await turn();
+
+  const response = renderer.messages.find(({ message }) =>
+    message.type === "desktop-response" && message.requestId === request.requestId)?.message;
+  assert.equal(response?.result.ok, true);
+  assert.equal(statusRequests, 2);
+  assert.deepEqual(response.result.activeInjectionTargets, [
+    { installationId: "local", hostType: "codex", port: newPort },
+    { installationId: antigravity.id, hostType: "antigravity", port: oldPort },
+  ]);
+});
+
+test("failed apply without explicit arguments reports the selected installation and resolved port", async (context) => {
+  const f = await harness(context, { actionFailure: true });
+  assert.equal((await f.ipc("cwb:apply-codex")).ok, false);
+  const report = JSON.parse(f.calls.writes.find(({ filePath }) => path.basename(filePath).startsWith("codex-compat-")).content);
+  assert.equal(report.installation.id, "local");
+  assert.equal(report.port, 19335);
+  assert.deepEqual(f.calls.collect, [19335]);
+});
+
+test("during shutdown only recovery can verify a bound endpoint and it still rejects a changed owner", async (context) => {
+  let owner = installations[0];
+  const f = await harness(context, { autoExit: false, endpointOwner: () => owner });
+  assert.equal((await f.ipc("cwb:apply-codex", { installationId: "local", port: 19335 })).ok, true);
+  const verify = f.calls.nativeHosts[0].verifyEndpoint;
+  f.app.quit();
+  await turn();
+  try {
+    await assert.rejects(verify(19335, "codex"), /正在退出/);
+    assert.equal((await verify(19335, "codex", "restore")).verified, true);
+    owner = installations[1];
+    await assert.rejects(verify(19335, "codex", "restore"));
+  } finally {
+    f.children[0].finish();
+  }
+});
+
+test("legacy Antigravity port migrates only to Antigravity and host ports reload independently", async (context) => {
+  const detectedInstallations = [installations[0], antigravity];
+  const legacy = await harness(context, { acceptance: false, detectedInstallations, savedSelectedId: "antigravity" });
+  const migrated = await legacy.ipc("cwb:refresh-installations");
+  assert.equal(migrated.port, 19335);
+  assert.deepEqual(copy(migrated.portsByHost), { codex: 9335, antigravity: 19335 });
+  assert.deepEqual(JSON.parse(legacy.calls.writes.at(-1).content).portsByHost, copy(migrated.portsByHost));
+  const restored = await harness(context, { acceptance: false, detectedInstallations, savedSelectedId: "antigravity",
+    savedPortsByHost: { codex: 19335, antigravity: 20336 } });
+  assert.equal((await restored.ipc("cwb:get-state")).port, 20336);
+  assert.equal((await restored.ipc("cwb:apply-codex", { installationId: "local" })).ok, true);
+  const state = await restored.ipc("cwb:get-state");
+  assert.equal(state.port, 19335);
+  assert.deepEqual(copy(state.portsByHost), { codex: 19335, antigravity: 20336 });
 });
 
 test('second-instance with --quit-running-instance triggers graceful quit instead of showing the window', async context => {

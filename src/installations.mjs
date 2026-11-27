@@ -9,6 +9,9 @@ import { tryRunWinHelper } from "./win-helper.mjs";
 
 const execFileAsync = promisify(execFile);
 const STORE_PACKAGE_NAME = "OpenAI.Codex";
+const STORE_PACKAGE_FAMILY_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const APP_EXECUTION_ALIAS_PATTERN = /^[A-Za-z0-9._-]+\.exe$/i;
+const WINDOWS_DEVICE_NAME_PATTERN = /^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)/i;
 const STATIC_DISCOVERY_TTL_MS = 60_000;
 let staticDiscoveryCache = null;
 const STATIC_INSTALLATION_SCRIPT = String.raw`
@@ -18,6 +21,7 @@ $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | ForEach-Object {
   $appId = 'App'
   $executable = ''
+  $appExecutionAlias = ''
   try {
     $m = Join-Path $_.InstallLocation 'AppxManifest.xml'
     if (Test-Path -LiteralPath $m -PathType Leaf) {
@@ -25,6 +29,15 @@ $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyCon
       $node = @($xml.Package.Applications.Application | Where-Object { $_.Executable -match '(?i)(^|[\\/])(ChatGPT|Codex)\.exe$' }) | Select-Object -First 1
       if ($node -and $node.Id) { $appId = [string]$node.Id }
       if ($node -and $node.Executable) { $executable = [string]$node.Executable }
+      if ($node) {
+        $aliases = $node.SelectNodes('./*[local-name()="Extensions"]/*[local-name()="Extension" and @Category="windows.appExecutionAlias"]/*[local-name()="AppExecutionAlias"]/*[local-name()="ExecutionAlias"]/@Alias')
+        foreach ($alias in $aliases) {
+          if ($alias.Value -match '\A[A-Za-z0-9._-]+\.exe\z') {
+            $appExecutionAlias = $alias.Value
+            break
+          }
+        }
+      }
     }
   } catch {}
   [pscustomobject]@{
@@ -34,6 +47,7 @@ $storePackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyCon
     PackageFamilyName = $_.PackageFamilyName
     ApplicationId = $appId
     Executable = $executable
+    AppExecutionAlias = $appExecutionAlias
     SignatureKind = $_.SignatureKind
   }
 })
@@ -201,10 +215,26 @@ function storeExecutablePath(storePackage) {
 
 function storeAppUserModelId(storePackage) {
   const familyName = String(storePackage?.PackageFamilyName || "").trim();
-  if (!/^[A-Za-z0-9._-]{1,128}$/.test(familyName)) return null;
+  if (!STORE_PACKAGE_FAMILY_PATTERN.test(familyName)) return null;
   const applicationId = String(storePackage?.ApplicationId || "App").trim();
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(applicationId)) return null;
   return `${familyName}!${applicationId}`;
+}
+
+function storeAppExecutionAliasPath(familyName, alias) {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData || !path.win32.isAbsolute(localAppData)) return null;
+  if (typeof familyName !== "string" || !STORE_PACKAGE_FAMILY_PATTERN.test(familyName)
+    || familyName.endsWith(".") || WINDOWS_DEVICE_NAME_PATTERN.test(familyName)) return null;
+  if (typeof alias !== "string" || !APP_EXECUTION_ALIAS_PATTERN.test(alias)
+    || WINDOWS_DEVICE_NAME_PATTERN.test(alias)) return null;
+  return path.win32.join(localAppData, "Microsoft", "WindowsApps", familyName, alias);
+}
+
+export function isStoreAppExecutionAliasPath(aliasPath, packageFamilyName) {
+  if (typeof aliasPath !== "string") return false;
+  const expectedPath = storeAppExecutionAliasPath(packageFamilyName, path.win32.basename(aliasPath));
+  return expectedPath !== null && aliasPath.toLowerCase() === expectedPath.toLowerCase();
 }
 
 export function parsePowerShellJson(output) {
@@ -214,6 +244,7 @@ export function parsePowerShellJson(output) {
 }
 
 export function validateCdpPort(value) {
+  if (typeof value !== "number" && typeof value !== "string") throw new Error("CDP 端口必须是整数");
   if (typeof value === "string" && !/^\d+$/.test(value.trim())) {
     throw new Error("CDP 端口必须是整数");
   }
@@ -240,6 +271,7 @@ export function normalizeInstallations({
     const executablePath = storeExecutablePath(storePackage);
     if (!executablePath) continue;
     const appUserModelId = storeAppUserModelId(storePackage);
+    const appExecutionAliasPath = storeAppExecutionAliasPath(storePackage.PackageFamilyName, storePackage.AppExecutionAlias);
     installations.set(normalizedPathKey(executablePath), {
       id: `store:${String(storePackage.Name || STORE_PACKAGE_NAME).toLowerCase()}`,
       kind: "store",
@@ -247,6 +279,7 @@ export function normalizeInstallations({
       path: executablePath,
       version: String(storePackage.Version || "未知"),
       ...(appUserModelId ? { appUserModelId } : {}),
+      ...(appExecutionAliasPath ? { appExecutionAliasPath } : {}),
       isRunning: false,
       processIds: [],
     });

@@ -25,13 +25,14 @@ test('playlist HTTP CRUD rejects forged config/unknown items and lightweight pol
   assert.deepEqual(result.config.playlists.items, []);
 });
 
-test('automatic rotation changes selection, restore cancels timer and disabled state persists', async (t) => {
+test('automatic rotation survives partial restore and stops after the last host restores', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cwb-playlist-http-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'a.png'), Buffer.from([137, 80, 78, 71]));
   const selected = [];
+  let anotherHostActive = true;
   const server = createMediaServer({ projects: ['a', 'b'].map((id) => ({ id, type: 'image', rootPath: root, mediaPath: path.join(root, 'a.png'), playable: true })),
-    onConfigChange: async (config) => selected.push(config.selectedId), onAction: async () => ({ ok: true }) });
+    onConfigChange: async (config) => selected.push(config.selectedId), onAction: async () => ({ ok: true, injectorActive: anotherHostActive }) });
   await server.start(); t.after(() => server.close());
   const post = async (route, body) => { const r = await fetch(new URL(route, server.baseUrl), { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); assert.equal(r.status, 200); return r.json(); };
@@ -41,7 +42,11 @@ test('automatic rotation changes selection, restore cancels timer and disabled s
   const until = Date.now() + 7500;
   while (!selected.includes('b') && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
   assert.ok(selected.includes('b'));
-  await post('api/action', { action: 'restore' });
+  assert.equal((await post('api/action', { action: 'restore' })).injectorActive, true);
+  const partial = await (await fetch(new URL('api/playlists', server.baseUrl))).json();
+  assert.equal(partial.config.playlists.enabled, true);
+  anotherHostActive = false;
+  assert.equal((await post('api/action', { action: 'restore' })).injectorActive, false);
   const result = await (await fetch(new URL('api/playlists', server.baseUrl))).json();
   assert.equal(result.config.playlists.enabled, false);
   assert.equal(result.status.state, 'stopped');

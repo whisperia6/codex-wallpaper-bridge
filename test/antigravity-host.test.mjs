@@ -6,6 +6,7 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 import {
   buildProxyEnvironment,
+  defaultCdpPort,
   extractPreservedLaunchArgs,
   extractTargetOrigin,
   hostDisplayName,
@@ -35,6 +36,12 @@ import { normalizeInstallations } from "../src/installations.mjs";
 import { CdpWallpaperInjector } from "../bridge-overrides/src/cdp-injector.mjs";
 import { buildBootstrapScript } from "../bridge-overrides/src/injected-renderer.mjs";
 import { buildInjectionPlan } from "../bridge-overrides/src/injection-plan.mjs";
+
+test("Codex and Antigravity have distinct default CDP ports", () => {
+  assert.equal(defaultCdpPort("codex"), 9335);
+  assert.equal(defaultCdpPort("antigravity"), 9336);
+  assert.equal(defaultCdpPort(), 9335);
+});
 
 test("host-profiles normalizes host types and strictly validates Antigravity loopback HTTPS origins", () => {
   assert.equal(normalizeHostType(undefined), "codex");

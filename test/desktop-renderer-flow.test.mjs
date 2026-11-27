@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createContext, runInContext } from "node:vm";
+import { controlUrl, desktopRendererHarness as harness } from "../test-support/desktop-ui.mjs";
 
-const rendererSource = await readFile(new URL("../src/renderer/renderer-desktop.mjs", import.meta.url), "utf8");
-const controlUrl = "http://127.0.0.1:12345/abcdefghijklmnopqrstuv/";
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
@@ -15,76 +12,70 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function harness(context, { applyResult, restoreResult, storage = new Map(), url = controlUrl } = {}) {
-  const messages = [];
-  const listeners = new Map();
-  const timers = new Set();
-  const calls = { apply: [], restore: [] };
-  const frame = {
-    src: "",
-    contentWindow: { postMessage: (message, origin) => messages.push({ message: copy(message), origin }) },
-  };
-  const placeholderNodes = { strong: { textContent: "" }, p: { textContent: "" } };
-  const placeholder = { hidden: false, querySelector: (selector) => placeholderNodes[selector] };
-  const window = {
-    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
-    cwbDesktop: {
-      getState: async () => ({ installations: [{ id: "isolated-codex" }], selectedId: "isolated-codex", port: 12345, adaptive: true }),
-      openControlPanel: async () => ({ ok: true, url }),
-      applyCodex: (options) => {
-        calls.apply.push(copy(options));
-        return applyResult?.promise || Promise.resolve({ ok: true, message: "applied" });
-      },
-      restore: (options) => {
-        calls.restore.push(copy(options));
-        return restoreResult?.promise || Promise.resolve({ ok: true });
-      },
-      onTrayAction: () => {},
-    },
-    addEventListener: (type, listener) => listeners.set(type, listener),
-    setTimeout: (callback, ms) => {
-      const timer = setTimeout(() => { timers.delete(timer); callback(); }, ms);
-      timers.add(timer);
-      return timer;
-    },
-    clearTimeout: (timer) => { clearTimeout(timer); timers.delete(timer); },
-  };
-  context.after(() => { for (const timer of timers) clearTimeout(timer); });
-  const sandbox = createContext({
-    window, URL,
-    document: { querySelector: (selector) => selector === "#controlFrame" ? frame : placeholder },
-  });
-  runInContext(rendererSource, sandbox, { filename: "renderer-desktop.mjs" });
+test("trusted target changes recall independent ports and applying Antigravity keeps the iframe", async (context) => {
+  const renderer = await harness(context, { desktopState: {
+    installations: [{ id: "codex" }, { id: "ag", hostType: "antigravity" }],
+    selectedId: "codex", port: 12345, portsByHost: { codex: 12345 }, adaptive: true,
+  } });
+  const originalUrl = renderer.frame.src;
+  renderer.emit({ type: "target-change", installationId: "codex", port: 23335 });
+  renderer.emit({ type: "target-change", installationId: "ag" });
+  assert.equal(renderer.snapshot().port, 9336);
+  renderer.emit({ type: "target-change", installationId: "ag", port: 23336 });
+  renderer.emit({ type: "target-change", installationId: "codex" });
+  assert.equal(renderer.snapshot().port, 23335);
+  const apply = renderer.execute("apply", { installationId: "ag" });
   await turn();
-  const expectedUrl = new URL(url);
-  expectedUrl.searchParams.set('workbenchTheme', storage.get('cwb.workbench.theme') || 'dark');
-  assert.equal(frame.src, expectedUrl.href, "the actual renderer must seed the workbench theme before loading");
+  renderer.completeFlush(true);
+  await apply;
+  assert.equal(renderer.calls.apply[0].port, 23336);
+  assert.equal(renderer.calls.open, 1);
+  assert.equal(renderer.frame.src, originalUrl);
+});
 
-  function emit(message) {
-    listeners.get("message")({
-      source: frame.contentWindow, origin: new URL(url).origin,
-      data: { channel: "cwb-control", ...message },
-    });
+test("desktop rejects another installation on an occupied port before the config save handshake", async (context) => {
+  const occupied = { installationId: "codex", hostType: "codex", port: 12345 };
+  const renderer = await harness(context, { desktopState: {
+    installations: [{ id: "codex" }, { id: "codex-store" }, { id: "ag", hostType: "antigravity" }],
+    selectedId: "codex", port: 12345,
+  }, applyResult: { promise: Promise.resolve({ ok: true, activeInjectionTargets: [occupied] }) } });
+  const firstApply = renderer.execute("apply", { installationId: "codex", port: 12345 });
+  await turn();
+  renderer.completeFlush(true);
+  await firstApply;
+  assert.deepEqual(renderer.snapshot().activeInjectionTargets, [occupied]);
+  for (const installationId of ["ag", "codex-store"]) {
+    const result = await renderer.execute("apply", { installationId, port: 12345 });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /12345.*Codex.*不同的端口/);
+    assert.equal(renderer.flushes().length, 1);
+    assert.equal(renderer.calls.apply.length, 1);
+    assert.equal(renderer.snapshot().selectedId, "codex");
   }
-  emit({ type: "ready" });
-  return {
-    calls, messages, storage, frame,
-    emitFrom: (source, origin, message) => listeners.get('message')({ source, origin, data: { channel:'cwb-control', ...message } }),
-    snapshot: () => copy(runInContext("desktopPayload()", sandbox)),
-    execute: (action, payload = {}) => {
-      sandbox.actionInput = action;
-      sandbox.payloadInput = payload;
-      return runInContext("executeDesktopAction(actionInput, payloadInput)", sandbox);
+});
+
+test("desktop forwards another installation's apply to IPC after restore leaves the port pending reconciliation", async (context) => {
+  const port = 12345;
+  const occupied = { installationId: "codex", hostType: "codex", port };
+  const pending = { ...occupied, reconcilePending: true };
+  const active = { installationId: "ag", hostType: "antigravity", port };
+  const renderer = await harness(context, {
+    desktopState: {
+      installations: [{ id: "codex" }, { id: "ag", hostType: "antigravity" }],
+      selectedId: "codex", port, activeInjectionTargets: [occupied],
     },
-    flushes: () => messages.filter(({ message }) => message.action === "flush-config"),
-    completeFlush: (ok, message) => {
-      const request = messages.findLast(({ message: value }) => value.action === "flush-config");
-      assert.ok(request, "the actual renderer must request a save handshake");
-      emit({ type: "flush-complete", requestId: request.message.requestId, ok, message });
-    },
-    emit,
-  };
-}
+    restoreResult: { promise: Promise.resolve({ ok: false, message: "restore response timed out", activeInjectionTargets: [pending] }) },
+    applyResult: { promise: Promise.resolve({ ok: true, activeInjectionTargets: [active] }) },
+  });
+  assert.equal((await renderer.execute("restore", { installationId: "codex", port })).ok, false);
+  assert.deepEqual(renderer.snapshot().activeInjectionTargets, [pending]);
+  const apply = renderer.execute("apply", { installationId: "ag", port });
+  await turn();
+  renderer.completeFlush(true);
+  assert.equal((await apply).ok, true);
+  assert.deepEqual(renderer.calls.apply, [{ installationId: "ag", port, adaptive: true }]);
+  assert.deepEqual(renderer.snapshot().activeInjectionTargets, [active]);
+});
 
 test("apply remains busy until both the delayed save handshake and apply IPC finish", async (context) => {
   const applyResult = deferred();

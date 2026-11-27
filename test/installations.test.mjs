@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isStoreAppExecutionAliasPath,
   normalizeInstallations,
   parsePowerShellJson,
   selectInstallationId,
@@ -137,6 +138,7 @@ test("normalizeInstallations exposes validated Store appUserModelId when Package
     }],
   });
   assert.equal(installations[0].appUserModelId, "OpenAI.Codex_2p2nqsd0c76g0!App");
+  assert.equal("appExecutionAliasPath" in installations[0], false);
 
   const unsafe = normalizeInstallations({
     storePackages: [{
@@ -147,4 +149,34 @@ test("normalizeInstallations exposes validated Store appUserModelId when Package
     }],
   });
   assert.equal("appUserModelId" in unsafe[0], false);
+});
+
+test("normalizeInstallations exposes only safe, package-scoped Store aliases", (t) => {
+  const localAppData = "C:\\Users\\Test User\\AppData\\Local";
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = localAppData;
+  t.after(() => {
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previousLocalAppData;
+  });
+  const storePackage = {
+    Name: "OpenAI.Codex",
+    InstallLocation: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26",
+    PackageFamilyName: "OpenAI.Codex_2p2nqsd0c76g0",
+    AppExecutionAlias: "chatgpt-desktop.exe",
+  };
+  const normalize = (fields = {}) => normalizeInstallations({ storePackages: [{ ...storePackage, ...fields }] })[0];
+
+  assert.equal(normalize().appExecutionAliasPath,
+    `${localAppData}\\Microsoft\\WindowsApps\\OpenAI.Codex_2p2nqsd0c76g0\\chatgpt-desktop.exe`);
+  const otherAliasPath = `${localAppData}\\Microsoft\\WindowsApps\\Other.Package_123\\chatgpt-desktop.exe`;
+  for (const familyName of [undefined, null, "", "invalid/family", storePackage.PackageFamilyName]) {
+    assert.equal(isStoreAppExecutionAliasPath(otherAliasPath, familyName), false, String(familyName));
+  }
+  for (const alias of ["..\\evil.exe", "../evil.exe", "C:\\evil.exe", "name.exe:stream", "bad alias.exe", "name.exe\n", "NUL.exe", "name.bat"]) {
+    assert.equal("appExecutionAliasPath" in normalize({ AppExecutionAlias: alias }), false, JSON.stringify(alias));
+  }
+  for (const familyName of ["..", ".", "..\\outside", "wrong/family", "bad family", "family."]) {
+    assert.equal("appExecutionAliasPath" in normalize({ PackageFamilyName: familyName }), false, familyName);
+  }
 });

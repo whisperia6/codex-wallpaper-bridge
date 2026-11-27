@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { normalizeHostType } from "../bridge-runtime/src/host-profiles.mjs";
+import { validateCdpPort } from "./installations.mjs";
 
 const COMMAND_TIMEOUT_MS = 180_000;
 const ANSI_PATTERN = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
@@ -33,6 +34,7 @@ export async function invokeBridgeAction({
   action,
   adaptive,
   hostType,
+  port,
   // GPU Scene startup may use the shared slot's bounded 90s first-frame gate,
   // plus one CSP document initialization. VP8 keeps its own provider deadline.
   timeoutMs = action === "inject" || action === "retry-engine" ? 150_000 : action === "restore" ? 30_000 : 15_000,
@@ -54,6 +56,7 @@ export async function invokeBridgeAction({
     throw new Error("兼容模式必须是布尔值");
   }
   const normalizedHostType = hostType === undefined ? undefined : normalizeHostType(hostType, { strict: true });
+  const normalizedPort = port === undefined ? undefined : validateCdpPort(port);
   const response = await fetch(new URL("api/action", base), {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: base.origin },
@@ -61,12 +64,17 @@ export async function invokeBridgeAction({
       action,
       ...(adaptive === undefined ? {} : { adaptive }),
       ...(normalizedHostType === undefined ? {} : { hostType: normalizedHostType }),
+      ...(normalizedPort === undefined ? {} : { port: normalizedPort }),
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || payload?.ok !== true) {
-    throw new Error(payload?.error || payload?.message || `壁纸操作返回 HTTP ${response.status}`);
+    const error = new Error(payload?.error || payload?.message || `壁纸操作返回 HTTP ${response.status}`);
+    error.statusCode = response.status;
+    if (payload?.notExecuted === true) error.notExecuted = true;
+    if (Array.isArray(payload?.registeredHosts)) error.registeredHosts = payload.registeredHosts;
+    throw error;
   }
   return payload;
 }

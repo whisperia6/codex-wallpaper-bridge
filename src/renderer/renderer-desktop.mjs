@@ -18,14 +18,16 @@ if (api.windowChrome === true) elements.desktopTitlebar.hidden = false;
 let titlebarThemeRevision = 0;
 const state = {
   installations: [],
+  activeInjectionTargets: [],
   selectedId: null,
   port: 9335,
+  portsByHost: {},
+  defaultPortsByHost: { codex: 9335, antigravity: 9336 },
   adaptive: true,
   busy: false,
   feedback: "选择壁纸后，点击应用即可生效",
   feedbackTone: "idle",
   controlUrl: null,
-  controlPort: null,
   controlReady: false,
   controlLoadPromise: null,
   requestSequence: 0,
@@ -85,8 +87,11 @@ function showPlaceholder(title, detail, connection = "connecting") {
 function desktopPayload() {
   return {
     installations: state.installations,
+    activeInjectionTargets: state.activeInjectionTargets,
     selectedId: state.selectedId,
     port: state.port,
+    portsByHost: state.portsByHost,
+    defaultPortsByHost: state.defaultPortsByHost,
     adaptive: state.adaptive,
     busy: state.busy,
     feedback: state.feedback,
@@ -109,8 +114,12 @@ function sendDesktopState() {
 
 function updateDesktopState(payload = {}) {
   state.installations = payload.installations || state.installations;
+  if (Array.isArray(payload.activeInjectionTargets)) state.activeInjectionTargets = payload.activeInjectionTargets;
   state.selectedId = payload.selectedId || state.installations[0]?.id || null;
-  if (Number.isInteger(payload.port)) state.port = payload.port;
+  if (payload.defaultPortsByHost) state.defaultPortsByHost = payload.defaultPortsByHost;
+  if (payload.portsByHost) state.portsByHost = { ...payload.portsByHost };
+  if (Number.isInteger(payload.port)) state.portsByHost[selectedHostType()] = payload.port;
+  state.port = rememberedPort(state.selectedId);
   if (typeof payload.adaptive === "boolean") state.adaptive = payload.adaptive;
   sendDesktopState();
 }
@@ -135,18 +144,16 @@ function loadControlFrame(url, forceReload = false) {
   }
 }
 
-async function ensureControlPanel({ port = state.port, forceReload = false } = {}) {
-  const desiredPort = normalizePort(port);
-  if (!forceReload && state.controlReady && state.controlPort === desiredPort) return state.controlUrl;
+async function ensureControlPanel({ forceReload = false } = {}) {
+  if (!forceReload && state.controlReady) return state.controlUrl;
   if (state.controlLoadPromise) return state.controlLoadPromise;
 
   state.controlLoadPromise = (async () => {
-    const result = await api.openControlPanel({ port: desiredPort });
+    const result = await api.openControlPanel({});
     if (!result?.ok) throw new Error(result?.message || "壁纸工作台启动失败");
     const url = trustedControlUrl(result.url);
-    const shouldReload = forceReload || state.controlUrl !== url || state.controlPort !== desiredPort;
+    const shouldReload = forceReload || state.controlUrl !== url;
     state.controlUrl = url;
-    state.controlPort = desiredPort;
     if (shouldReload || !state.controlReady) loadControlFrame(url, shouldReload);
     return url;
   })();
@@ -183,42 +190,60 @@ async function flushControlSettings() {
   return result;
 }
 
-function selectedHostLabel(installationId = state.selectedId) {
+function selectedHostType(installationId = state.selectedId) {
   const entry = state.installations.find((item) => item.id === installationId);
   if (entry?.hostType === "antigravity" || /(?:^|[\\/])antigravity\.exe$/i.test(String(entry?.path || ""))) {
-    return "Antigravity";
+    return "antigravity";
   }
-  return entry ? "Codex" : "目标应用";
+  return "codex";
+}
+
+function rememberedPort(installationId) {
+  const hostType = selectedHostType(installationId);
+  return state.portsByHost[hostType] ?? state.defaultPortsByHost[hostType];
+}
+
+function selectTarget(installationId, port) {
+  const selectedPort = normalizePort(port ?? rememberedPort(installationId));
+  state.selectedId = installationId;
+  state.portsByHost[selectedHostType()] = selectedPort;
+  state.port = selectedPort;
+  return selectedPort;
 }
 
 async function applyCodex(payload = {}) {
   const selectedId = payload.installationId || state.selectedId;
-  const selectedPort = normalizePort(payload.port ?? state.port);
   const adaptive = payload.adaptive !== false;
   if (!selectedId) throw new Error("请选择目标应用");
-  state.selectedId = selectedId;
-  state.port = selectedPort;
+  const selectedPort = normalizePort(payload.port ?? rememberedPort(selectedId));
+  const owner = state.activeInjectionTargets.find(({ installationId, port, reconcilePending }) =>
+    reconcilePending !== true && port === selectedPort && installationId !== selectedId);
+  if (owner) {
+    const hostName = owner.hostType === "antigravity" ? "Antigravity" : "Codex";
+    throw new Error(`CDP 端口 ${selectedPort} 已被 ${hostName} 占用，请为当前安装选择不同的端口`);
+  }
+  selectTarget(selectedId, selectedPort);
   state.adaptive = adaptive;
-  const hostName = selectedHostLabel(selectedId);
+  const hostName = selectedHostType(selectedId) === "antigravity" ? "Antigravity" : "Codex";
 
   setFeedback("正在保存壁纸设置…", "busy");
   await flushControlSettings();
   setFeedback(`正在应用到 ${hostName}…`, "busy");
   const result = await api.applyCodex({ installationId: selectedId, port: selectedPort, adaptive });
+  if (Array.isArray(result?.activeInjectionTargets)) state.activeInjectionTargets = result.activeInjectionTargets;
   if (result?.canceled) setFeedback(result.message || `已取消，${hostName} 未被关闭`, "idle");
   else if (result?.ok) setFeedback(result.message || `已应用到 ${hostName}`, "success");
   else setFeedback(result?.message || "应用失败，详情已写入本地日志", "error");
 
-  if (selectedPort !== state.controlPort) {
-    await ensureControlPanel({ port: selectedPort, forceReload: true });
-  }
   return result;
 }
 
 async function restoreOfficialAppearance(payload = {}) {
-  const selectedPort = normalizePort(payload.port ?? state.port);
+  const installationId = payload.installationId || state.selectedId;
+  const selectedPort = selectTarget(installationId, payload.port);
   setFeedback("正在恢复官方外观…", "busy");
-  const result = await api.restore({ installationId: payload.installationId || state.selectedId, port: selectedPort });
+  const result = await api.restore({ installationId, port: selectedPort });
+  if (Array.isArray(result?.activeInjectionTargets)) state.activeInjectionTargets = result.activeInjectionTargets;
   if (result?.ok) setFeedback("已恢复官方外观", "success");
   else setFeedback(result?.message || "恢复失败，详情已写入本地日志", "error");
   return result;
@@ -227,13 +252,8 @@ async function restoreOfficialAppearance(payload = {}) {
 async function executeDesktopAction(action, payload = {}) {
   if (state.busy) return { ok: false, message: "当前操作尚未完成，请稍候" };
   state.busy = true;
-  sendDesktopState();
   try {
-    if (action === "apply") {
-      state.selectedId = payload.installationId || state.selectedId;
-      state.port = normalizePort(payload.port ?? state.port);
-      state.adaptive = payload.adaptive !== false;
-    }
+    if (action !== "apply" && action !== "restore") sendDesktopState();
     if (action === "refresh-installations") {
       const result = await api.refreshInstallations();
       updateDesktopState(result);
@@ -282,6 +302,17 @@ window.addEventListener("message", (event) => {
     sendDesktopState();
     return;
   }
+  if (message.type === "target-change" && state.controlUrl && !state.busy) {
+    if (!state.installations.some(({ id }) => id === message.installationId)) return;
+    try {
+      selectTarget(message.installationId, message.port);
+      if (typeof message.adaptive === "boolean") state.adaptive = message.adaptive;
+      sendDesktopState();
+    } catch (error) {
+      setFeedback(error.message, "error");
+    }
+    return;
+  }
   if (message.type === "desktop-request" && typeof message.requestId === "string") {
     void handleDesktopRequest(message);
     return;
@@ -298,8 +329,9 @@ window.addEventListener("message", (event) => {
 api.onTrayAction((action) => {
   if (action === "control-disconnected") {
     state.controlReady = false;
+    state.activeInjectionTargets = [];
     showPlaceholder("壁纸工作台连接已断开", "正在尝试重新连接…", "disconnected");
-    void ensureControlPanel({ port: state.port, forceReload: true }).catch(() => {});
+    void ensureControlPanel({ forceReload: true }).catch(() => {});
     return;
   }
   if (action === "apply") void executeDesktopAction("apply", {
@@ -317,7 +349,7 @@ window.addEventListener("unhandledrejection", (event) => {
 async function initialize() {
   try {
     updateDesktopState(await api.getState());
-    await ensureControlPanel({ port: state.port });
+    await ensureControlPanel();
   } catch (error) {
     showPlaceholder("壁纸工作台启动失败", error.message, "error");
   }

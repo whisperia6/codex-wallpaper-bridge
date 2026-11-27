@@ -110,6 +110,13 @@
     return "Codex";
   }
 
+  function rememberedPort(installationId) {
+    const isAntigravity = hostDisplayLabel(selectedInstallation(installationId)) === "Antigravity";
+    const hostType = isAntigravity ? "antigravity" : "codex";
+    return latestDesktopState?.portsByHost?.[hostType] ?? latestDesktopState?.defaultPortsByHost?.[hostType]
+      ?? (isAntigravity ? 9336 : 9335);
+  }
+
   function syncTargetCopy(selectedId, disabled = Boolean(latestDesktopState?.busy)) {
     const elements = controls();
     const hostName = hostDisplayLabel(selectedInstallation(selectedId));
@@ -154,7 +161,7 @@
       }
       elements.installation.value = currentValue;
     }
-    elements.port.value = String(state.port || 9335);
+    elements.port.value = String(state.port ?? rememberedPort(currentValue));
     elements.adaptive.checked = state.adaptive !== false;
     setStatus(state.feedback || "选择壁纸后应用到目标应用", state.feedbackTone || "idle");
 
@@ -181,13 +188,19 @@
 
   async function runControlAction(action, payload) {
     try {
+      if (action === "apply") {
+        const owner = latestDesktopState?.activeInjectionTargets?.find(({ installationId, port, reconcilePending }) =>
+          reconcilePending !== true && port === payload.port && installationId !== payload.installationId);
+        if (owner) throw new Error(`CDP 端口 ${payload.port} 已被 ${hostDisplayLabel(owner)} 占用，请为当前安装选择不同的端口`);
+      }
       const result = await requestDesktop(action, payload);
       if (!result?.ok && !result?.canceled) setStatus(result?.message || "操作失败", "error");
       if (result?.ok && !result?.canceled && (action === "apply" || action === "restore")) {
         window.dispatchEvent(new CustomEvent("cwb-desktop-injection-change", {
           detail: {
-            injected: action === "apply",
-            hostName: hostDisplayLabel(selectedInstallation(payload?.installationId)),
+            injected: result.injectorActive ?? action === "apply",
+            hostName: result.activeHosts?.map(({ hostType }) => hostDisplayLabel({ hostType })).join("、")
+              || hostDisplayLabel(selectedInstallation(payload?.installationId)),
           },
         }));
       }
@@ -241,7 +254,12 @@
   window.addEventListener("DOMContentLoaded", () => {
     const elements = controls();
     elements.bar.hidden = false;
-    elements.installation.addEventListener("change", () => syncTargetCopy(elements.installation.value));
+    elements.installation.addEventListener("change", () => {
+      elements.port.value = String(rememberedPort(elements.installation.value));
+      syncTargetCopy(elements.installation.value);
+      notify("target-change", currentPayload());
+    });
+    elements.port.addEventListener("change", () => notify("target-change", currentPayload()));
     elements.refresh.addEventListener("click", () => void runControlAction("refresh-installations"));
     elements.choose.addEventListener("click", () => void runControlAction("choose-executable"));
     elements.apply.addEventListener("click", () => void runControlAction("apply", currentPayload()));

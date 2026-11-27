@@ -1,10 +1,11 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { isCdpEndpointReady } from "./cdp-client.mjs";
-import { validateCdpPort, validateExecutable } from "./installations.mjs";
+import { isStoreAppExecutionAliasPath, validateCdpPort, validateExecutable } from "./installations.mjs";
 import { tryRunWinHelper } from "./win-helper.mjs";
 import { buildProxyEnvironment, hostDisplayName, inferHostTypeFromPath, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
@@ -278,11 +279,13 @@ export function formatWindowsArgumentLine(args) {
   }).join(" ");
 }
 
-async function activateStoreCodex({
+export async function activateStoreCodex({
   appUserModelId,
   args,
   signal,
-  processRunner,
+  onLog = () => {},
+  processRunner = execFileAsync,
+  runWinHelper = tryRunWinHelper,
 }) {
   signal?.throwIfAborted();
   if (typeof appUserModelId !== "string" || !STORE_AUMID_PATTERN.test(appUserModelId)) {
@@ -300,14 +303,23 @@ async function activateStoreCodex({
       CWB_STORE_ARGS: formatWindowsArgumentLine(args),
     },
   };
-  const helperResult = processRunner === undefined
-    ? await tryRunWinHelper("activate-store-app", execOptions)
-    : null;
-  const { stdout } = helperResult ?? await (processRunner ?? execFileAsync)(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", ACTIVATE_STORE_APP_SCRIPT],
-    execOptions,
-  );
+  let activationResult;
+  try {
+    activationResult = await runWinHelper("activate-store-app", execOptions);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error?.name === "AbortError") throw error;
+    onLog({ stream: "system", text: `Store 原生激活失败，尝试 PowerShell 激活：${error.message}\n` });
+  }
+  if (activationResult == null) {
+    signal?.throwIfAborted();
+    activationResult = await processRunner(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", ACTIVATE_STORE_APP_SCRIPT],
+      execOptions,
+    );
+  }
+  const { stdout } = activationResult;
   const parsed = JSON.parse(String(stdout || "").replace(/^\uFEFF/, "").trim());
   const processId = Number(parsed?.processId);
   if (!Number.isInteger(processId) || processId <= 0) {
@@ -424,14 +436,17 @@ export async function launchCodex({
   let cleanupLaunched = () => {};
 
   let activatedExistingStore = false;
-  if (installation?.kind === "store" && typeof installation.appUserModelId === "string"
-    && STORE_AUMID_PATTERN.test(installation.appUserModelId) && typeof activateStoreApp === "function") {
+  const isStore = installation?.kind === "store";
+  const appUserModelId = installation?.appUserModelId;
+  const hasValidStoreId = typeof appUserModelId === "string" && STORE_AUMID_PATTERN.test(appUserModelId);
+  if (isStore && hasValidStoreId && typeof activateStoreApp === "function") {
     try {
-      onLog({ stream: "system", text: `通过 Microsoft Store 身份启动 ${installation.appUserModelId}\n` });
+      onLog({ stream: "system", text: `通过 Microsoft Store 身份启动 ${appUserModelId}\n` });
       const activated = await activateStoreApp({
-        appUserModelId: installation.appUserModelId,
+        appUserModelId,
         args,
         signal,
+        onLog,
       });
       launchedPid = activated.processId;
       if (activated.createdNew === false) {
@@ -442,23 +457,42 @@ export async function launchCodex({
         };
       }
     } catch (error) {
-      if (signal?.aborted || error?.name === "AbortError") throw error;
-      onLog({ stream: "system", text: `Store 身份启动未完成，回退为直接启动可执行文件：${error.message}\n` });
+      signal?.throwIfAborted();
+      if (error?.name === "AbortError") throw error;
+      onLog({ stream: "system", text: `Store 身份激活失败：${error.message}\n` });
     }
   }
 
   if (launchedPid === null) {
-    onLog({ stream: "system", text: `启动 ${executablePath}\n` });
+    let launchPath = executablePath;
+    const aliasPath = installation?.appExecutionAliasPath;
+    const packageFamilyName = hasValidStoreId ? appUserModelId.split("!", 1)[0] : undefined;
+    if (isStore && isStoreAppExecutionAliasPath(aliasPath, packageFamilyName)) {
+      try {
+        await validateExecutableFn(aliasPath);
+        launchPath = aliasPath;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error?.name === "AbortError") throw error;
+        onLog({ stream: "system", text: `Store 执行别名不可用：${error.message}\n` });
+      }
+    }
+    signal?.throwIfAborted();
+    const launchMessage = launchPath !== executablePath
+      ? "通过 Microsoft Store 执行别名启动"
+      : isStore ? "Store 执行别名不可用，直接启动" : "启动";
+    onLog({ stream: "system", text: `${launchMessage} ${launchPath}\n` });
     const spawnEnv = buildProxyEnvironment(args, process.env);
     // Antigravity ships with RunAsNode enabled for its own sidecar workers;
     // inheriting ELECTRON_RUN_AS_NODE=1 makes it reject Chromium flags.
     delete spawnEnv.ELECTRON_RUN_AS_NODE;
-    const child = spawnImpl(executablePath, args, {
+    const child = spawnImpl(launchPath, args, {
       detached: true,
       stdio: "ignore",
       windowsHide: false,
       env: spawnEnv,
     });
+    if (typeof child.once === "function") await once(child, "spawn");
     child.unref();
     launchedPid = child.pid;
     cleanupLaunched = () => {
@@ -467,6 +501,7 @@ export async function launchCodex({
   }
 
   try {
+    signal?.throwIfAborted();
     if (activatedExistingStore) {
       const listening = await isEndpointReady(normalizedPort);
       signal?.throwIfAborted();
