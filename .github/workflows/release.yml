@@ -1,0 +1,113 @@
+name: Release Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate release version
+        id: release_info
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $version = $package.version
+          if (($env:RELEASE_TAG -creplace '^v', '') -cne $version) {
+            throw "Tag '$env:RELEASE_TAG' does not match package.json version '$version'."
+          }
+
+          $executableName = $package.build.win.executableName
+          if (-not $executableName) { $executableName = 'Lumina' }
+          $releaseDir = "out/release-$version"
+          @(
+            "version=$version"
+            "installer_path=$releaseDir/$executableName-$version-Setup.exe"
+            "checksums_path=$releaseDir/SHA256SUMS.txt"
+          ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8NoBOM
+
+      - run: npm ci
+
+      - name: Install Electron runtime
+        run: npx --no install-electron
+
+      - run: npm test
+
+      - name: Package Windows installer
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if (-not $env:CSC_LINK) { $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false' }
+          npm run package
+
+      - name: Generate SHA-256 checksum
+        env:
+          INSTALLER_PATH: ${{ steps.release_info.outputs.installer_path }}
+          CHECKSUMS_PATH: ${{ steps.release_info.outputs.checksums_path }}
+        run: |
+          if (-not (Test-Path -LiteralPath $env:INSTALLER_PATH -PathType Leaf)) {
+            throw "Installer not found: $env:INSTALLER_PATH"
+          }
+
+          $hash = (Get-FileHash -LiteralPath $env:INSTALLER_PATH -Algorithm SHA256).Hash.ToUpperInvariant()
+          $installerName = Split-Path -Path $env:INSTALLER_PATH -Leaf
+          Set-Content -LiteralPath $env:CHECKSUMS_PATH -Value "$hash  $installerName`n" -Encoding utf8NoBOM -NoNewline
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.release_info.outputs.version }}
+          INSTALLER_PATH: ${{ steps.release_info.outputs.installer_path }}
+          CHECKSUMS_PATH: ${{ steps.release_info.outputs.checksums_path }}
+        run: |
+          $releaseJson = gh release view --json 'isDraft,assets' -- "$env:RELEASE_TAG" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            $expectedAssets = @(
+              (Split-Path -Path $env:INSTALLER_PATH -Leaf)
+              (Split-Path -Path $env:CHECKSUMS_PATH -Leaf)
+            )
+            $missingAssets = @($expectedAssets | Where-Object { $_ -cnotin $release.assets.name })
+            if ($release.isDraft -eq $false -and $missingAssets.Count -eq 0) {
+              Write-Host "Release '$env:RELEASE_TAG' is already published with all expected assets."
+              exit 0
+            }
+
+            $missingAssetList = if ($missingAssets.Count) { $missingAssets -join ', ' } else { 'none' }
+            throw "Release '$env:RELEASE_TAG' is incomplete (isDraft=$($release.isDraft), missing assets: $missingAssetList)."
+          }
+
+          $releaseArgs = @('release', 'create', '--verify-tag')
+          $notesPath = "docs/RELEASE_$env:RELEASE_VERSION.md"
+          if (Test-Path -LiteralPath $notesPath -PathType Leaf) {
+            $releaseArgs += @('--notes-file', $notesPath)
+          } else {
+            $releaseArgs += '--generate-notes'
+          }
+          $coreVersion = $env:RELEASE_VERSION.Split('+')[0]
+          if ($coreVersion.Contains('-')) {
+            $releaseArgs += '--prerelease'
+          }
+
+          gh @releaseArgs -- "$env:RELEASE_TAG" "$env:INSTALLER_PATH" "$env:CHECKSUMS_PATH"
