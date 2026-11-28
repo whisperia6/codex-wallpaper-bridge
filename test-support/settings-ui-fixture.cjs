@@ -40,6 +40,9 @@ app.whenReady().then(async () => {
 }).catch(error => { console.error(error); app.exit(1); });
 
 async function verifySettings() {
+  const noTransition = document.createElement('style');
+  noTransition.textContent = '*, *::before, *::after { transition: none !important; animation: none !important; }';
+  document.head.append(noTransition);
   const $ = selector => document.querySelector(selector);
   const $$ = selector => [...document.querySelectorAll(selector)];
   const activeTab = () => $('[role="tab"][aria-selected="true"]').dataset.settingsTabTrigger;
