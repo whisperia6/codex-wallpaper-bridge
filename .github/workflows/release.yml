@@ -14,9 +14,6 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     defaults:
       run:
         shell: pwsh
@@ -53,7 +50,11 @@ jobs:
       - name: Install Electron runtime
         run: npx --no install-electron
 
-      - run: npm test
+      - name: Run tests
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: npm test
 
       - name: Package Windows installer
         env:
