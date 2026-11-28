@@ -12,6 +12,11 @@
 ![Windows x64](https://img.shields.io/badge/Windows-x64-0ea5e9?style=flat-square&labelColor=1e293b)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-10b981?style=flat-square&labelColor=1e293b)
 ![WebWallGL 3.1.0](https://img.shields.io/badge/WebWallGL-3.1.0-8b5cf6?style=flat-square&labelColor=1e293b)
+[![License: MIT](https://img.shields.io/badge/License-MIT-64748b?style=flat-square&labelColor=1e293b)](LICENSE)
+
+<p>
+  <strong>简体中文</strong> &nbsp;|&nbsp; <a href="README.en.md">English</a>
+</p>
 
 <p>
   <a href="#界面预览">界面预览</a> &nbsp;·&nbsp;
