@@ -103,7 +103,7 @@
 
 ### 方式一：下载安装包（推荐）
 
-前往 [GitHub Releases](https://github.com/whisperia6/lumina/releases/latest) 下载最新版安装包（当前发布 `v1.3.1`：[Lumina-1.3.1-Setup.exe](https://github.com/whisperia6/lumina/releases/download/v1.3.1/Lumina-1.3.1-Setup.exe)）：
+前往 [GitHub Releases](https://github.com/whisperia6/lumina/releases/latest) 下载最新版安装包（当前发布 `v1.4.0`：[Lumina-1.4.0-Setup.exe](https://github.com/whisperia6/lumina/releases/download/v1.4.0/Lumina-1.4.0-Setup.exe)）：
 - 中文安装向导，支持自选安装目录（推荐 D / F 盘），安装后秒开；卸载默认保留个人壁纸设置。
 
 ### 方式二：从源码运行（Node.js 22+）
@@ -216,5 +216,5 @@ npm test
 
 ## 更多文档与致谢
 
-- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.3.1](docs/RELEASE_1.3.1.md) · [1.3.0](docs/RELEASE_1.3.0.md) · [1.2.2](docs/RELEASE_1.2.2.md) · [1.2.1](docs/RELEASE_1.2.1.md) · [1.2.0](docs/RELEASE_1.2.0.md) · [1.1.0](docs/RELEASE_1.1.0.md) · [1.0.0](docs/RELEASE_1.0.0.md)
+- [运行时说明](bridge-runtime/README.md) · [Web 壁纸扩展接口](docs/WEB_API.md) · [1.4.0](docs/RELEASE_1.4.0.md) · [1.3.1](docs/RELEASE_1.3.1.md) · [1.3.0](docs/RELEASE_1.3.0.md) · [1.2.2](docs/RELEASE_1.2.2.md) · [1.2.1](docs/RELEASE_1.2.1.md) · [1.2.0](docs/RELEASE_1.2.0.md) · [1.1.0](docs/RELEASE_1.1.0.md) · [1.0.0](docs/RELEASE_1.0.0.md)
 - 场景渲染基于 **WebWallGL 3.1.0**，相关组件来源、版本与开源许可见 [第三方声明](bridge-runtime/vendor/webwallgl/NOTICE.md)。
