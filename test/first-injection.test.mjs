@@ -81,7 +81,8 @@ function gpuFixture(t, { verified = true, lateTheme = false, hidden = new Set(),
     prepare: async (session, key) => {
       calls.push('prepare');
       if (broken) throw Error(brokenError);
-      const lease = { key, closed: false, release: async () => { lease.closed = true; session.sceneLeases.delete(lease); }, retire() {} };
+      const lease = { key, session, closed: false, release: async () => { lease.closed = true; session.sceneLeases.delete(lease); },
+        retire() { lease.retiring = true; } };
       session.sceneLeases.add(lease); return lease;
     },
     close: async () => {},
@@ -132,16 +133,16 @@ test('verified untouched HTTP500 is retired only when a full fresh target list p
   }
 });
 
-test('GPU initial failure tries bounded fallbacks but never replaces an already committed wallpaper', async t => {
+test('GPU failure retries valid fallbacks on an existing renderer and only commits decoded media', async t => {
   const f = gpuFixture(t, { broken: true });
   const fallbackScripts = [{ reason: 'embedded_video', script: 'fallback-bad' }, { reason: 'preview', script: 'fallback-good' }];
   const result = await f.injector.start({ ...gpuPlan, fallbackScripts });
   assert.equal(result.failed, 0); assert.equal(result.sessions, 1); assert.equal(result.timings[0].degraded, true);
   assert.equal(result.timings[0].fallbackReason, 'preview');
   assert.ok(f.statuses.some(status => status.message?.includes('已降级 preview')));
-  const session = f.injector.sessions.get('main'); session.fallbackFor = null;
+  const session = f.injector.sessions.get('main');
   const update = await f.injector.update({ ...gpuPlan, fallbackScripts });
-  assert.equal(update.failed, 1); assert.equal(session.lastApplied.directSceneId, 'scene');
+  assert.equal(update.failed, 0); assert.equal(session.lastApplied.directSceneId, 'scene');
 });
 
 test('GPU fallback cannot convert receiver loss or a restoration/identity failure into success', async t => {
@@ -160,6 +161,19 @@ test('GPU first-frame failure uses the existing fallback without restarting appl
   assert.equal(f.calls.filter(call => call === 'apply').length, 1);
   assert.equal(f.calls.filter(call => call === 'Page.reload').length, 1);
   assert.equal(f.calls.filter(call => call === 'fail').length, 1);
+});
+
+test('a committed Scene that stops rendering switches to its playable embedded fallback', async t => {
+  const f = gpuFixture(t);
+  await f.injector.start({ ...gpuPlan, fallbackScripts: [{ reason: 'embedded_video', script: 'fallback-good' }] });
+  const session = f.injector.sessions.get('main'), failed = session.sceneLease;
+  failed.snapshot = { failed: true, committed: true };
+  f.injector.fallbackFailedScene(failed);
+  await session.installationQueue;
+  assert.equal(session.lastInjection.fallbackReason, 'embedded_video');
+  assert.equal(session.sceneLease, null);
+  assert.equal(failed.retiring, true);
+  assert.equal(f.calls.filter(call => call === 'apply').length, 1);
 });
 
 test('GPU becoming hidden during first-frame wait is deferred, frees its candidate and reopens only after visibility', async t => {
@@ -352,7 +366,7 @@ test('visible target is applied before hidden ones and hidden concurrency is bou
 test('serialized theme preflight exposes the same restore-aware theme implementation', () => {
   const bootstrap = buildBootstrapScript({ directSceneEnabled: true });
   assert.match(bootstrap, /prepareTheme: ensureDarkTheme/);
-  assert.match(bootstrap, /m3-media-policy-v6/);
+  assert.match(bootstrap, /m3-media-policy-v9/);
 });
 
 test('all-hidden startup serializes the first successful theme capture before parallel followers', async (t) => {

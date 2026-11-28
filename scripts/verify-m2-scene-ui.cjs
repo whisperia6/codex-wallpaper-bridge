@@ -120,7 +120,7 @@ async function main() {
     await wait(`window.state?.phase==='ready' && window.state.draws>0`, 45000);
     rendererContext = contexts.find((context) => context.origin === scene.origin && context.auxData?.isDefault);
     assert.ok(rendererContext, 'renderer execution context');
-    const state = await inScene(`({type:__wp.getState().type,scene:!!window.__scene,layers:window.__sceneLayers?.length,canvas:!!document.querySelector('canvas'),fallback:!!document.querySelector('iframe')})`);
+    const state = await inScene(`({type:window.__cwbScene?.source==='cwb-scene'?'scene':null,scene:!!window.__scene,layers:window.__sceneLayers?.length,canvas:!!document.querySelector('canvas'),fallback:!!document.querySelector('iframe')})`);
     assert.equal(state.type, 'scene'); assert.equal(state.scene, true); assert.equal(state.canvas, true);
     assert.equal(state.fallback, false); assert.ok(state.layers > 0);
     report.firstFrame = await evaluate('window.state'); report.sceneState = state;

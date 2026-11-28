@@ -13,7 +13,7 @@ export function createDirectSceneTransport(createSceneSlot, readback, validate, 
     records.set(descriptor.handle, { descriptor, slot: null, released: false, commands: [], pending: new Map() });
     return true;
   }
-  function create({ wallpaper, effects }) {
+  function create({ wallpaper, effects, initial = false }) {
     if (closed || live.size >= 2) throw Error('gpu_slot_capacity');
     const record = [...records.values()].find((value) => value.descriptor.key === wallpaper.id && !value.slot && !value.released);
     if (!record) throw Error('gpu_descriptor_unavailable');
@@ -24,6 +24,12 @@ export function createDirectSceneTransport(createSceneSlot, readback, validate, 
     node.dataset.cwbRenderer = 'direct-gpu';
     frame.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;pointer-events:none';
     frame.title = descriptor.type === 'web' ? 'Codex GPU Web' : 'Codex GPU Scene'; frame.allow = 'autoplay';
+    const poster = initial && descriptor.type === 'scene' && wallpaper.previewUrl ? document.createElement('img') : null;
+    if (poster) {
+      poster.alt = ''; poster.referrerPolicy = 'no-referrer'; poster.src = wallpaper.previewUrl;
+      poster.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:var(--cwb-fit,cover);object-position:var(--cwb-position,50% 50%)';
+      node.append(poster); node.style.removeProperty('opacity');
+    }
     label.hidden = true;
     label.style.cssText = 'position:absolute;bottom:8px;left:8px;color:#ffe08a;background:#211b09;font:12px sans-serif;padding:4px';
     node.append(frame, label);
@@ -35,7 +41,7 @@ export function createDirectSceneTransport(createSceneSlot, readback, validate, 
       if (request.op === 'renew' && request.handle === descriptor.handle && !record.released) return { ok: true };
       throw Error('gpu_lease_closed');
     };
-    const scene = createSceneSlot({ node: frame, project: { id: wallpaper.id, type: descriptor.type || 'scene' }, client: descriptor.handle, api,
+    const scene = createSceneSlot({ node: frame, poster, project: { id: wallpaper.id, type: descriptor.type || 'scene' }, client: descriptor.handle, api,
       getEffects: () => currentEffects, window: globalThis, readback, validate, validateInput, playback, preserveOnFailure: true,
       onMediaControl: value => new Promise((resolve, reject) => {
         if (record.released || record.pending.size >= 4) { reject(Error('media_control_unavailable')); return; }
@@ -56,6 +62,10 @@ export function createDirectSceneTransport(createSceneSlot, readback, validate, 
         currentEffects = value.effects;
         frame.style.transform = 'scale(' + ((currentEffects.zoom ?? 100) / 100) + ') scaleX(' + (currentEffects.mirror ? -1 : 1) + ')';
         frame.style.transformOrigin = currentEffects.position || '50% 50%';
+        if (poster) {
+          poster.style.transform = frame.style.transform;
+          poster.style.transformOrigin = frame.style.transformOrigin;
+        }
         scene.update();
       },
       activate() {

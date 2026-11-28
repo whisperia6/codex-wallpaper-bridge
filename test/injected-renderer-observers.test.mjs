@@ -186,6 +186,9 @@ function createRenderer({ sendMessageFromView } = {}) {
     contains(element) {
       return this === element || this.children.some((child) => child.contains(element));
     }
+    closest(selector) {
+      return this.matches(selector) ? this : this.parentNode?.closest(selector) ?? null;
+    }
     matches(selector) {
       return selector.split(", ").some((part) =>
         (part.startsWith("#") && part.slice(1) === this.id) ||
@@ -288,8 +291,9 @@ test("frosted shell repairs host style changes once and restores original inline
   const firstApplyWrite = writeLog.length;
   await renderer.run(buildApplyScript());
   assert.equal(sidebar.style.getPropertyValue("border-top-color"), "transparent");
-  assert.equal(sidebar.style.getPropertyValue("border-right-color"), "rgba(255,255,255,0.07)");
-  assert.equal(sidebar.style.getPropertyValue("background-color"), "rgba(12,16,24,0.22)");
+  assert.equal(sidebar.style.getPropertyValue("border-right-color"), "transparent");
+  assert.equal(sidebar.style.getPropertyValue("background-color"), "var(--cwb-sidebar-fill)");
+  assert.equal(sidebar.style.getPropertyValue("box-shadow"), "var(--cwb-sidebar-shadow)");
   assert.deepEqual(writeLog.slice(firstApplyWrite).filter(({ element, property }) => element === sidebar && property === "border-color"), []);
 
   sidebar.style.setProperty("padding", "4px");
@@ -303,7 +307,7 @@ test("frosted shell repairs host style changes once and restores original inline
   await renderer.runNextTimer();
   assert.deepEqual(writeLog.slice(firstRepairWrite).filter(({ element }) => element === sidebar).map(({ property }) => property), ["border-right-color"]);
   assert.equal(renderer.deliveries, beforeRepair);
-  assert.equal(sidebar.style.getPropertyValue("border-right-color"), "rgba(255,255,255,0.07)");
+  assert.equal(sidebar.style.getPropertyValue("border-right-color"), "transparent");
   assert.equal(renderer.runaway, false);
 
   // Removing the bridge root schedules a remount without observing the remount itself.

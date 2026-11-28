@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { normalizeHostType } from "../bridge-runtime/src/host-profiles.mjs";
+import { WALLPAPER_APPLY_REQUEST_TIMEOUT_MS } from "../bridge-runtime/src/engine-health.mjs";
 import { validateCdpPort } from "./installations.mjs";
 
 const COMMAND_TIMEOUT_MS = 180_000;
@@ -35,9 +36,7 @@ export async function invokeBridgeAction({
   adaptive,
   hostType,
   port,
-  // GPU Scene startup may use the shared slot's bounded 90s first-frame gate,
-  // plus one CSP document initialization. VP8 keeps its own provider deadline.
-  timeoutMs = action === "inject" || action === "retry-engine" ? 150_000 : action === "restore" ? 30_000 : 15_000,
+  timeoutMs = action === "inject" || action === "retry-engine" ? WALLPAPER_APPLY_REQUEST_TIMEOUT_MS : action === "restore" ? 30_000 : 15_000,
 }) {
   const base = new URL(String(controlUrl || ""));
   if (

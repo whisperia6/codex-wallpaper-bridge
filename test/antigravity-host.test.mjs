@@ -325,10 +325,10 @@ test("Antigravity compatibility script unifies seamless shell, applies frosted s
   assert.match(script, /--card-gap:\s*0px/);
   assert.match(script, /--card-edge:\s*transparent/);
   assert.match(script, /\[data-main-content-body\]/);
-  assert.match(script, /\[role="navigation"\]\[aria-label="Sidebar"\][\s\S]*?backdrop-filter:\s*blur\(var\(--cwb-sidebar-blur,\s*16px\)\)/);
+  assert.match(script, /\[role="navigation"\]\[aria-label="Sidebar"\][\s\S]*?backdrop-filter:\s*var\(--cwb-glass-filter\)/);
   assert.match(script, /\[data-cwb-sidebar-blur="off"\][\s\S]*?\[role="navigation"\]\[aria-label="Sidebar"\][\s\S]*?backdrop-filter:\s*none/);
   assert.match(script, /\[role=navigation\]\[aria-label=Sidebar\]/);
-  assert.match(script, /\.surface-composer > \.surface-composer-card/);
+  assert.match(script, /\[data-cwb-glass-composer="on"\] :is\(\.surface-composer-card/);
   assert.match(script, /\.agy-user-bubble/);
   assert.match(script, /button\[data-project-card="true"\]/);
   assert.match(script, /\.pointer-events-none\.bottom-0/);

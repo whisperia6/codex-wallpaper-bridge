@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { CdpWallpaperInjector } from '../bridge-overrides/src/cdp-injector.mjs';
 import { buildInjectionPlan } from '../bridge-overrides/src/injection-plan.mjs';
+import { NATIVE_SCENE_APPLY_TIMEOUT_MS } from '../bridge-runtime/src/engine-health.mjs';
 
 function fixture(t, { verified = true, broken = null } = {}) {
   const owners = [], calls = [], statuses = [], events = new Map(); let key = null, readyResolve;
@@ -16,8 +17,8 @@ function fixture(t, { verified = true, broken = null } = {}) {
   } };
   const socket = { ws: new EventEmitter(), closed: false,
     async connect() { calls.push({ op: 'connect' }); },
-    async call(method, params) {
-      calls.push({ method, params });
+    async call(method, params, timeoutMs) {
+      calls.push({ method, params, timeoutMs });
       if (method === 'Runtime.evaluate') {
         if (params.expression === 'bootstrap') return { result: { objectId: 'boot' } };
         if (params.expression === 'restore') return { result: { value: { ok: true } } };
@@ -193,6 +194,14 @@ test('native injection plans contain project identity only, never author URL/pat
     sceneScript: 'author-script', previewUrl: `${server.basePath}/api/preview/scene` }] };
   const plan = buildInjectionPlan({ server, inventory, config: { selectedId: 'scene', authorProperties: { scene: { enabled: true } } }, nativeEnabled: true });
   assert.equal(plan.nativeWallpaperId, 'scene'); assert.equal(plan.nativeEnabled, true);
+  assert.equal(plan.nativeScene, true);
   for (const value of ['D:/private', 'author-script', 'authorProperties']) assert.ok(!plan.applyScript.includes(value));
   assert.match(plan.applyScript, /"playable":"native"/);
+});
+
+test('native scene apply gives the CDP request time for the offscreen first frame', async (t) => {
+  const f = fixture(t);
+  await f.injector.start({ ...f.plan('scene'), nativeScene: true });
+  const apply = f.calls.find((call) => call.params?.expression === 'apply:scene');
+  assert.equal(apply?.timeoutMs, NATIVE_SCENE_APPLY_TIMEOUT_MS);
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EngineFailureMemory, createEngineHealthGate, selectEngineFallback } from '../bridge-runtime/src/engine-health.mjs';
+import { EngineFailureMemory, createEngineHealthGate, SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS, selectEngineFallback } from '../bridge-runtime/src/engine-health.mjs';
 import { createMediaSwitcher } from '../bridge-runtime/src/media-switch.mjs';
 
 function fixture(options = {}) {
@@ -34,6 +34,14 @@ test('first-frame timeout remembers failure; repeated load requires explicit ret
   assert.equal(blocked.gate.status().phase, 'failed'); f.memory.retry('scene-a'); assert.equal(f.memory.get('scene-a'), null);
   const retried = fixture({ failures: f.memory }); retried.beat(); retried.gate.frame({ width: 2, height: 2, sequence: 1, decoded: true });
   await retried.gate.ready;
+});
+test('scene owner first-frame grace has a hard deadline even with loading heartbeats', async () => {
+  const f = fixture({ firstFrameTimeoutMs: SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS });
+  f.advance(SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS);
+  f.beat('loading');
+  assert.equal(f.gate.status().phase, 'loading');
+  f.advance(1);
+  await assert.rejects(f.gate.ready, /first_frame_timeout/);
 });
 test('paused static rendering needs heartbeat but does not require new pixels', async () => {
   const f = fixture(); f.beat(); f.gate.frame({ width: 1, height: 1, sequence: 1, decoded: true }); await f.gate.ready;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,10 +9,10 @@ import { EngineFailureMemory } from '../bridge-runtime/src/engine-health.mjs';
 import { createMediaSwitcher } from '../bridge-runtime/src/media-switch.mjs';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(fn, ms = 2500) { const end = Date.now() + ms; while (!fn() && Date.now() < end) await delay(10); assert.ok(fn()); }
-async function fixture(t, { phase = 'renderable', invalidCapture = false, frozenSequence = false, pauseAcknowledged = true, encoding = false, codecLoadGate } = {}) {
+async function until(fn, ms = 2500) { const end = performance.now() + ms; while (!fn() && performance.now() < end) await delay(10); assert.ok(fn()); }
+async function fixture(t, { phase = 'renderable', type = 'web', invalidCapture = false, frozenSequence = false, pauseAcknowledged = true, encoding = false, codecLoadGate } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cwb-engine-owner-')); t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(path.join(root, 'project.json'), JSON.stringify({ type: 'web', file: 'index.html', general: { properties: { enabled: { type: 'bool', value: true } } } }));
+  await writeFile(path.join(root, 'project.json'), JSON.stringify({ type, file: 'index.html', general: { properties: { enabled: { type: 'bool', value: true } } } }));
   await writeFile(path.join(root, 'index.html'), '<html><head></head><body>unit fixture only</body></html>');
   const windows = [], sessions = [];
   const ipcMain = new EventEmitter(), png = Buffer.alloc(40); Buffer.from('89504e470d0a1a0a', 'hex').copy(png);
@@ -63,7 +63,7 @@ async function fixture(t, { phase = 'renderable', invalidCapture = false, frozen
       this.webContents.mainFrame.url = url;
       const html = await (await fetch(url)).text();
       if (url.endsWith('/codec')) { if (codecLoadGate) await codecLoadGate; return; }
-      this.state = { source: 'cwb-web', channel: JSON.parse(/channel=("[a-f0-9]+")/.exec(html)[1]), phase,
+      this.state = { source: `cwb-${type}`, channel: JSON.parse(/channel=("[a-f0-9]+")/.exec(html)[1]), phase,
         sequence: 0, propertyRevision: 0, properties: { enabled: true }, propertiesSupported: true };
     }
     isDestroyed() { return this.destroyed; }
@@ -75,8 +75,27 @@ async function fixture(t, { phase = 'renderable', invalidCapture = false, frozen
       clearCache: async () => { session.cacheCleared = true; }, clearStorageData: async () => { session.storageCleared = true; } }); return session;
   } } };
   return { root, windows, sessions, ipcMain, create: (options = {}) => new EngineRendererOwner({ electron,
-    project: { id: 'fixture', type: 'web', rootPath: root }, firstFrameTimeoutMs: 1000, ...options }) };
+    project: { id: 'fixture', type, rootPath: root }, firstFrameTimeoutMs: 1000, ...options }) };
 }
+test('owner accepts a late scene frame within the iframe transfer budget', async (t) => {
+  let now = Date.now();
+  const f = await fixture(t, { type: 'scene', phase: 'loading' });
+  const pkg = path.join(f.root, 'scene.pkg');
+  await writeFile(pkg, 'PKGV0001');
+  await truncate(pkg, 320 * 1024 ** 2);
+  t.mock.method(Date, 'now', () => now);
+  const owner = f.create({ firstFrameTimeoutMs: undefined });
+  t.after(() => owner.release());
+  await until(() => owner.status().sequence > 0);
+  const sequence = owner.status().sequence;
+  now += 110_000;
+  await until(() => owner.status().sequence > sequence || owner.status().closed);
+  assert.equal(owner.status().phase, 'loading');
+  f.windows[0].state.phase = 'renderable';
+  await owner.ready;
+  assert.equal(owner.status().actualFrame, true);
+});
+
 test('owner needs decoded native frame plus heartbeat; controls applied before readiness; release closes all owned resources', async (t) => {
   const f = await fixture(t), owner = f.create({ properties: { enabled: false } }); t.after(() => owner.release());
   await owner.ready;

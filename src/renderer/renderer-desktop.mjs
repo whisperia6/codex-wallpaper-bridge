@@ -112,6 +112,12 @@ function sendDesktopState() {
   postToControl({ type: "desktop-state", state: desktopPayload() });
 }
 
+let updateState = { updateAvailable: false };
+function sendUpdateState({ updateAvailable, version }) {
+  updateState = { updateAvailable, version };
+  postToControl({ type: "update-state", state: updateState });
+}
+
 function updateDesktopState(payload = {}) {
   state.installations = payload.installations || state.installations;
   if (Array.isArray(payload.activeInjectionTargets)) state.activeInjectionTargets = payload.activeInjectionTargets;
@@ -279,7 +285,19 @@ async function executeDesktopAction(action, payload = {}) {
 }
 
 async function handleDesktopRequest(message) {
-  const result = await executeDesktopAction(message.action, message.payload);
+  let result;
+  try {
+    if (message.action === "dismiss-update") {
+      sendUpdateState(await api.dismissUpdate(message.payload?.version));
+      result = { ok: true };
+    } else if (message.action === "open-update-url") {
+      result = await api.openUpdateUrl(message.payload?.version);
+    } else {
+      result = await executeDesktopAction(message.action, message.payload);
+    }
+  } catch {
+    result = { ok: false };
+  }
   postToControl({ type: "desktop-response", requestId: message.requestId, result });
 }
 
@@ -300,6 +318,7 @@ window.addEventListener("message", (event) => {
     setTitlebarConnection("connected");
     elements.controlPlaceholder.hidden = true;
     sendDesktopState();
+    sendUpdateState(updateState);
     return;
   }
   if (message.type === "target-change" && state.controlUrl && !state.busy) {
@@ -355,4 +374,6 @@ async function initialize() {
   }
 }
 
+api.onUpdateState(sendUpdateState);
+void api.getUpdateState().then(sendUpdateState).catch(() => {});
 void initialize();

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectPolicy } from './library-policy.mjs';
@@ -11,15 +12,18 @@ import { DESKTOP_RENDERER_ORIGIN } from './desktop-origin.mjs';
 import { sceneAssetCache, sceneAssetStamp } from './scene-asset-cache.mjs';
 import { listAuthorDirectory } from './author-directory.mjs';
 import { validateWebWallpaperInput } from './web-wallpaper-input.mjs';
+import { SCENE_MAX_FIRST_FRAME_TIMEOUT_MS } from './engine-health.mjs';
 import { rewriteWebResourceUrl, installWebResourceAliases } from './web-resource-aliases.mjs';
 
 const VENDOR_DIR = fileURLToPath(new URL('../vendor/webwallgl/', import.meta.url));
 const BRIDGE_FILE = fileURLToPath(new URL('../public/cwb-scene-bridge.js', import.meta.url));
+const SCENE_HOST_FILE = fileURLToPath(new URL('../public/cwb-scene-host.mjs', import.meta.url));
 const WEB_BRIDGE_FILE = fileURLToPath(new URL('../public/cwb-web-bridge.js', import.meta.url));
 const PROBE_FILE = fileURLToPath(new URL('../public/cwb-verifier-probe.js', import.meta.url));
 const ENGINE_PATH = '/wallpaper-engine/scene-live/';
-const ENGINE_FILES = new Set(['index.html', SCENE_RENDERER_ASSET,
-  'assets/modulepreload-polyfill-B5Qt9EMX.js', 'default-wallpaper/index.html']);
+const ENGINE_FILES = new Set(['index.html', SCENE_RENDERER_ASSET, 'mediabunny.mjs']);
+const IMPORT_MAP = JSON.stringify({ imports: { mediabunny: ENGINE_PATH + 'mediabunny.mjs' } });
+const IMPORT_MAP_HASH = createHash('sha256').update(IMPORT_MAP).digest('base64');
 const rendererOverlays = new WeakMap();
 function rendererOverlay(bytes) {
   if (!rendererOverlays.has(bytes)) rendererOverlays.set(bytes, applySceneRenderCompletionOverlay(bytes));
@@ -38,6 +42,13 @@ const WEB_TYPES = new Map([...ASSET_TYPES, ['.html', 'text/html; charset=utf-8']
   ['.css', 'text/css'], ['.js', 'text/javascript'], ['.mjs', 'text/javascript'], ['.svg', 'image/svg+xml'],
   ['.moc3', 'application/octet-stream'], ['.bin', 'application/octet-stream'], ['.wasm', 'application/wasm']]);
 export const MAX_SCENE_ASSET_BYTES = 512 * 1024 ** 2;
+const PAYLOAD_CHUNK_BYTES = 64 * 1024;
+
+function* payloadChunks(bytes) {
+  for (let offset = 0; offset < bytes.length; offset += PAYLOAD_CHUNK_BYTES) {
+    yield bytes.subarray(offset, offset + PAYLOAD_CHUNK_BYTES);
+  }
+}
 
 function contained(root, target) {
   const relative = path.relative(root, target);
@@ -58,24 +69,30 @@ async function fileInside(root, name) {
   }
 }
 
-/** Verify vendored bytes, including licenses and MPL source, before serving or building. */
-export async function verifyWebWallglAssets(directory = VENDOR_DIR) {
+async function readVerifiedWebWallgl(directory) {
   try {
     const lock = JSON.parse(await readFile(path.join(directory, 'vendor-lock.json'), 'utf8'));
-    if (lock.version !== '2.1.0' || lock.commit !== '4ba71c406fbc78f24c99b1bb1edd9d9cef9793c8') throw new Error();
-    for (const name of ['LICENSE', 'we-scene-LICENSE', 'mediabunny-LICENSE', 'web-shim.js',
+    if (lock.version !== '3.1.0' || lock.commit !== '28ab4381c806cf40e0577aba47b4520b31b19e57') throw new Error();
+    const root = await realpath(directory);
+    const assets = new Map();
+    for (const name of ['LICENSE', 'we-scene-LICENSE', 'mediabunny-LICENSE', 'NOTICE.md',
       'sources/mediabunny-1.56.0.tgz', ...ENGINE_FILES]) {
-      const entry = await fileInside(await realpath(directory), name);
+      const entry = await fileInside(root, name);
       if (!entry) throw new Error();
       const bytes = await rawBytes(entry);
       if (bytes.length !== lock.files[name]?.size
         || createHash('sha256').update(bytes).digest('hex') !== lock.files[name]?.sha256) throw new Error();
-      if (name === SCENE_RENDERER_ASSET) rendererOverlay(bytes);
+      if (ENGINE_FILES.has(name)) assets.set(name, name === SCENE_RENDERER_ASSET ? rendererOverlay(bytes) : bytes);
     }
-    return lock;
+    return { lock, assets };
   } catch {
     throw new Error('WebWallGL vendor integrity check failed');
   }
+}
+
+/** Verify vendored bytes, including licenses and MPL source, before serving or building. */
+export async function verifyWebWallglAssets(directory = VENDOR_DIR) {
+  return (await readVerifiedWebWallgl(directory)).lock;
 }
 
 /** Optional cold-start IO overlap. No server/capability/GPU context is created,
@@ -140,12 +157,13 @@ export class ReadonlyWallpaperServer {
   #channel = randomBytes(16).toString('hex');
   #origin = null;
   #firstFrameTimeout = 15_000;
+  #payloadProgress = { bytesServed: 0, lastByteAt: 0, activeTransfers: 0 };
   #authorProperties = { schema: {}, values: {} };
   #authorFiles;
   #webEntry = 'index.html';
   #probe = false;
   #streams = new Set();
-  #rendererBytes = null;
+  #engineAssets = null;
   #projectStamp = null;
   #projectAssets = new Map();
   #projectAssetsComplete = true;
@@ -177,6 +195,7 @@ export class ReadonlyWallpaperServer {
   get resourceBase() { return `${this.origin}/${this.#token}/files/project`; }
   get authorProperties() { return structuredClone(this.#authorProperties); }
   get firstFrameTimeoutMs() { return this.#firstFrameTimeout; }
+  payloadProgress() { return { ...this.#payloadProgress }; }
   get rendererUrl() {
     if (!this.#server) throw new Error('scene server is not running');
     if (this.#project.type === 'web') return `${this.resourceBase}/${this.#webEntry.split('/').map(encodeURIComponent).join('/')}`;
@@ -212,11 +231,8 @@ export class ReadonlyWallpaperServer {
       if (!projectPolicy(this.#project, this.#config).eligible || this.#project.eligible === false || this.#project.hidden) {
         throw new Error('scene project is not eligible');
       }
-      await verifyWebWallglAssets(this.#vendor);
-      this.#vendor = await realpath(this.#vendor);
-      if (this.#project.type === 'scene') {
-        this.#rendererBytes = rendererOverlay(await rawBytes(await fileInside(this.#vendor, SCENE_RENDERER_ASSET)));
-      }
+      const { assets } = await readVerifiedWebWallgl(this.#vendor);
+      if (this.#project.type === 'scene') this.#engineAssets = assets;
       try {
         this.#root = await realpath(this.#project.rootPath);
         if (!(await stat(this.#root)).isDirectory()) throw new Error();
@@ -240,8 +256,9 @@ export class ReadonlyWallpaperServer {
       this.#projectStamp = JSON.stringify([sceneAssetStamp(manifest), pkg ? sceneAssetStamp(pkg) : null]);
       this.#projectAssets.clear(); this.#projectAssetsComplete = true;
       this.#firstFrameTimeout = Math.min(90_000, 15_000 + (pkg?.info.size ?? 0) / (8 * 1024 ** 2) * 1000);
+      this.#payloadProgress = { bytesServed: 0, lastByteAt: 0, activeTransfers: 0 };
       this.#diagnostics = { requests: [], bytes: 0, denied: 0, upstreamDiagnostics: 0,
-        ...(this.#project.type === 'scene' ? { rendererOverlay: 'scene-render-completion-v1' } : {}) };
+        ...(this.#project.type === 'scene' ? { rendererOverlay: 'scene-render-completion-v2' } : {}) };
       const server = createServer((request, response) => {
         void this.#handle(request, response).catch(() => {
           if (response.headersSent) response.destroy();
@@ -280,13 +297,13 @@ export class ReadonlyWallpaperServer {
       });
       await Promise.all(streamsClosed);
       this.#origin = null;
-      this.#rendererBytes = null;
+      this.#engineAssets = null;
     });
   }
 
   #headers(response) {
     response.setHeader('Content-Security-Policy', ["default-src 'none'",
-      this.#project.type === 'web' ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:" : "script-src 'self' 'unsafe-eval' blob:",
+      this.#project.type === 'web' ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:" : `script-src 'self' 'unsafe-eval' blob: 'sha256-${IMPORT_MAP_HASH}'`,
       "connect-src 'self' blob:", "img-src 'self' data: blob:", "media-src 'self' blob:",
       "font-src 'self' data: blob:", "style-src 'self' 'unsafe-inline'", "worker-src blob:",
       this.#project.type === 'web' ? "frame-src 'none'" : "frame-src 'self'",
@@ -333,7 +350,12 @@ export class ReadonlyWallpaperServer {
       response.setHeader('Content-Type', 'application/json');
       response.end(request.method === 'HEAD' ? '' : JSON.stringify({ parentOrigin: this.#parentOrigin,
         channel: this.#channel, firstFrameTimeoutMs: this.#firstFrameTimeout,
+        ...(this.#project.type === 'scene' ? { maxFirstFrameTimeoutMs: SCENE_MAX_FIRST_FRAME_TIMEOUT_MS } : {}),
         type: this.#project.type, fps: this.#frameRate, authorProperties: this.#authorProperties, resourceBase: this.resourceBase })); return;
+    }
+    if (route === `/${this.#token}/payload-progress.json` && this.#project.type === 'scene') {
+      response.setHeader('Content-Type', 'application/json');
+      response.end(request.method === 'HEAD' ? '' : JSON.stringify(this.#payloadProgress)); return;
     }
     if (route.startsWith(`/${this.#token}/author-directory/`)) {
       const key = route.slice(`/${this.#token}/author-directory/`.length), params = new URL(request.url, this.origin).searchParams;
@@ -350,9 +372,10 @@ export class ReadonlyWallpaperServer {
       this.#diagnostics.upstreamDiagnostics += 1;
       response.writeHead(204); response.end(); return;
     }
-    if (route === '/cwb-scene-bridge.js') {
+    if (this.#project.type === 'scene' && ['/cwb-scene-bridge.js', '/cwb-scene-host.mjs'].includes(route)) {
       response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-      const script = request.method === 'HEAD' ? '' : await rawBytes({ path: BRIDGE_FILE, info: await stat(BRIDGE_FILE) });
+      const path = route.endsWith('.mjs') ? SCENE_HOST_FILE : BRIDGE_FILE;
+      const script = request.method === 'HEAD' ? '' : await rawBytes({ path, info: await stat(path) });
       if (live()) response.end(script); return;
     }
     if (route === '/cwb-web-bridge.js' && this.#project.type === 'web') {
@@ -374,16 +397,14 @@ export class ReadonlyWallpaperServer {
     let type;
     if (route.startsWith(ENGINE_PATH) && this.#project.type === 'scene') {
       name = route.slice(ENGINE_PATH.length) || 'index.html';
-      if (!ENGINE_FILES.has(name)) { reject(404); return; }
-      entry = await fileInside(this.#vendor, name);
-      type = name.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8';
-      if (name === SCENE_RENDERER_ASSET && entry && this.#rendererBytes) {
-        entry = { ...entry, info: { size: this.#rendererBytes.length }, bytes: this.#rendererBytes };
-      }
-      if (name === 'index.html' && entry) {
-        const html = (await readFile(entry.path, 'utf8')).replace(/<head\b[^>]*>/i,
+      const bytes = this.#engineAssets?.get(name);
+      if (!bytes) { reject(404); return; }
+      type = name.endsWith('.mjs') ? 'text/javascript' : 'text/html; charset=utf-8';
+      entry = { info: { size: bytes.length }, bytes };
+      if (name === 'index.html') {
+        const html = bytes.toString('utf8').replace(/<head\b[^>]*>/i,
           (head) => head + (this.#probe ? '<script src="/cwb-verifier-probe.js"></script>' : '')).replace('</head>',
-          `<meta name="cwb-scene-session" content="${this.#token}"><script src="/cwb-property-validator.js" defer></script><script src="/cwb-scene-bridge.js" defer></script></head>`);
+          `<meta name="cwb-scene-session" content="${this.#token}"><script type="importmap">${IMPORT_MAP}</script><script src="/cwb-property-validator.js" defer></script><script src="/cwb-scene-bridge.js" defer></script><script type="module" src="/cwb-scene-host.mjs"></script></head>`);
         if (!live()) return;
         response.setHeader('Content-Type', type);
         response.end(request.method === 'HEAD' ? '' : html); return;
@@ -448,15 +469,26 @@ export class ReadonlyWallpaperServer {
     response.writeHead(range.partial ? 206 : 200);
     if (request.method === 'HEAD' || entry.info.size === 0) { response.end(); return; }
     if (this.#diagnostics.requests.length < 64) this.#diagnostics.requests.push(name);
-    if (entry.bytes) {
-      const bytes = entry.bytes.subarray(range.start, range.end + 1);
-      this.#diagnostics.bytes += bytes.length; response.end(bytes); return;
+    const progress = this.#project.type === 'scene' && route.startsWith(`/${this.#token}/files/project/`)
+      && path.extname(name).toLowerCase() === '.pkg' ? this.#payloadProgress : null;
+    const account = (length) => {
+      this.#diagnostics.bytes += length;
+      if (progress) { progress.bytesServed += length; progress.lastByteAt = Date.now(); }
+    };
+    const bytes = entry.bytes?.subarray(range.start, range.end + 1);
+    if (bytes && !progress) {
+      account(bytes.length); response.end(bytes); return;
     }
-    const stream = createReadStream(entry.path, { start: range.start, end: range.end });
-    const diagnostics = this.#diagnostics;
+    const stream = bytes
+      ? Readable.from(payloadChunks(bytes), { objectMode: false, highWaterMark: PAYLOAD_CHUNK_BYTES })
+      : createReadStream(entry.path, { start: range.start, end: range.end });
+    if (progress) {
+      progress.activeTransfers++;
+      response.once('close', () => { progress.activeTransfers--; });
+    }
     this.#streams.add(stream);
     stream.once('close', () => this.#streams.delete(stream));
-    stream.on('data', (chunk) => { diagnostics.bytes += chunk.length; });
+    stream.on('data', (chunk) => account(chunk.length));
     stream.on('error', () => response.destroy());
     response.once('close', () => stream.destroy());
     stream.pipe(response);

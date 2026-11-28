@@ -22,6 +22,8 @@ export async function desktopRendererHarness(context, { apply, applyResult, rest
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     cwbDesktop: {
       getState: async () => desktopState ?? ({ installations: [{ id: "isolated-codex" }], selectedId: "isolated-codex", port: 12345, adaptive: true }),
+      getUpdateState: async () => ({ updateAvailable: false }),
+      onUpdateState: () => {},
       openControlPanel: async () => { calls.open += 1; return { ok: true, url }; },
       applyCodex: (options) => {
         calls.apply.push(copy(options));

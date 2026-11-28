@@ -5,6 +5,10 @@ import { createScenePreviewSlot } from "../../bridge-runtime/src/workbench-scene
 import { readAuthorProperties, validateAuthorPropertyPatch } from "../../bridge-runtime/src/author-properties.mjs";
 import { validateWebWallpaperInput } from "../../bridge-runtime/src/web-wallpaper-input.mjs";
 import { resolvePlayback } from "../../bridge-runtime/src/playback-policy.mjs";
+import { NATIVE_SCENE_READY_TIMEOUT_MS } from "../../bridge-runtime/src/engine-health.mjs";
+
+import { DEFAULT_GLASS_EFFECTS, normalizeLiquidGlass } from "../../bridge-runtime/src/liquid-glass.mjs";
+import { buildLiquidGlassCss, codexSidebarSelector, protectedSurfaceSelector } from "../../src/compatibility-script.mjs";
 
 const GLOBAL_KEY = "__codexWallpaperBridgeRuntime";
 
@@ -14,7 +18,7 @@ function safePayload(payload) {
 
 async function rendererBootstrap(createMediaSwitcher, runMediaTransition, createEngineMediaTransport,
   createDirectSceneTransport, createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput,
-  resolvePlayback, nativeEnabled = false, directSceneEnabled = false, hostType = "codex") {
+  resolvePlaybackPolicy, nativeEnabled = false, directSceneEnabled = false, hostType = "codex", nativeSceneTimeoutMs, normalizeLiquidGlass, glassDefaults, liquidGlassCss, sidebarSelector, protectedSurfaceSelector) {
     const isAntigravity = hostType === "antigravity";
     // Page.addScriptToEvaluateOnNewDocument also runs in child frames. Author
     // origins must never receive the host bootstrap or its capabilities.
@@ -27,7 +31,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       return { ok: false, ready: false, version: null };
     }
     const KEY = "__codexWallpaperBridgeRuntime";
-    const VERSION = "0.6.0-m3-media-policy-v6";
+    const VERSION = "0.6.0-m3-media-policy-v9";
     let nativeController = null;
     let sceneController = null;
 
@@ -42,6 +46,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       let disposed = false;
       let restorePromise = null;
       let pendingDomApply = null;
+      let occluded = false;
+      const resolvePlayback = (effects, environment) => resolvePlaybackPolicy(effects, { ...environment, occluded });
       const nativeMedia = nativeEnabled && !directSceneEnabled ? createEngineMediaTransport(resolvePlayback) : null;
       const sceneMedia = directSceneEnabled ? createDirectSceneTransport(createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput, resolvePlayback) : null;
       if (nativeMedia) nativeController = { accept: nativeMedia.accept, fail: nativeMedia.fail, state: nativeMedia.state, retry: nativeMedia.retry, close: nativeMedia.close };
@@ -441,7 +447,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       };
 
       const shellSelectors = {
-        sidebar: 'aside:is(.app-shell-left-panel, [data-app-shell-left-panel-appearance], [data-ds-part="sidebar"])',
+        sidebar: sidebarSelector,
         header: 'header:is(.app-header-tint, [data-app-shell-application-menu-bar], [data-app-shell-header-edge-scroll], [data-pip-obstacle="app-shell-header"], [data-ds-part="header"], [class*="_Header_"])'
       };
       const shellSelector = `${shellSelectors.sidebar}, ${shellSelectors.header}`;
@@ -460,7 +466,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         div[class~="pointer-events-none"][class~="bottom-0"]:has([data-pip-obstacle="thread-footer"]),
         div[class~="pointer-events-none"][class~="bottom-0"]:has([data-thread-composer-backdrop])
       `;
-      const outsideDialogs = ":not(dialog, [role=\"dialog\"], [role=\"alertdialog\"], dialog *, [role=\"dialog\"] *, [role=\"alertdialog\"] *)";
+      const outsideDialogs = `:not(:is(${protectedSurfaceSelector})):not(:is(${protectedSurfaceSelector}) *)`;
 
       const transparentShell = {
         "background-color": "transparent",
@@ -473,16 +479,15 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         "-webkit-backdrop-filter": "none",
         "box-shadow": "none"
       };
-      const frostedBackdrop = "blur(var(--cwb-sidebar-blur, 16px)) saturate(118%)";
       const shellInlineStyles = {
         sidebar: transparentShell,
         header: transparentShell,
         sidebarFrosted: {
           ...transparentShell,
-          "background-color": "rgba(12, 16, 24, 0.22)",
-          "border-right-color": "rgba(255, 255, 255, 0.07)",
-          "backdrop-filter": frostedBackdrop,
-          "-webkit-backdrop-filter": frostedBackdrop
+          "background-color": "var(--cwb-sidebar-fill)",
+          "box-shadow": "var(--cwb-sidebar-shadow)",
+          "backdrop-filter": "var(--cwb-glass-filter)",
+          "-webkit-backdrop-filter": "var(--cwb-glass-filter)"
         }
       };
       const normalizedShellStyles = new Map();
@@ -495,10 +500,8 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         saturation: 105,
         blur: 0,
         dim: 28,
-        glassOpacity: 62,
-        glassBlur: 18,
-        sidebarBlur: true,
         pauseWhenHidden: true,
+        pauseWhenOccluded: true,
         playing: true
       };
 
@@ -514,12 +517,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         saturation: number(value.saturation, defaults.saturation, 0, 240),
         blur: number(value.blur, defaults.blur, 0, 40),
         dim: number(value.dim, defaults.dim, 0, 90),
-        glassOpacity: number(value.glassOpacity, defaults.glassOpacity, 0, 100),
-        glassBlur: number(value.glassBlur, defaults.glassBlur, 0, 60),
-        sidebarBlur: value.sidebarBlur !== false,
+        ...normalizeLiquidGlass(value, glassDefaults),
         webLoopHoldSeconds: number(value.webLoopHoldSeconds, 0, 0, 3600),
         webForceSingleLoop: value.webForceSingleLoop === true,
         pauseWhenHidden: value.pauseWhenHidden !== false,
+        pauseWhenOccluded: value.pauseWhenOccluded !== false,
         pauseOnBattery: value.pauseOnBattery === true,
         onBattery: power.onBattery,
         playing: value.playing !== false,
@@ -543,28 +545,6 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           style.id = ids.style;
           style.dataset.codexWallpaperBridge = "style";
           style.textContent = `
-            :root[data-codex-wallpaper-bridge="active"] {
-              --cwb-glass-alpha: .62;
-              --cwb-glass-blur: 18px;
-              --cwb-sidebar-alpha: .34;
-              --cwb-header-alpha: .27;
-              --cwb-sidebar-blur: 20px;
-              --cwb-header-blur: 18px;
-              --cwb-shell-rgb: 12, 17, 27;
-              --cwb-shell-sheen-rgb: 255, 255, 255;
-              --cwb-shell-sheen-top: .10;
-              --cwb-shell-sheen-bottom: .025;
-              --cwb-shell-line-rgb: 255, 255, 255;
-              --cwb-shell-line-alpha: .12;
-              --cwb-shell-shadow-alpha: .24;
-            }
-            html[data-codex-wallpaper-bridge="active"].electron-light:not([data-dream-shell="dark"]),
-            html[data-codex-wallpaper-bridge="active"][data-dream-shell="light"] {
-              --cwb-shell-rgb: 248, 250, 253;
-              --cwb-shell-line-rgb: 55, 65, 81;
-              --cwb-shell-line-alpha: .12;
-              --cwb-shell-shadow-alpha: .10;
-            }
             html[data-codex-wallpaper-bridge="active"],
             html[data-codex-wallpaper-bridge="active"] body {
               background: transparent !important;
@@ -596,6 +576,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               opacity: var(--cwb-opacity, 1);
               pointer-events: none;
             }
+            #${ids.root} > [data-cwb-renderer="direct-gpu"] > img,
             #${ids.root} > [data-cwb-renderer="direct-gpu"] > iframe {
               inset: calc(var(--cwb-blur, 0px) * -1.2) !important;
               width: calc(100% + var(--cwb-blur, 0px) * 2.4) !important;
@@ -636,21 +617,21 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
               main[class*="_MainContentSurface_"],
               .thread-scroll-container,
               [role="main"]
-            ) {
+            )${outsideDialogs} {
               background-color: transparent !important;
               background-image: none !important;
               border-color: transparent !important;
               box-shadow: none !important;
             }
-            html[data-codex-wallpaper-bridge="active"] body > #root ${shellSelectors.sidebar},
-            html[data-codex-wallpaper-bridge="active"] ${shellSelectors.sidebar} {
+            html[data-codex-wallpaper-bridge="active"] body > #root ${shellSelectors.sidebar}${outsideDialogs},
+            html[data-codex-wallpaper-bridge="active"] ${shellSelectors.sidebar}${outsideDialogs} {
               ${clearShellSurface}
             }
-            html[data-codex-wallpaper-bridge="active"] ${composerChrome} {
+            html[data-codex-wallpaper-bridge="active"] ${composerChrome}${outsideDialogs} {
               ${clearShellSurface}
             }
             /* Restore the native composer surface so the input and controls share one tone. */
-            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] [data-composer-body] {
+            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] [data-composer-body]${outsideDialogs} {
               background-color: var(--composer-layout-surface-background, rgb(54, 54, 54)) !important;
               background-image: none !important;
               border-radius: inherit !important;
@@ -660,7 +641,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             }
             /* Keep the model picker, dictation and send controls on the same glass surface. */
             html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] [data-composer-body]
-              div[class*="bg-(--composer-layout-surface-background)"][class*="rounded-full"] {
+              div[class*="bg-(--composer-layout-surface-background)"][class*="rounded-full"]${outsideDialogs} {
               background-color: transparent !important;
             }
             html[data-codex-wallpaper-bridge="active"] [class*="bg-gradient-to-t"]:has(
@@ -670,21 +651,13 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop})${outsideDialogs},
             html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop}, [data-thread-scroll-footer])${outsideDialogs}::before,
             html[data-codex-wallpaper-bridge="active"] :is(${threadBackdrop}, [data-thread-scroll-footer])${outsideDialogs}::after,
-            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}::before,
-            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}::after {
+            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}${outsideDialogs}::before,
+            html[data-codex-wallpaper-bridge="active"] [data-composer-placement="thread"] ${composerChrome}${outsideDialogs}::after {
               background: transparent !important;
               background-color: transparent !important;
               background-image: none !important;
               border-color: transparent !important;
               box-shadow: none !important;
-            }
-            /* Keep the native user message bubble surface; only app chrome is cleared. */
-            html[data-codex-wallpaper-bridge="active"] :is(
-              [data-app-action-sidebar-thread-selected="true"],
-              [class*="bg-surface-elevated-secondary/50"],
-              [class*="bg-background-primary-soft/50"]
-            ) {
-              ${clearShellSurface}
             }
             html[data-codex-wallpaper-bridge="active"] [data-app-shell-page-surface] {
               --app-shell-content-fade: none !important;
@@ -702,6 +675,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
             html[data-codex-wallpaper-bridge="active"] ${shellSelectors.header} {
               ${clearShellSurface}
             }
+            ${liquidGlassCss}
           `;
           (document.head || document.documentElement).appendChild(style);
         }
@@ -782,8 +756,11 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
 
       const refreshShellElement = (element) => {
         if (!element?.matches) return;
-        if (element.matches(shellSelectors.sidebar)) {
-          applyShellElement(element, current?.effects?.sidebarBlur === false ? "sidebar" : "sidebarFrosted");
+        if (element.closest(protectedSurfaceSelector)) {
+          restoreShellElement(element);
+        } else if (element.matches(shellSelectors.sidebar)) {
+          const glass = current?.effects?.liquidGlass && current.effects.sidebarBlur;
+          applyShellElement(element, glass ? "sidebarFrosted" : "sidebar");
         } else if (element.matches(shellSelectors.header)) {
           applyShellElement(element, "header");
         } else {
@@ -857,7 +834,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         }
         if (wallpaper.playable === "direct-gpu") {
           if (!sceneMedia) throw new Error("GPU Scene provider unavailable");
-          const slot = sceneMedia.create({ wallpaper, effects });
+          const slot = sceneMedia.create({ wallpaper, effects, initial });
           slot.node.id = initial ? ids.media : `${ids.media}-pending-${revision}`;
           root.insertBefore(slot.node, document.getElementById(ids.scrim));
           return slot;
@@ -1046,7 +1023,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
           release() { removeEventListener("message", handler); media.srcdoc = ""; media.src = "about:blank"; media.remove(); } };
       };
 
-      const mediaSwitcher = createMediaSwitcher({ create: createMedia,
+      const mediaSwitcher = createMediaSwitcher({ create: createMedia, maxLoadTimeoutMs: nativeSceneTimeoutMs,
         commit(slot, before) {
           // An activation failure must not retire or rename the old slot.
           slot.activate();
@@ -1077,7 +1054,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         cancelScenePreload();
         const wallpaper = { id: key, type: "scene", playable: "direct-gpu" };
         const identity = mediaIdentity(wallpaper);
-        const handle = mediaSwitcher.prepare({ wallpaper, effects: current.effects }, identity, { loadTimeoutMs: 90000 });
+        const handle = mediaSwitcher.prepare({ wallpaper, effects: current.effects }, identity, { loadTimeoutMs: 125000 });
         scenePreload = { key, identity, handle, leaseHandle };
         // This call returns before first-frame readiness. Actual apply can adopt
         // the handle while loading; speculation never holds the CDP work queue.
@@ -1109,8 +1086,9 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         // Reusing a committed slot does not run commit() again. Keep its actual
         // state (including playback errors), rather than leaving it in loading.
         if (mediaSwitcher.status().identity !== identity || force) updateMediaState("loading");
+        const nativeScene = wallpaper.playable === "native" && wallpaper.type === "scene";
         return mediaSwitcher.switchTo({ wallpaper, effects: current.effects }, identity, { ...current.effects, force,
-          loadTimeoutMs: wallpaper.playable === "direct-gpu" ? 90000 : undefined }).then((result) => {
+          loadTimeoutMs: nativeScene ? nativeSceneTimeoutMs : wallpaper.playable === "direct-gpu" ? 125000 : undefined }).then((result) => {
           if (result.error) updateMediaState("error", result.error);
           return result;
         });
@@ -1124,8 +1102,6 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
       const applyVariables = (effects) => {
         const root = document.getElementById(ids.root);
         if (!root) return;
-        const glassAlpha = effects.glassOpacity / 100;
-        const rounded = (value) => String(Math.round(value * 1_000) / 1_000);
         root.style.setProperty("--cwb-fit", effects.fit);
         root.style.setProperty("--cwb-position", effects.position);
         root.style.setProperty("--cwb-brightness", String(effects.brightness / 100));
@@ -1134,21 +1110,16 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         root.style.setProperty("--cwb-opacity", String(effects.opacity / 100));
         root.style.setProperty("--cwb-blur", effects.blur + "px");
         root.style.setProperty("--cwb-dim", String(effects.dim / 100));
-        document.documentElement.style.setProperty("--cwb-glass-alpha", rounded(glassAlpha));
-        document.documentElement.style.setProperty("--cwb-glass-blur", effects.glassBlur + "px");
-        // Precompute derived values in JavaScript. Typed CSS multiplication inside
-        // rgba()/blur() is not supported by every Electron Chromium build and
-        // caused the shell to silently fall back to opaque native theme colors.
-        document.documentElement.style.setProperty("--cwb-sidebar-alpha", rounded(glassAlpha * .55));
-        document.documentElement.style.setProperty("--cwb-header-alpha", rounded(glassAlpha * .44));
-        document.documentElement.style.setProperty("--cwb-shell-sheen-top", rounded(glassAlpha * .16));
-        document.documentElement.style.setProperty("--cwb-shell-sheen-bottom", rounded(glassAlpha * .04));
-        document.documentElement.style.setProperty(
-          "--cwb-sidebar-blur",
-          (effects.glassBlur === 0 ? 0 : Math.min(60, effects.glassBlur + 2)) + "px"
-        );
-        document.documentElement.style.setProperty("--cwb-header-blur", effects.glassBlur + "px");
-        document.documentElement.setAttribute("data-cwb-sidebar-blur", effects.sidebarBlur === false ? "off" : "on");
+        const { style, dataset } = document.documentElement;
+        style.setProperty("--cwb-glass-opacity", String(effects.glassOpacity / 100));
+        style.setProperty("--cwb-glass-blur", effects.glassBlur + "px");
+        style.setProperty("--cwb-glass-border-opacity", String(effects.glassBorderOpacity / 100));
+        style.setProperty("--cwb-glass-saturation", effects.glassSaturation + "%");
+        style.setProperty("--cwb-sidebar-alpha", String(effects.glassOpacity * 55 / 10000));
+        dataset.cwbLiquidGlass = effects.liquidGlass ? "on" : "off";
+        dataset.cwbSidebarBlur = effects.sidebarBlur ? "on" : "off";
+        dataset.cwbGlassComposer = effects.glassComposer ? "on" : "off";
+        dataset.cwbGlassTint = effects.glassTint;
       };
 
       const ensureMounted = () => withoutShellObservation(() => {
@@ -1324,15 +1295,10 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         document.getElementById(ids.root)?.remove();
         document.getElementById(ids.style)?.remove();
         document.documentElement.removeAttribute("data-codex-wallpaper-bridge");
-        document.documentElement.removeAttribute("data-cwb-sidebar-blur");
-        document.documentElement.style.removeProperty("--cwb-glass-alpha");
-        document.documentElement.style.removeProperty("--cwb-glass-blur");
-        document.documentElement.style.removeProperty("--cwb-sidebar-alpha");
-        document.documentElement.style.removeProperty("--cwb-header-alpha");
-        document.documentElement.style.removeProperty("--cwb-sidebar-blur");
-        document.documentElement.style.removeProperty("--cwb-header-blur");
-        document.documentElement.style.removeProperty("--cwb-shell-sheen-top");
-        document.documentElement.style.removeProperty("--cwb-shell-sheen-bottom");
+        const { style, dataset } = document.documentElement;
+        for (const key of ["cwbLiquidGlass", "cwbSidebarBlur", "cwbGlassComposer", "cwbGlassTint"]) delete dataset[key];
+        for (const property of ["--cwb-glass-opacity", "--cwb-glass-blur", "--cwb-glass-border-opacity",
+          "--cwb-glass-saturation", "--cwb-sidebar-alpha"]) style.removeProperty(property);
         current = null;
         themeActivationPromise = null;
         themeActivationController = null;
@@ -1343,6 +1309,7 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
         if (!restorePromise) {
           // Once teardown starts, only a fresh runtime can accept another apply.
           disposed = true;
+          occluded = false;
           restorePromise = restoreRuntime(options);
         }
         return restorePromise;
@@ -1350,6 +1317,14 @@ async function rendererBootstrap(createMediaSwitcher, runMediaTransition, create
 
       return {
         apply,
+        setOcclusion(value) {
+          if (disposed || typeof value !== "boolean") return false;
+          if (occluded !== value) {
+            occluded = value;
+            syncPlayback();
+          }
+          return true;
+        },
         setPower(value) {
           if (typeof value?.onBattery !== 'boolean') return false;
           power = { onBattery: value.onBattery };
@@ -1396,10 +1371,14 @@ export function buildBootstrapScript({ nativeEnabled = false, directSceneEnabled
   const engine = nativeEnabled && !directSceneEnabled ? createEngineMediaTransport.toString() : 'null';
   const gpu = directSceneEnabled ? [createDirectSceneTransport, createScenePreviewSlot, readAuthorProperties, validateAuthorPropertyPatch, validateWebWallpaperInput]
     .map(fn => fn.toString()).join(', ') : 'null, null, null, null, null';
-  // The bootstrap's multiline literals contain CSS and iframe markup where
-  // leading indentation is insignificant. Omit it from the CDP payload.
-  const bootstrap = rendererBootstrap.toString().replace(/^ {4}/gm, "");
-  return `(${bootstrap})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true}, ${JSON.stringify(normalizedHostType)})`;
+  // Leading indentation in the serialized code, styles and iframe markup is
+  // insignificant. Omit it to keep the GPU bootstrap within the CDP budget.
+  const bootstrap = rendererBootstrap.toString();
+  const css = buildLiquidGlassCss(normalizedHostType,
+    'html[data-codex-wallpaper-bridge="active"]:not(:where([data-cwb-electron-compat="active"]))')
+    .replace(/\s*\r?\n\s*/g, " ");
+  return `(${bootstrap})(${createMediaSwitcher.toString()}, ${runMediaTransition.toString()}, ${engine}, ${gpu}, ${resolvePlayback.toString()}, ${nativeEnabled === true}, ${directSceneEnabled === true}, ${JSON.stringify(normalizedHostType)}, ${NATIVE_SCENE_READY_TIMEOUT_MS}, ${normalizeLiquidGlass.toString()}, ${safePayload(DEFAULT_GLASS_EFFECTS)}, ${safePayload(css)}, ${safePayload(codexSidebarSelector)}, ${safePayload(protectedSurfaceSelector)})`
+    .replace(/\r\n/g, "\n").replace(/^ +/gm, "");
 }
 
 export function buildApplyScript(payload = {}) {

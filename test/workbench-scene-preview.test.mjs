@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createScenePreviewSlot } from '../bridge-runtime/src/workbench-scene-preview.mjs';
+import { createScenePreviewSlot, switchScenePreviewFallback } from '../bridge-runtime/src/workbench-scene-preview.mjs';
 const client = 'a'.repeat(32), channel = 'b'.repeat(32), handle = 'c'.repeat(32);
 function fixture(options = {}) {
   const listeners = new Map(), intervals = new Set(), timers = new Set(), posts = [], requests = [], states = [], listenerOptions = new Map();
@@ -29,6 +29,47 @@ function fixture(options = {}) {
     effects: (value) => { effects = { ...effects, ...value }; slot.update(); } };
 }
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+test('the Scene poster remains through loading and preparation, then leaves after activation fade', async () => {
+  let removed = 0, finish;
+  const f = fixture({ poster: { remove() { removed++; } } });
+  f.node.animate = () => ({ finished: new Promise(resolve => { finish = resolve; }), cancel() {} });
+  await flush();
+  assert.equal(f.node.style.opacity, '0');
+  f.send({ phase: 'loading' }); f.send({ sequence: 2, draws: 0 });
+  assert.equal(removed, 0);
+  f.send({ sequence: 3 }); await f.slot.ready;
+  assert.equal(f.node.style.opacity, '0');
+  f.slot.activate();
+  assert.equal(f.node.style.opacity, '');
+  assert.equal(removed, 0);
+  finish(); await flush(); assert.equal(removed, 1);
+  await f.slot.release();
+});
+
+test('cancelling a loading Scene removes its poster and its startup watchdog', async () => {
+  let removed = false;
+  const f = fixture({ poster: { remove() { removed = true; } } });
+  await flush(); await f.slot.release();
+  assert.equal(removed, true);
+  assert.equal(f.timers.size, 0);
+});
+
+test('workbench fallback tries embedded video first and advances only when candidate media fails', async () => {
+  const project = { id: 'scene', type: 'scene', previewUrl: '/preview', embeddedVideoUrl: '/video' };
+  const calls = [];
+  const run = outcome => switchScenePreviewFallback(project, { mediaUrl: '/static' }, async (candidate, reason) => {
+    calls.push([candidate.id, candidate.type, candidate.mediaUrl, reason]);
+    return { ok: reason === outcome };
+  }, () => true);
+  assert.equal((await run('embedded_video')).fallbackReason, 'embedded_video');
+  assert.deepEqual(calls.splice(0), [['scene', 'video', '/video', 'embedded_video']]);
+  assert.equal((await run('preview')).fallbackReason, 'preview');
+  assert.deepEqual(calls, [
+    ['scene', 'video', '/video', 'embedded_video'], ['scene', 'image', '/static', 'custom_static'],
+    ['scene', 'image', '/preview', 'preview'],
+  ]);
+});
 
 test('M3 battery/visibility recovery keeps manual pause and mutes the exact GPU slot', async () => {
   const f = fixture(); await flush(); f.send(); await f.slot.ready; f.slot.activate();

@@ -30,6 +30,7 @@ var cwbMedia = (() => {
     const reasons = [];
     if (effects.playing === false) reasons.push("user");
     if (environment.hidden === true && effects.pauseWhenHidden !== false) reasons.push("hidden");
+    if (environment.occluded === true && effects.pauseWhenOccluded === true) reasons.push("occluded");
     if ((environment.onBattery ?? effects.onBattery) === true && effects.pauseOnBattery === true) reasons.push("battery");
     if (environment.inactive === true) reasons.push("inactive");
     return { userPlaying: effects.playing !== false, playing: reasons.length === 0, reasons };
@@ -101,7 +102,7 @@ var cwbMedia = (() => {
     document?.addEventListener?.("visibilitychange", onVisibility);
     return { finished: Promise.race([Promise.all(animations.map((animation) => animation.finished)), interruption]).finally(cleanup), cancel };
   }
-  function createMediaSwitcher({ create, commit, dispose, transition = null, timeoutMs = 5e3 }) {
+  function createMediaSwitcher({ create, commit, dispose, transition = null, timeoutMs = 5e3, maxLoadTimeoutMs = 9e4 }) {
     let revision = 0;
     let active = null;
     let pending = null;
@@ -159,7 +160,7 @@ var cwbMedia = (() => {
         return handle;
       }
       const timeout = new Promise((resolve) => {
-        const duration = Number.isFinite(loadTimeoutMs) && loadTimeoutMs > 0 && loadTimeoutMs <= 9e4 ? loadTimeoutMs : timeoutMs;
+        const duration = Number.isFinite(loadTimeoutMs) && loadTimeoutMs > 0 && loadTimeoutMs <= maxLoadTimeoutMs ? loadTimeoutMs : timeoutMs;
         handle.timer = setTimeout(() => resolve({ error: "Media load timed out" }), duration);
       });
       const loaded = Promise.resolve(handle.slot.ready).then(

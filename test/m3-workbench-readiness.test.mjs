@@ -18,7 +18,7 @@ function fixture({ playing = true, hidden = false, onBattery = false, frameApi =
     requestVideoFrameCallback: frameApi ? callback => { frames.set(++nextFrame, callback); return nextFrame; } : undefined,
     cancelVideoFrameCallback: id => { cancelled.push(id); frames.delete(id); } };
   const context = { cwbMedia: { resolvePlayback, createMediaSwitcher: value => { options = value; return {}; } }, state,
-    document: { hidden }, elements: { backgroundVideo: { cloneNode: () => video }, backgroundPlaceholder: { parentNode: { insertBefore() {} } } } };
+    document: { hidden }, elements: { backgroundVideo: { cloneNode: () => video }, backgroundDim: { parentNode: { insertBefore() {} } } } };
   vm.runInNewContext(source.slice(start, end), context);
   const slot = options.create({ id: 'fixture-video', type: 'video', mediaUrl: 'http://127.0.0.1/fixture' }, { revision: 1 });
   let ready = false; slot.ready.then(() => { ready = true; }, () => {});

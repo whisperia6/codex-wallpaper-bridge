@@ -17,6 +17,7 @@ import { defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName
 import { registerDesktopRendererScheme } from "../src/desktop-renderer-protocol.mjs";
 import { desktopWindowChromeOptions, setWindowChromeTheme } from "../src/window-chrome.mjs";
 import { desktopRendererHarness, embeddedHostHarness, embeddedTargetControls } from "../test-support/desktop-ui.mjs";
+import { checkForUpdates, dismissUpdate, getUpdateState, isAllowedReleaseUrl, normalizeUpdateSettings } from "../src/update-checker.mjs";
 
 const mainUrl = new URL("../src/main.mjs", import.meta.url);
 const mainSource = (await readFile(mainUrl, "utf8"))
@@ -33,7 +34,7 @@ const installations = [
 ];
 const antigravity = { id: "antigravity", kind: "local", hostType: "antigravity", path: "D:\\fixture-ag\\Antigravity.exe", label: "Antigravity", isRunning: true, processIds: [1003] };
 
-async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", savedPortsByHost, messageBoxResponse = 0, takeoverProcesses = [], duringClose = null, duringWrite = null, endpointOwner } = {}) {
+async function harness(context, { acceptance = true, endpointReady = true, autoExit = true, rejectKill = false, actionFailure = false, duringAction = null, nativeCloseDeferred = null, diagnostics = { targets: [] }, detectedInstallations = installations, savedSelectedId = "local", savedPortsByHost, messageBoxResponse = 0, takeoverProcesses = [], duringClose = null, duringWrite = null, endpointOwner, fetchUpdates, savedUpdateSettings } = {}) {
   const calls = { monitors: [], watchers: [], order: [], forks: [], starts: [], actions: [], launch: [], close: [], owner: [], collect: [], expectedProcess: [], reads: [], writes: [], appends: [], dialogs: [], prevented: [], errors: [], detects: 0, trayDestroyed: 0, nativeHosts: [], nativePeers: [], nativeCloses: 0 };
   const acceptanceRoot = path.join(root, "out", "live-acceptance", "main-flow-fixture");
   const acceptanceContext = acceptance ? {
@@ -55,6 +56,7 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
   Object.assign(app, {
     isPackaged: false,
     getAppPath: () => root,
+    getVersion: () => "1.3.1",
     getPath: (name) => paths[name],
     setPath: (name, value) => { calls.order.push(`setPath:${name}`); paths[name] = value; },
     requestSingleInstanceLock: () => { calls.order.push("instance-lock"); return true; },
@@ -75,7 +77,7 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
       calls.windows.push(this);
       this.options = copy(options);
       this.webContents = new EventEmitter();
-      Object.assign(this.webContents, { setWindowOpenHandler: () => {}, send: () => {}, isLoadingMainFrame: () => false });
+      Object.assign(this.webContents, { setWindowOpenHandler: () => {}, send: () => {}, isDestroyed: () => false, isLoadingMainFrame: () => false });
     }
     removeMenu() {}
     loadURL(url) { calls.order.push(`loadURL:${url}`); }
@@ -90,7 +92,9 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
   }
   const sandbox = createContext({
     app, BrowserWindow: FakeWindow, ipcMain: { handle: (channel, callback) => handlers.set(channel, callback) },
-    Menu: {}, nativeImage: {}, session: {}, Tray: {}, shell: { openPath: async () => "" },
+    Menu: {}, nativeImage: {}, session: {}, Tray: {}, shell: {
+      openPath: async () => "", openExternal: async url => (calls.external ??= []).push(url),
+    },
     protocol: { registerSchemesAsPrivileged: () => calls.order.push("register-desktop-scheme") },
     DESKTOP_RENDERER_URL, registerDesktopRendererScheme,
     defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName, hostPortConflict, installationHostType,
@@ -129,7 +133,9 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
         return child;
       },
     },
-    path, fileURLToPath, pathToFileURL, URL, performance, AbortController,
+    path, fileURLToPath, pathToFileURL, URL, performance, AbortController, setTimeout, clearTimeout,
+    dismissUpdate, getUpdateState, isAllowedReleaseUrl, normalizeUpdateSettings,
+    checkForUpdates: options => checkForUpdates({ ...options, fetchImpl: fetchUpdates, now: () => 1000 }),
     runCodexTakeoverFlow,
     listCodexProcesses: async () => takeoverProcesses,
     startCodexProcessMonitor: (options) => {
@@ -140,10 +146,12 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
       const record = { options, stopped: false }; calls.watchers.push(record);
       return { start() {}, stop: () => { record.stopped = true; } };
     },
-    process: { platform: "win32", execPath: "C:\\fixture-electron\\electron.exe", resourcesPath: path.join(root, "fixture-resources"), env: { LOCALAPPDATA: path.join(root, "daily-local-app-data"), KEEP_EXISTING: "kept" } },
+    process: { platform: "win32", execPath: "C:\\fixture-electron\\electron.exe", resourcesPath: path.join(root, "fixture-resources"),
+      env: { LOCALAPPDATA: path.join(root, "daily-local-app-data"), KEEP_EXISTING: "kept", NODE_ENV: fetchUpdates ? "production" : "test" } },
     appendFile: async (filePath, content) => calls.appends.push({ filePath, content }),
     mkdir: async () => {},
-    readFile: async (filePath) => { calls.reads.push(filePath); return JSON.stringify({ selectedId: savedSelectedId, port: 19335, portsByHost: savedPortsByHost, adaptive: true }); },
+    readFile: async (filePath) => { calls.reads.push(filePath); return JSON.stringify({ selectedId: savedSelectedId,
+      port: 19335, portsByHost: savedPortsByHost, adaptive: true, ...savedUpdateSettings }); },
     writeFile: async (filePath, content) => { calls.writes.push({ filePath, content }); await duringWrite?.(); },
     resolveBridgeRoot, resolveBridgeUtilityPath,
     invokeBridgeAction: async (options) => {
@@ -200,6 +208,27 @@ async function harness(context, { acceptance = true, endpointReady = true, autoE
     ipc: (channel, payload, url = rendererUrl) => handlers.get(channel)({ senderFrame: { url } }, payload),
   };
 }
+
+test("desktop update IPC opens only the current allowlisted release and persists dismissal", async context => {
+  const releaseUrl = "https://github.com/whisperia6/lumina/releases/tag/v1.4.0";
+  let requests = 0;
+  const f = await harness(context, { acceptance: false, fetchUpdates: async () => {
+    requests++;
+    return { ok: true, json: async () => ({ tag_name: "v1.4.0", html_url: releaseUrl }) };
+  } });
+  assert.equal((await f.ipc("cwb:get-update-state")).updateAvailable, false);
+  const states = await Promise.all([f.ipc("cwb:check-updates"), f.ipc("cwb:check-updates")]);
+  assert.deepEqual(states.map(state => state.version), ["1.4.0", "1.4.0"]);
+  await f.ipc("cwb:check-updates");
+  assert.equal(requests, 1);
+  await assert.rejects(f.ipc("cwb:open-update-url", { version: "1.4.0" }, "https://untrusted.example"));
+  assert.equal((await f.ipc("cwb:open-update-url", { version: "9.0.0" })).ok, false);
+  assert.equal((await f.ipc("cwb:open-update-url", { version: "1.4.0", url: "https://untrusted.example" })).ok, true);
+  assert.deepEqual(f.calls.external, [releaseUrl]);
+  assert.equal((await f.ipc("cwb:dismiss-update", { version: "1.4.0" })).updateAvailable, false);
+  assert.equal(JSON.parse(f.calls.writes.at(-1).content).dismissedUpdateVersion, "1.4.0");
+  assert.equal((await f.ipc("cwb:open-update-url", { version: "1.4.0" })).ok, false);
+});
 
 test("native caption uses trusted theme-only IPC without persisting or starting a bridge", async context => {
   const f = await harness(context);

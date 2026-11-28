@@ -317,6 +317,52 @@ test("a target-list scan started before restore or close cannot attach targets a
   }
 });
 
+test("attach and reconnect reconcile unknown occlusion until the renderer acknowledges it", async (context) => {
+  const clearOcclusion = "globalThis.__codexWallpaperBridgeRuntime?.setOcclusion?.(false)";
+  const setOcclusion = "globalThis.__codexWallpaperBridgeRuntime?.setOcclusion?.(true)";
+  let rendererOccluded = true;
+  let interrupt = false;
+  const { injector, sockets } = harness(context, {
+    injectorOptions: { occlusion: { isEnabled: () => false } },
+    onSocket(socket) {
+      const call = socket.call.bind(socket);
+      socket.call = async (method, params) => {
+        const result = await call(method, params);
+        if (method !== "Runtime.evaluate" || ![clearOcclusion, setOcclusion].includes(params.expression)) return result;
+        rendererOccluded = params.expression === setOcclusion;
+        if (interrupt) {
+          socket.close();
+          throw new Error("lost occlusion acknowledgement");
+        }
+        return { result: { value: true } };
+      };
+    },
+  });
+  await injector.start(plan(false));
+  const original = sockets.get("mock:main");
+  const session = injector.sessions.get("main");
+  assert.equal(evaluationCount(original, clearOcclusion), 1);
+  assert.equal(rendererOccluded, false);
+  assert.equal(session.occlusionApplied, false);
+
+  interrupt = true;
+  injector.occluded = true;
+  await assert.rejects(injector.applyOcclusion(session), /lost occlusion acknowledgement/);
+  assert.equal(rendererOccluded, true);
+  assert.equal(injector.disconnectedSessions.get("main").occlusionApplied, undefined);
+  assert.equal(injector.occluded, false);
+
+  interrupt = false;
+  const reconnected = await injector.attach(session.target);
+  const replacement = sockets.get("mock:main");
+  assert.notEqual(replacement, original);
+  assert.equal(evaluationCount(replacement, clearOcclusion), 1);
+  assert.equal(rendererOccluded, false);
+  assert.equal(reconnected.occlusionApplied, false);
+  await injector.applyOcclusion(reconnected);
+  assert.equal(evaluationCount(replacement, clearOcclusion), 1);
+});
+
 test("restore reconnects a disconnected live target without reinstalling wallpaper and removes its original hook", async (context) => {
   const checks = [];
   const main = recoveryTarget("main").webSocketDebuggerUrl;

@@ -26,6 +26,10 @@ function helperCandidates() {
     candidates.push(path.join(process.resourcesPath, "app.asar.unpacked", relative));
   }
   candidates.push(path.join(here, "bridge-runtime", "native", "cwb-win-helper.exe"));
+  // The bundled CLI lives next to the bridge runtime's native directory.
+  if (path.basename(path.dirname(here)) === "bridge-runtime") {
+    candidates.push(path.resolve(here, "..", "native", "cwb-win-helper.exe"));
+  }
   candidates.push(path.resolve(here, "..", relative));
   return candidates;
 }
@@ -62,11 +66,13 @@ function isTransientHelperFailure(error) {
 export async function tryRunWinHelper(subcommand, options = {}, platform = process.platform) {
   const helperPath = resolveWinHelperPath(platform);
   if (!helperPath) return null;
+  const { args = [], ...execOptions } = options;
   try {
-    return await execFileAsync(helperPath, [subcommand], {
+    return await execFileAsync(helperPath, [subcommand, ...args], {
       encoding: "utf8",
       windowsHide: true,
-      ...options,
+      ...execOptions,
+      shell: false,
     });
   } catch (error) {
     if (isTransientHelperFailure(error)) {
@@ -79,6 +85,25 @@ export async function tryRunWinHelper(subcommand, options = {}, platform = proce
     }
     throw error;
   }
+}
+
+export async function queryWindowOcclusion(pids, {
+  platform = process.platform, runWinHelper = tryRunWinHelper, timeout = 1200, signal,
+} = {}) {
+  const fallback = { occluded: false };
+  if (platform !== "win32" || signal?.aborted || !Array.isArray(pids)
+    || pids.some(pid => !Number.isInteger(pid) || pid < 1 || pid > 0xffffffff)) return fallback;
+  const args = [...new Set(pids)].map(String);
+  if (!args.length || args.length > 64) return fallback;
+  try {
+    const result = await runWinHelper("window-occlusion", { args, timeout, signal, maxBuffer: 4096 }, platform);
+    const value = JSON.parse(result?.stdout);
+    if (value?.ok === true && typeof value.occluded === "boolean"
+      && Number.isInteger(value.targetCount) && value.targetCount >= 0) {
+      return { occluded: value.targetCount > 0 && value.occluded, targetCount: value.targetCount };
+    }
+  } catch {}
+  return fallback;
 }
 
 export function clearWinHelperPathCache() {

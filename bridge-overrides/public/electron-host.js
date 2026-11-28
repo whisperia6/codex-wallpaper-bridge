@@ -11,6 +11,17 @@
   let lastMutationAt = 0;
   let requestSequence = 0;
   let latestDesktopState = null;
+  let updateVersion = null;
+
+  function renderUpdateState(state) {
+    const pill = document.querySelector("#desktopUpdatePill");
+    const open = document.querySelector("#desktopOpenUpdate");
+    updateVersion = state?.updateAvailable === true && typeof state.version === "string"
+      && /^\d+\.\d+\.\d+$/.test(state.version) ? state.version : null;
+    if (!pill || !open) return;
+    pill.hidden = !updateVersion;
+    open.textContent = updateVersion ? `发现新版 v${updateVersion}` : "";
+  }
 
   function notify(type, detail = {}) {
     window.parent.postMessage({ channel: CHANNEL, type, ...detail }, DESKTOP_RENDERER_ORIGIN);
@@ -219,6 +230,10 @@
       renderDesktopState(message.state);
       return;
     }
+    if (message.type === "update-state") {
+      renderUpdateState(message.state);
+      return;
+    }
     if (message.type === "desktop-response" && typeof message.requestId === "string") {
       const pending = desktopRequests.get(message.requestId);
       if (!pending) return;
@@ -264,6 +279,11 @@
     elements.choose.addEventListener("click", () => void runControlAction("choose-executable"));
     elements.apply.addEventListener("click", () => void runControlAction("apply", currentPayload()));
     elements.restore.addEventListener("click", () => void runControlAction("restore", currentPayload()));
+    for (const [id, action] of [["desktopOpenUpdate", "open-update-url"], ["desktopDismissUpdate", "dismiss-update"]]) {
+      document.querySelector("#" + id)?.addEventListener("click", () => {
+        if (updateVersion) void requestDesktop(action, { version: updateVersion }).catch(() => {});
+      });
+    }
 
     const saveIndicator = document.querySelector("#saveIndicator");
     if (saveIndicator) {

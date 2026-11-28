@@ -1,6 +1,6 @@
 # Web 壁纸接口
 
-本文面向 Web 壁纸作者，说明 Codex Wallpaper Desktop 的兼容接口。它不是 Wallpaper Engine 官方运行时的完整替代；具体视觉效果仍取决于壁纸及浏览器兼容性。
+本文面向 Web 壁纸作者，说明 Lumina 的兼容接口。它不是 Wallpaper Engine 官方运行时的完整替代；具体视觉效果仍取决于壁纸及浏览器兼容性。
 
 ## 作者属性
 

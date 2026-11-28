@@ -7,11 +7,19 @@
     blur: 0,
     saturation: 100,
     fit: "cover",
+    liquidGlass: true,
+    glassOpacity: 62,
+    glassBlur: 18,
+    glassBorderOpacity: 12,
+    glassSaturation: 130,
+    glassTint: "dark",
+    glassComposer: true,
     sidebarBlur: true,
     webLoopHoldSeconds: 0,
     webForceSingleLoop: false,
     playing: true,
     pauseWhenHidden: true,
+    pauseWhenOccluded: true,
     pauseOnBattery: false,
   });
 
@@ -70,6 +78,7 @@
     backgroundWeb: $("#backgroundWeb"),
     backgroundScene: $("#backgroundScene"),
     backgroundPlaceholder: $("#backgroundPlaceholder"),
+    backgroundDim: $("#backgroundDim"),
     wallpaperList: $("#wallpaperList"),
     wallpaperTemplate: $("#wallpaperCardTemplate"),
     emptyState: $("#emptyState"),
@@ -199,10 +208,18 @@
       blur: Math.round(clamp(raw.blur ?? raw.blurPx, 0, 40, DEFAULT_EFFECTS.blur)),
       saturation: Math.round(percentLike(raw.saturation, DEFAULT_EFFECTS.saturation, 240)),
       fit,
+      liquidGlass: raw.liquidGlass !== false,
+      glassOpacity: clamp(raw.glassOpacity ?? DEFAULT_EFFECTS.glassOpacity, 0, 100, DEFAULT_EFFECTS.glassOpacity),
+      glassBlur: clamp(raw.glassBlur ?? DEFAULT_EFFECTS.glassBlur, 0, 60, DEFAULT_EFFECTS.glassBlur),
+      glassBorderOpacity: clamp(raw.glassBorderOpacity ?? DEFAULT_EFFECTS.glassBorderOpacity, 0, 100, DEFAULT_EFFECTS.glassBorderOpacity),
+      glassSaturation: clamp(raw.glassSaturation ?? DEFAULT_EFFECTS.glassSaturation, 100, 220, DEFAULT_EFFECTS.glassSaturation),
+      glassTint: ["dark", "neutral", "frost"].includes(raw.glassTint) ? raw.glassTint : DEFAULT_EFFECTS.glassTint,
+      glassComposer: raw.glassComposer !== false,
       sidebarBlur: raw.sidebarBlur !== false,
       webLoopHoldSeconds: Math.round(clamp(raw.webLoopHoldSeconds, 0, 3600, DEFAULT_EFFECTS.webLoopHoldSeconds)),
       webForceSingleLoop: raw.webForceSingleLoop === true,
       playing: raw.playing ?? raw.autoplay ?? raw.playback ?? DEFAULT_EFFECTS.playing,
+      pauseWhenOccluded: raw.pauseWhenOccluded !== false,
     };
   }
 
@@ -281,7 +298,7 @@
   }
 
   function previewIdentity(project) {
-    return JSON.stringify([project.id, project.type, project.mediaUrl, project.webUrl, project.previewUrl, project.scenePreviewAvailable]);
+    return JSON.stringify([project.id, project.type, project.mediaUrl, project.webUrl, project.previewUrl, project.embeddedVideoUrl, project.scenePreviewAvailable]);
   }
 
   function forgetWorkbenchPreload(cancel = false) {
@@ -306,12 +323,12 @@
     if (workbenchScenePreload?.identity === identity && workbenchScenePreload.expires > Date.now()) return;
     if (source === "playlist" && workbenchScenePreload?.source === "hover") return;
     forgetWorkbenchPreload();
-    const handle = previewSwitcher.prepare(project, identity, { loadTimeoutMs: 90000 });
-    const warm = { id, identity, handle, source, timer: null, expires: Date.now() + 120000, failed: false };
+    const handle = previewSwitcher.prepare(project, identity, { loadTimeoutMs: 125000 });
+    const warm = { id, identity, handle, source, timer: null, expires: Date.now() + 135000, failed: false };
     workbenchScenePreload = warm;
     warm.timer = window.setTimeout(() => {
       if (workbenchScenePreload === warm) forgetWorkbenchPreload(true);
-    }, 120000);
+    }, 135000);
     void handle.ready.then((result) => {
       // Do not repeatedly reopen a failing speculative scene on every poll.
       if (!result.ok && workbenchScenePreload === warm) warm.failed = true;
@@ -501,19 +518,31 @@
   let scenePreviewClient = null, activeSceneSlot = null;
   const scenePreviewClosing = new Set(), scenePreviewFailures = new Set();
   const previewSwitcher = cwbMedia.createMediaSwitcher({
-    create(project, { revision }) {
+    maxLoadTimeoutMs: 125000,
+    create(project, { revision, initial }) {
       const kind = project.type === "scene" && project.scenePreviewAvailable ? "Scene"
         : project.type === "video" && project.mediaUrl ? "Video"
         : (project.type === "web" && project.scenePreviewAvailable ? "Web" : "Image");
       const media = elements[`background${kind}`].cloneNode(false);
       media.id = `background${kind}-pending-${revision}`;
       media.removeAttribute("src");
+      media.removeAttribute("poster");
       media.classList.remove("is-visible");
       media.style.opacity = "0";
+      const background = elements.backgroundDim.parentNode;
       if (["Scene", "Web"].includes(kind) && project.scenePreviewAvailable) {
         scenePreviewClient ??= crypto.randomUUID().replaceAll("-", "");
-        elements.backgroundPlaceholder.parentNode.insertBefore(media, elements.backgroundPlaceholder);
-        return cwbScenePreview.createScenePreviewSlot({ node: media, project, client: scenePreviewClient, api,
+        let poster = null;
+        if (kind === "Scene" && initial && project.previewUrl && state.previewLoadingId === project.id) {
+          poster = document.createElement("img");
+          poster.alt = "";
+          poster.className = "wallpaper__media";
+          poster.onload = () => poster.classList.add("is-visible");
+          poster.src = project.previewUrl;
+          background.insertBefore(poster, elements.backgroundDim);
+        }
+        background.insertBefore(media, elements.backgroundDim);
+        return cwbScenePreview.createScenePreviewSlot({ node: media, poster, project, client: scenePreviewClient, api,
           onMediaControl: value => api("media/control", { method: "POST", body: JSON.stringify({ command: value.command, sessionId: value.sessionId, projectId: project.id }) }),
           getEffects: () => state.effects, beforeOpen: () => Promise.allSettled([...scenePreviewClosing]),
           onStatus(status) {
@@ -576,9 +605,10 @@
       };
       if (kind === "Video") {
         media.muted = true;
+        if (project.previewUrl) media.poster = project.previewUrl;
         media.onloadeddata = checkVideoReady;
       } else media.onload = () => kind === "Image" ? media.decode().then(resolveReady, readyReject) : resolveReady();
-      elements.backgroundPlaceholder.parentNode.insertBefore(media, elements.backgroundPlaceholder);
+      background.insertBefore(media, elements.backgroundDim);
       media.src = kind === "Web" ? project.webUrl : (project.mediaUrl || project.previewUrl);
       update();
       return { node: media, kind, projectId: project.id, canonicalId: `background${kind}`, ready, update,
@@ -679,10 +709,9 @@
     state.previewLoadingRevision = revision; state.previewLoadingId = project.id;
     const warm = forgetWorkbenchPreload();
     if (force) scenePreviewFailures.delete(project.id);
-    const fallback = project.scenePreviewAvailable && scenePreviewFailures.has(project.id);
-    if (fallback) project = { ...project, scenePreviewAvailable: false };
     const identity = previewIdentity(project);
-    if (project.scenePreviewAvailable) state.scenePreview = { id: project.id, phase: "loading" };
+    const live = project.scenePreviewAvailable;
+    if (live && !scenePreviewFailures.has(project.id)) state.scenePreview = { id: project.id, phase: "loading" };
     try {
       if (!force && warm?.identity === identity) {
         const current = !warm.failed && warm.expires > Date.now()
@@ -690,18 +719,19 @@
         if (revision !== state.mediaRevision) return { ok: false, cancelled: true };
         if (!current && previewSwitcher.status().requestedIdentity === identity) previewSwitcher.cancel();
       }
-      const result = await previewSwitcher.switchTo(project, identity, { ...state.effects, force,
-        loadTimeoutMs: project.scenePreviewAvailable ? 90000 : 5000 });
+      let result = live && scenePreviewFailures.has(project.id) ? { ok: false } :
+        await previewSwitcher.switchTo(project, identity, { ...state.effects, force, loadTimeoutMs: live ? 125000 : 5000 });
       if (revision !== state.mediaRevision || result.cancelled) return result;
-      if (!result.ok && project.scenePreviewAvailable) {
+      if (!result.ok && live) {
         scenePreviewFailures.add(project.id);
         state.scenePreview = { id: project.id, phase: "failed" };
-        if (!previewSwitcher.status().identity && project.previewUrl) {
-          const restored = await previewSwitcher.switchTo({ ...project, scenePreviewAvailable: false }, identity + "-fallback", state.effects);
-          updatePreviewLabel();
-          toast("Scene 实时预览未就绪，当前仅显示预览图；可显式重试引擎。", "error");
-          return restored;
-        }
+        const staticId = state.config.engineFallbacks?.[project.id]?.staticId;
+        const customStatic = state.inventory.find(item => item.id === staticId && item.type === "image" && item.eligible !== false && !item.hidden);
+        result = await cwbScenePreview.switchScenePreviewFallback(project, customStatic, (candidate) =>
+          previewSwitcher.switchTo(candidate, previewIdentity(candidate), state.effects), () => revision === state.mediaRevision);
+        if (revision !== state.mediaRevision || result.cancelled) return result;
+        if (result.ok) state.scenePreview.fallbackReason = result.fallbackReason;
+        updatePreviewLabel();
       }
       if (result.error) toast("壁纸加载失败，已保留旧画面；可选择其他壁纸或重新扫描。", "error");
       return result;
@@ -718,7 +748,9 @@
     if (["scene", "web"].includes(project.type) && project.scenePreviewAvailable) {
       const failed = scenePreviewFailures.has(project.id);
       const live = preview.id === project.id && preview.phase === "ready" && !failed;
-      elements.previewStateText.textContent = failed ? "预览图回退" : live ? !playback.playing ? "预览已暂停" : project.type === "web" ? "Web GPU 实时" : `Scene 实时 · ${preview.fps ?? 0} FPS` : "GPU 加载中";
+      elements.previewStateText.textContent = failed
+        ? preview.fallbackReason === "embedded_video" ? "内嵌视频回退" : preview.fallbackReason ? "静态回退" : "GPU 预览失败"
+        : live ? !playback.playing ? "预览已暂停" : project.type === "web" ? "Web GPU 实时" : `Scene 实时 · ${preview.fps ?? 0} FPS` : "GPU 加载中";
       elements.previewStateText.title = live ? `实际画布 ${preview.width}×${preview.height}；这里是引擎帧率，不是物理屏幕帧率。` : "工作台预览与目标应用宿主验收相互独立。";
     } else {
       elements.previewStateText.textContent = isProjectPlayable(project)
@@ -779,7 +811,20 @@
     elements.root.style.setProperty("--wallpaper-mirror", effects.mirror ? "-1" : "1");
     elements.root.style.setProperty("--contrast", `${effects.contrast ?? 100}%`);
     elements.root.style.setProperty("--wallpaper-opacity", String((effects.opacity ?? 100) / 100));
-    elements.root.dataset.sidebarBlur = effects.sidebarBlur === false ? "off" : "on";
+    const { style, dataset } = elements.root;
+    dataset.cwbLiquidGlass = effects.liquidGlass ? "on" : "off";
+    dataset.cwbSidebarBlur = effects.sidebarBlur ? "on" : "off";
+    dataset.cwbGlassComposer = effects.glassComposer ? "on" : "off";
+    dataset.cwbGlassTint = effects.glassTint;
+    style.setProperty("--cwb-glass-opacity", String(effects.glassOpacity / 100));
+    style.setProperty("--cwb-glass-blur", `${effects.glassBlur}px`);
+    style.setProperty("--cwb-glass-border-opacity", String(effects.glassBorderOpacity / 100));
+    style.setProperty("--cwb-glass-saturation", `${effects.glassSaturation}%`);
+    style.setProperty("--cwb-sidebar-alpha", String(effects.glassOpacity * 55 / 10000));
+    $("#liquidGlassControls").disabled = !effects.liquidGlass;
+    for (const output of $$("[data-glass-value]")) {
+      output.value = `${effects[output.dataset.glassValue]}${output.dataset.unit}`;
+    }
     for (const control of $$('[data-effect]')) {
       const value = effects[control.dataset.effect] ?? state.defaultEffects[control.dataset.effect];
       if (value === undefined) continue;
@@ -798,6 +843,13 @@
     elements.blurRange.value = effects.blur;
     elements.saturationRange.value = effects.saturation;
     elements.fitSelect.value = effects.fit;
+    for (const group of $$("[data-segment-select]")) {
+      const value = document.getElementById(group.dataset.segmentSelect).value;
+      for (const radio of group.querySelectorAll("input")) radio.checked = radio.value === value;
+    }
+    $("#glassSwatchStatus").value = effects.liquidGlass
+      ? `${$("#glassTintSelect").selectedOptions[0].textContent} · ${effects.glassBlur}px`
+      : "已关闭";
     elements.playbackToggle.checked = Boolean(effects.playing);
     elements.brightnessValue.value = `${effects.brightness}%`;
     elements.darknessValue.value = `${effects.darkness}%`;
@@ -1197,8 +1249,8 @@
       systemMediaSnapshot = snapshot;
       state.effects.onBattery = snapshot.power.onBattery === true;
       if (powerChanged) { previewSwitcher.update(); playVideoIfNeeded(); updateNowPlaying(); }
-      const policy = cwbMedia.resolvePlayback(state.effects, { hidden: document.hidden === true });
-      $("#playbackPolicyStatus").textContent = policy.playing ? "壁纸播放中" : `壁纸暂停：${policy.reasons.map(value => ({ user: "手动", hidden: "窗口隐藏", battery: "电池供电" })[value] || value).join("、")}`;
+      const policy = cwbMedia.resolvePlayback(state.effects, { hidden: document.hidden === true, occluded: snapshot.occluded === true });
+      $("#playbackPolicyStatus").textContent = policy.playing ? "壁纸播放中" : `壁纸暂停：${policy.reasons.map(value => ({ user: "手动", hidden: "窗口隐藏", occluded: "窗口被遮挡", battery: "电池供电" })[value] || value).join("、")}`;
       $("#systemMediaStatus").textContent = `频谱：${snapshot.sources.audio}；媒体：${snapshot.sources.media}`;
       $("#systemMediaTrack").textContent = snapshot.track ? `${snapshot.track.title} — ${snapshot.track.artist} (${Math.floor(snapshot.track.position)}/${Math.floor(snapshot.track.duration)}秒)` : "没有当前歌曲";
       $("#systemMediaLyrics").textContent = snapshot.lyric.text;
@@ -1550,10 +1602,13 @@
       catch { toast("歌词保存失败或歌曲已切换", "error"); }
     });
     for (const control of $$('[data-effect]')) {
-      control.addEventListener(control.type === "checkbox" ? "change" : "input", () => {
+      const update = () => {
         const key = control.dataset.effect;
         if (control.type === "checkbox") state.effects[key] = control.checked;
-        else if (control.tagName === "SELECT") state.effects[key] = control.value;
+        else if (control.tagName === "SELECT") {
+          if (key === "glassTint" && (control.selectedIndex < 0 || state.effects[key] === control.value)) return;
+          state.effects[key] = control.value;
+        }
         else {
           if (control.value === "" || !Number.isFinite(Number(control.value))) return;
           state.effects[key] = clamp(control.value, Number(control.min), Number(control.max), state.effects[key]);
@@ -1564,6 +1619,17 @@
         state.playRejectedRevision = -1;
         renderEffects();
         scheduleConfigSave();
+      };
+      control.addEventListener(control.type === "checkbox" ? "change" : "input", update);
+      if (control.id === "glassTintSelect") control.addEventListener("change", update);
+    }
+    for (const group of $$("[data-segment-select]")) {
+      const select = document.getElementById(group.dataset.segmentSelect);
+      select.hidden = true;
+      group.hidden = false;
+      group.addEventListener("change", (event) => {
+        select.value = event.target.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
       });
     }
     elements.searchInput.addEventListener("input", () => {
@@ -1720,16 +1786,21 @@
     const authorEmptyState = $("#authorEmptyState");
     const authorTabDot = $("#authorTabDot");
     if (settingsPanel && settingsTabs) {
+      const tabs = [...settingsTabs.querySelectorAll("[data-settings-tab-trigger]")];
+      const panels = settingsPanel.querySelectorAll("[data-settings-tab]");
       const setActiveSettingsTab = (tabName, { scroll = true } = {}) => {
-        if (!tabName) return;
         settingsPanel.dataset.activeTab = tabName;
-        for (const button of settingsTabs.querySelectorAll("[data-settings-tab-trigger]")) {
-          button.setAttribute("aria-selected", String(button.dataset.settingsTabTrigger === tabName));
+        for (const button of tabs) {
+          const selected = button.dataset.settingsTabTrigger === tabName;
+          button.setAttribute("aria-selected", String(selected));
+          button.tabIndex = selected ? 0 : -1;
         }
-        for (const details of settingsPanel.querySelectorAll(`details[data-settings-tab="${tabName}"]`)) {
-          if (!details.hidden) details.open = true;
+        for (const panel of panels) panel.hidden = panel.dataset.settingsTab !== tabName;
+        if (tabName === "music") $("#systemMediaPanel").open = true;
+        if (tabName === "video") {
+          $("#videoOptimizationPanel").open = true;
+          void pollVideoTasks(true);
         }
-        if (tabName === "video") void pollVideoTasks(true);
         if (scroll) settingsPanel.scrollTop = 0;
       };
       const syncAuthorTabIndicator = () => {
@@ -1743,6 +1814,17 @@
       settingsTabs.addEventListener("click", (event) => {
         const button = event.target.closest("[data-settings-tab-trigger]");
         if (button) setActiveSettingsTab(button.dataset.settingsTabTrigger);
+      });
+      settingsTabs.addEventListener("keydown", (event) => {
+        const index = tabs.indexOf(event.target);
+        if (index < 0) return;
+        const destinations = { ArrowLeft: (index + tabs.length - 1) % tabs.length,
+          ArrowRight: (index + 1) % tabs.length, Home: 0, End: tabs.length - 1 };
+        if (!Object.hasOwn(destinations, event.key)) return;
+        event.preventDefault();
+        const next = tabs[destinations[event.key]];
+        setActiveSettingsTab(next.dataset.settingsTabTrigger);
+        next.focus();
       });
       const revealControlTab = (event) => {
         const owner = event.target instanceof Element ? event.target.closest("[data-settings-tab]") : null;

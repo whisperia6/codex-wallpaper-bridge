@@ -21,6 +21,7 @@ import { VideoVersions, layoutChunks } from './video-stream.mjs';
 import { ManagedCache } from './managed-cache.mjs';
 import { VideoOptimizer, videoOptions } from './video-optimizer.mjs';
 import { HOST_TYPES } from './host-profiles.mjs';
+import { WALLPAPER_APPLY_REQUEST_TIMEOUT_MS } from './engine-health.mjs';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const DEFAULT_PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
@@ -304,7 +305,7 @@ function publicProject(project, basePath) {
     previewUrl: hasPreview ? `${basePath}/api/preview/${encodedId}` : null,
     mediaUrl: ['image', 'video'].includes(type) && playable ? `${basePath}/api/${type}/${encodedId}` : null,
     webUrl: type === 'web' && playable ? `${basePath}/api/web/${encodedId}/` : null,
-    embeddedVideoUrl: type === 'scene' && (project.embeddedVideoPath || project.embeddedVideoPackage) ? `${basePath}/api/embedded-video/${encodedId}` : null,
+    embeddedVideoUrl: type === 'scene' ? `${basePath}/api/embedded-video/${encodedId}` : null,
   };
   if (/^\d+$/.test(String(project.workshopId ?? ''))) {
     value.workshopId = String(project.workshopId);
@@ -827,11 +828,11 @@ export class MediaServer {
       await this.#versionedVideo(request, response, projectId(project), version); return;
     }
     const candidate = type === 'scene' ? project.embeddedVideoPath : mediaCandidate(project);
-    if (type === 'scene' && !candidate && project.embeddedVideoPackage) {
-      const video = await openScenePackageVideo(projectRoot(project)).catch(() => null);
-      if (!video) { plain(response, 404, 'Not Found'); return; }
+    const video = type === 'scene' ? await openScenePackageVideo(projectRoot(project)).catch(() => null) : null;
+    if (video) {
       let streaming = false;
       try {
+        if (response.destroyed || request.destroyed || response.writableEnded) return;
         const range = parseRange(request.headers.range, video.size);
         const headers = { 'Cache-Control': 'no-store', 'Content-Type': mimeType(video.name),
           'Accept-Ranges': 'bytes', 'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*',
@@ -845,8 +846,7 @@ export class MediaServer {
         if (request.method === 'HEAD') { response.end(); return; }
         const stream = video.handle.createReadStream({ start: video.start + start, end: video.start + end, autoClose: true });
         streaming = true;
-        stream.on('error', () => response.destroy());
-        response.on('close', () => stream.destroy()); stream.pipe(response);
+        await pipeline(stream, response).catch(() => { response.destroy(); });
       } finally { if (!streaming) await video.handle.close(); }
       return;
     }
@@ -1205,7 +1205,7 @@ export class MediaServer {
     }
     // Validated native injection may initialize several renderers before any
     // response bytes exist. Keep its socket alive for the desktop's bounded wait.
-    if (body.action === 'inject') response.setTimeout(60_000);
+    if (body.action === 'inject' || body.action === 'retry-engine') response.setTimeout(WALLPAPER_APPLY_REQUEST_TIMEOUT_MS);
     try {
       const result = await this.#onAction(body.action, body, {
         config: normalizeConfig(await this.#configStore.get()),

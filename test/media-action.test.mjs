@@ -71,7 +71,7 @@ test("action without compatibility retains its original response shape", async (
   });
 });
 
-test("only an authorized inject response outlives the server idle budget, and verification failures still propagate", async (context) => {
+test("only authorized apply and retry responses outlive the server idle budget, and verification failures still propagate", async (context) => {
   const originalCreateServer = http.createServer;
   const originalSetTimeout = http.ServerResponse.prototype.setTimeout;
   const deadlines = [];
@@ -99,15 +99,17 @@ test("only an authorized inject response outlives the server idle budget, and ve
   httpServer.timeout = 20;
   assert.deepEqual(await invokeBridgeAction({ controlUrl: server.baseUrl, action: "inject" }),
     { ok: true, status: "inject" });
-  assert.deepEqual(deadlines, [60_000]);
+  assert.deepEqual(deadlines, [160_000]);
   assert.equal(httpServer.timeout, 20);
   await assert.rejects(invokeBridgeAction({ controlUrl: server.baseUrl, action: "restore" }), /fetch failed/);
   await assert.rejects(invokeBridgeAction({ controlUrl: server.baseUrl, action: "inject" }), /renderer verification failed/);
+  assert.deepEqual(await invokeBridgeAction({ controlUrl: server.baseUrl, action: "retry-engine" }),
+    { ok: true, status: "retry-engine" });
   const url = new URL("api/action", server.baseUrl);
   const unauthorized = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://unrelated.example" }, body: JSON.stringify({ action: "inject" }) });
   assert.equal(unauthorized.status, 403);
   const invalid = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: 42 }) });
   assert.equal(invalid.status, 400);
   assert.equal((await fetch(url)).status, 405);
-  assert.deepEqual(deadlines, [60_000, 60_000]);
+  assert.deepEqual(deadlines, [160_000, 160_000, 160_000]);
 });

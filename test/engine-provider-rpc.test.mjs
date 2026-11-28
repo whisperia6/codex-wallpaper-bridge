@@ -139,6 +139,27 @@ test('client timeout closes the owned parent channel and cannot resurrect a late
   assert.equal(f.client.status().closed, true); assert.equal(f.server.status().closed, true); assert.equal(f.owners.length, 0);
   assert.equal(f.port.listenerCount('message'), 0);
 });
+test('initial native ready RPC can complete past the regular operation timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const port = new EventEmitter(), packets = [];
+  port.postMessage = (packet) => packets.push(packet);
+  const client = createEngineProviderClient({ port });
+  t.after(() => client.close());
+  const respond = (result) => {
+    const { channel, sequence } = packets.at(-1);
+    port.emit('message', { data: { channel, sequence, ok: true, result } });
+  };
+  const owner = client.create('registered');
+  owner.ready.catch(() => {});
+  respond({ handle: 'a'.repeat(32) });
+  await tick();
+  assert.equal(packets.at(-1).op, 'ready');
+  t.mock.timers.tick(120_000);
+  assert.equal(client.status().closed, false);
+  respond({ phase: 'ready' });
+  await owner.ready;
+  assert.equal(owner.status().phase, 'ready');
+});
 test('opaque engine handles are scoped to the fixed owning UtilityProcess peer', async (t) => {
   const a = fixture(t), b = fixture(t), proxy = a.client.create('registered'); await proxy.ready;
   const handle = a.responses.find((r) => r.result?.handle).result.handle;

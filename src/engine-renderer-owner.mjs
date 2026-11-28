@@ -2,7 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createReadonlyWallpaperServer } from '../bridge-runtime/src/scene-server.mjs';
-import { createEngineHealthGate, EngineFailureMemory } from '../bridge-runtime/src/engine-health.mjs';
+import { createEngineHealthGate, EngineFailureMemory, SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS, SCENE_SERVER_START_TIMEOUT_MS } from '../bridge-runtime/src/engine-health.mjs';
 import { readAuthorProperties, validateAuthorPropertyPatch } from '../bridge-runtime/src/author-properties.mjs';
 import { protectEngineRenderer } from './engine-boundary.mjs';
 import { createEngineFrameClock } from './engine-frame-clock.mjs';
@@ -116,12 +116,15 @@ export class EngineRendererOwner {
     this.#codecUrl = wrapperUrl + '/codec';
     if (this.#closed) return;
     this.#scene = createReadonlyWallpaperServer({ project: this.#project, config: this.#config, parentOrigin: origin });
-    await bounded(this.#scene.start(), 15000); if (this.#closed) return;
+    await bounded(this.#scene.start(), SCENE_SERVER_START_TIMEOUT_MS); if (this.#closed) return;
     const messageSource = this.#project.type === 'web' ? 'cwb-web' : 'cwb-scene';
+    // The iframe enforces the package-specific deadline and transfer stall checks.
+    // Leave time for wrapper startup and trusted capture beyond its hard cap.
+    const sceneBudget = this.#project.type === 'scene' ? SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS : null;
     const schema = this.#scene.authorProperties.schema;
     if (!validateAuthorPropertyPatch(schema, this.#properties)) throw Error('invalid_initial_author_properties');
     this.#health = createEngineHealthGate({ identity: this.#engineIdentity, origin: this.#scene.origin, source: this.#source,
-      channel: this.#scene.channel, messageSource, failures, firstFrameTimeoutMs, heartbeatTimeoutMs,
+      channel: this.#scene.channel, messageSource, failures, firstFrameTimeoutMs: sceneBudget ?? firstFrameTimeoutMs, heartbeatTimeoutMs,
       onRelease: () => {
         const state = this.#health?.status();
         if (state?.phase === 'failed') { this.#reason = state.reason; this.#notifyFailure(state.reason); }
@@ -148,7 +151,7 @@ export class EngineRendererOwner {
     this.#window.webContents.setAudioMuted(true);
     this.#window.webContents.on('render-process-gone', () => { if (!this.#closed) this.#fail('context_lost'); });
     this.#window.once('closed', () => { if (!this.#closed) this.#fail('context_lost'); });
-    await bounded(this.#window.loadURL(wrapperUrl), 15000); if (this.#closed) return;
+    await bounded(this.#window.loadURL(wrapperUrl), sceneBudget ?? 15000); if (this.#closed) return;
     this.#watch = setInterval(() => { if (!this.#closed && !this.#paused) this.#health.check(); }, 100);
     let applied = false;
     const pollEpoch = this.#pollEpoch;

@@ -161,6 +161,8 @@ await Promise.all([
     path.join(distRoot, "bridge-runtime", "public", "workbench-scene-preview.js"), "js"),
   minifyAsset(path.join(bridgeRoot, "public", "cwb-scene-bridge.js"),
     path.join(distRoot, "bridge-runtime", "public", "cwb-scene-bridge.js"), "js"),
+  minifyAsset(path.join(bridgeRoot, "public", "cwb-scene-host.mjs"),
+    path.join(distRoot, "bridge-runtime", "public", "cwb-scene-host.mjs"), "js"),
   cp(path.join(bridgeRoot, "vendor"), path.join(distRoot, "bridge-runtime", "vendor"), { recursive: true }),
   compileWindowsMedia({ nativeRoot: path.join(bridgeRoot, "native"), outputRoot: path.join(distRoot, "bridge-runtime", "native") }),
 ]);

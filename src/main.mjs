@@ -40,6 +40,7 @@ import { verifyCdpEndpointOwner } from "./cdp-owner.mjs";
 import { createPreviewSession, stopPreviewProcess } from "./preview-session.mjs";
 import { createDesktopEngineHost } from "./desktop-engine-host.mjs";
 import { registerDesktopRendererScheme, installDesktopRendererProtocol } from "./desktop-renderer-protocol.mjs";
+import { checkForUpdates, dismissUpdate, getUpdateState, isAllowedReleaseUrl, normalizeUpdateSettings } from "./update-checker.mjs";
 import { DESKTOP_RENDERER_URL } from "../bridge-runtime/src/desktop-origin.mjs";
 import { defaultCdpPort, extractPreservedLaunchArgs, HOST_TYPES, hostDisplayName, hostPortConflict, installationHostType } from "../bridge-runtime/src/host-profiles.mjs";
 
@@ -49,6 +50,7 @@ const preloadPath = path.join(here, "preload.cjs");
 const rendererUrl = DESKTOP_RENDERER_URL;
 registerDesktopRendererScheme(protocol);
 const acceptanceContext = await prepareAcceptanceContext({ appPath: app.getAppPath(), isPackaged: app.isPackaged });
+const backgroundChecksEnabled = !acceptanceContext && process.env.NODE_ENV !== "test" && !process.env.NODE_TEST_CONTEXT;
 if (acceptanceContext) app.setPath("userData", acceptanceContext.userData);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow = null;
@@ -68,7 +70,10 @@ let settings = {
   portsByHost: defaultPortsByHost(),
   adaptive: true,
   preservedLaunchArgs: {},
+  ...normalizeUpdateSettings(),
 };
+let updateTimer = null;
+let updateCheck = null;
 let activeOperation = null;
 let settingsPath = null;
 let settingsWriteQueue = Promise.resolve();
@@ -114,8 +119,8 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
       if (!installation || (hostType !== undefined && installationHostType(installation) !== hostType)) {
         throw new Error("此 CDP 端口只允许连接已核验的目标应用");
       }
-      await verifySelectedOwner(installation, port, { restoring: purpose === "restore" });
-      return { verified: true };
+      const { processId } = await verifySelectedOwner(installation, port, { restoring: purpose === "restore" });
+      return { verified: true, processId };
     },
   });
   const child = utilityProcess.fork(utilityPath, args, {
@@ -124,6 +129,7 @@ function forkBridgeUtility(modulePath, args, { cwd }) {
       ...bridgeEnv,
       CWB_BRIDGE_CLI: modulePath,
       CWB_NATIVE_ENGINE_PROVIDER: ownedNativeProvider ? "owned-parent-v1" : "",
+      CWB_WINDOW_OCCLUSION: ownedNativeProvider && backgroundChecksEnabled ? "1" : "",
     },
     stdio: "pipe",
     serviceName: "Lumina",
@@ -224,6 +230,7 @@ async function loadSettings() {
       portsByHost,
       adaptive: parsed.adaptive !== false,
       preservedLaunchArgs: savedArgs,
+      ...normalizeUpdateSettings(parsed),
     };
   } catch {
     preservedLaunchArgs.clear();
@@ -234,6 +241,7 @@ async function loadSettings() {
       portsByHost: defaultPortsByHost(),
       adaptive: true,
       preservedLaunchArgs: {},
+      ...normalizeUpdateSettings(),
     };
   }
 }
@@ -246,6 +254,31 @@ function saveSettings() {
   });
   settingsWriteQueue = write.catch(() => {});
   return write;
+}
+
+const desktopUpdateState = () => getUpdateState(settings, app.getVersion());
+
+function publishUpdateState() {
+  const state = desktopUpdateState();
+  if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("cwb:update-state", state);
+  return state;
+}
+
+async function checkDesktopUpdates() {
+  if (!backgroundChecksEnabled || isQuitting) return desktopUpdateState();
+  if (!updateCheck) {
+    updateCheck = (async () => {
+      const before = settings.lastUpdateCheckAt;
+      const next = await checkForUpdates({ settings, currentVersion: app.getVersion() });
+      if (isQuitting || next.lastUpdateCheckAt === before) return desktopUpdateState();
+      // A dismissal can arrive while the network request is pending.
+      settings.lastUpdateCheckAt = next.lastUpdateCheckAt;
+      settings.latestUpdate = next.latestUpdate;
+      await saveSettings().catch(() => {});
+      return isQuitting ? desktopUpdateState() : publishUpdateState();
+    })().finally(() => { updateCheck = null; });
+  }
+  return updateCheck;
 }
 
 async function currentState({ forceRefresh = false } = {}) {
@@ -468,7 +501,13 @@ function createMainWindow() {
   window.webContents.on("will-navigate", (event, url) => {
     if (url !== rendererUrl) event.preventDefault();
   });
-  window.once("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => {
+    window.show();
+    if (backgroundChecksEnabled) updateTimer = setTimeout(() => {
+      updateTimer = null;
+      void checkDesktopUpdates().catch(() => {});
+    }, 4000);
+  });
   window.loadURL(rendererUrl);
   const hideToTray = (event) => {
     if (isQuitting) return;
@@ -763,6 +802,22 @@ function startCodexTakeover({ installation, port, adaptive, baselineProcessIds =
 }
 
 function registerIpcHandlers() {
+  registerHandler("cwb:get-update-state", desktopUpdateState);
+  registerHandler("cwb:check-updates", checkDesktopUpdates);
+  registerHandler("cwb:dismiss-update", async ({ version } = {}) => {
+    const next = dismissUpdate(settings, app.getVersion(), version);
+    if (settings.dismissedUpdateVersion !== next.dismissedUpdateVersion) {
+      settings.dismissedUpdateVersion = next.dismissedUpdateVersion;
+      await saveSettings().catch(() => {});
+    }
+    return publishUpdateState();
+  });
+  registerHandler("cwb:open-update-url", async ({ version } = {}) => {
+    const state = desktopUpdateState();
+    if (!state.updateAvailable || state.version !== version || !isAllowedReleaseUrl(state.releaseUrl)) return { ok: false };
+    await shell.openExternal(state.releaseUrl);
+    return { ok: true };
+  });
   registerHandler("cwb:get-state", () => currentState());
   registerHandler("cwb:set-workbench-theme", (theme) => setWindowChromeTheme(mainWindow, theme, process.platform));
   registerHandler("cwb:refresh-installations", async () => {
@@ -989,6 +1044,8 @@ if (!hasSingleInstanceLock || quitRunningInstanceRequested) {
 
 app.on("before-quit", (event) => {
   isQuitting = true;
+  clearTimeout(updateTimer);
+  updateTimer = null;
   shutdownRequested = true;
   if (shutdownComplete) return;
   event.preventDefault();

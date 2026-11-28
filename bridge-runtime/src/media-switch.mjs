@@ -64,7 +64,7 @@ export function runMediaTransition(next, before, options = {}) {
 }
 
 /** Shared prepare/commit/cancel state machine. Self-contained for CDP serialization. */
-export function createMediaSwitcher({ create, commit, dispose, transition = null, timeoutMs = 5000 }) {
+export function createMediaSwitcher({ create, commit, dispose, transition = null, timeoutMs = 5000, maxLoadTimeoutMs = 90000 }) {
   let revision = 0;
   let active = null;
   let pending = null;
@@ -123,7 +123,7 @@ export function createMediaSwitcher({ create, commit, dispose, transition = null
       return handle;
     }
     const timeout = new Promise((resolve) => {
-      const duration = Number.isFinite(loadTimeoutMs) && loadTimeoutMs > 0 && loadTimeoutMs <= 90000 ? loadTimeoutMs : timeoutMs;
+      const duration = Number.isFinite(loadTimeoutMs) && loadTimeoutMs > 0 && loadTimeoutMs <= maxLoadTimeoutMs ? loadTimeoutMs : timeoutMs;
       handle.timer = setTimeout(() => resolve({ error: 'Media load timed out' }), duration);
     });
     const loaded = Promise.resolve(handle.slot.ready).then(() => ({ ok: true }),

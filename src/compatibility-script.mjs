@@ -68,18 +68,134 @@ const nestedSurfaceSelector = `
   ${threadFooterBackdropSelector},
   :is(${threadFooterSelector}) > div[class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"]:is([class~="bg-surface"], [class~="bg-surface-secondary"])
 `;
-const protectedSurfaceSelector = `
+export const protectedSurfaceSelector = `
   dialog, [role="dialog"], [role="alertdialog"], [role="menu"],
-  [role="listbox"], [role="tooltip"], [popover], [data-radix-popper-content-wrapper],
+  [role="listbox"], [role="tooltip"], [popover], [data-radix-portal], [data-radix-popper-content-wrapper],
   [data-base-ui-portal], #gemini-neko-pet-root
 `;
 
-const antigravityPreservedSurfaceSelector = `
-  .surface-composer,
-  .surface-composer-card,
-  .agy-user-bubble,
-  [data-testid="user-message-bubble"]
+const editableControlSelector = '[contenteditable]:not([contenteditable="false"])';
+const interactiveControlSelector = `
+  button, input, textarea, select, option, ${editableControlSelector},
+  [role="button"], [role="textbox"], [role="searchbox"], [role="combobox"], [role="menuitem"], [role="option"]
 `;
+
+const antigravitySidebarSelector = '[role="navigation"][aria-label="Sidebar"]';
+export const codexSidebarSelector = 'aside:is(.app-shell-left-panel, [data-app-shell-left-panel-appearance], [data-ds-part="sidebar"])';
+const codexComposerSelector = ':is([data-composer-placement="thread"], [data-composer-surface-variant]) [data-composer-body]';
+const codexBubbleSelector = `
+  [data-user-message-bubble], [data-testid="user-message-bubble"], [data-testid="user-message-card"],
+  [data-message-author-role="user"] :is(.bg-surface-elevated-secondary, [class~="bg-surface-elevated-secondary/50"])
+`;
+const antigravityComposerSelector = '.surface-composer-card, .agy-user-bubble, [data-testid="user-message-bubble"]';
+const antigravityScrollSelector = 'button[aria-label="Scroll to Bottom"]';
+const outsideProtected = `:not(:is(${protectedSurfaceSelector})):not(:is(${protectedSurfaceSelector}) *)`;
+
+export function buildLiquidGlassCss(hostType, root) {
+  const antigravity = hostType === "antigravity";
+  const on = `${root}[data-cwb-liquid-glass="on"]`;
+  const sidebar = antigravity ? antigravitySidebarSelector : codexSidebarSelector;
+  const composer = antigravity ? antigravityComposerSelector : `${codexComposerSelector}, ${codexBubbleSelector}`;
+  const enabled = [
+    `${on}[data-cwb-glass-composer="on"] :is(${composer})${outsideProtected}`,
+    ...(antigravity ? [`${on} ${antigravityScrollSelector}${outsideProtected}`] : []),
+  ];
+  const antigravityTokens = antigravity ? `
+      ${on},
+      ${on} :is(body, .agy-shell, .agy-inset-shell, .agy-sheet)${outsideProtected} {
+        --card: var(--cwb-glass-fill) !important;
+        --color-card: var(--cwb-glass-fill) !important;
+        --card-border: var(--cwb-glass-edge) !important;
+        --glass: var(--cwb-glass-fill) !important;
+        --glass-border: var(--cwb-glass-edge) !important;
+        --glass-highlight: var(--cwb-glass-edge) !important;
+        --onyx-raised: var(--cwb-glass-fill) !important;
+      }
+      ${root}:is([data-cwb-liquid-glass="off"], [data-cwb-glass-composer="off"]) :is(${antigravityComposerSelector})${outsideProtected},
+      ${root}[data-cwb-liquid-glass="off"] ${antigravityScrollSelector}${outsideProtected} {
+        --card: #1f1f27 !important;
+        --color-card: #1f1f27 !important;
+        --glass: #1f1f27 !important;
+        --onyx-raised: #1f1f27 !important;
+        --card-border: var(--border, rgba(255, 255, 255, .10)) !important;
+        --glass-border: var(--border, rgba(255, 255, 255, .10)) !important;
+        --glass-highlight: transparent !important;
+      }
+      /* Stop inherited shell tokens at the boundary of popovers, menus and dialogs. */
+      ${root} :is(${protectedSurfaceSelector}):not(#gemini-neko-pet-root) {
+        --background: #141418 !important;
+        --color-background: #141418 !important;
+        --body-background: #141418 !important;
+        --content: #141418 !important;
+        --sidebar: #19191f !important;
+        --color-sidebar: #19191f !important;
+        --shell: #19191f !important;
+        --shell-canvas: #19191f !important;
+        --card: #1f1f27 !important;
+        --color-card: #1f1f27 !important;
+        --glass: #1f1f27 !important;
+        --glass-border: rgba(255, 255, 255, 0.10) !important;
+        --glass-highlight: rgba(255, 255, 255, 0.10) !important;
+        --onyx-frame: #141418 !important;
+        --onyx-raised: #1f1f27 !important;
+        --border: rgba(255, 255, 255, 0.09) !important;
+        --card-border: rgba(255, 255, 255, 0.10) !important;
+      }
+  ` : "";
+  return `
+    ${root}[data-cwb-liquid-glass] {
+      --cwb-glass-rgb: 24, 27, 36;
+      --cwb-glass-edge: rgba(255, 255, 255, var(--cwb-glass-border-opacity, .12));
+      --cwb-glass-fill: rgba(var(--cwb-glass-rgb), var(--cwb-glass-opacity, .62));
+      --cwb-glass-filter: blur(var(--cwb-glass-blur, 18px)) saturate(var(--cwb-glass-saturation, 130%));
+      --cwb-sidebar-fill: rgba(var(--cwb-glass-rgb), var(--cwb-sidebar-alpha, .34));
+      --cwb-sidebar-shadow: inset -1px 0 var(--cwb-glass-edge), inset 0 1px var(--cwb-glass-edge);
+    }
+    ${root}[data-cwb-glass-tint="neutral"] { --cwb-glass-rgb: 49, 49, 54; }
+    ${root}[data-cwb-glass-tint="frost"] { --cwb-glass-rgb: 74, 94, 117; }
+    ${antigravity ? "" : `
+    ${root}:is(.electron-light:not([data-dream-shell="dark"]), [data-dream-shell="light"], [data-theme="light"]:not([data-dream-shell="dark"])) {
+      --cwb-glass-rgb: 192, 199, 213;
+      --cwb-glass-edge: rgba(56, 66, 85, var(--cwb-glass-border-opacity, .12));
+    }
+    ${root}:is(.electron-light:not([data-dream-shell="dark"]), [data-dream-shell="light"], [data-theme="light"]:not([data-dream-shell="dark"]))[data-cwb-glass-tint="neutral"] {
+      --cwb-glass-rgb: 224, 224, 227;
+    }
+    ${root}:is(.electron-light:not([data-dream-shell="dark"]), [data-dream-shell="light"], [data-theme="light"]:not([data-dream-shell="dark"]))[data-cwb-glass-tint="frost"] {
+      --cwb-glass-rgb: 243, 250, 255;
+    }`}
+    ${on}[data-cwb-sidebar-blur="on"] ${sidebar}${outsideProtected} {
+      background-color: var(--cwb-sidebar-fill) !important;
+      background-image: none !important;
+      backdrop-filter: var(--cwb-glass-filter) !important;
+      -webkit-backdrop-filter: var(--cwb-glass-filter) !important;
+      box-shadow: var(--cwb-sidebar-shadow) !important;
+    }
+    ${root}:is([data-cwb-liquid-glass="off"], [data-cwb-sidebar-blur="off"]) ${sidebar}${outsideProtected} {
+      background: transparent !important;
+      border-color: transparent !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+      box-shadow: none !important;
+    }
+    ${enabled.join(",\n    ")} {
+      background-color: var(--cwb-glass-fill) !important;
+      background-image: none !important;
+      backdrop-filter: var(--cwb-glass-filter) !important;
+      -webkit-backdrop-filter: var(--cwb-glass-filter) !important;
+      border-color: var(--cwb-glass-edge) !important;
+      box-shadow: inset 0 1px var(--cwb-glass-edge), 0 0 0 1px var(--cwb-glass-edge) !important;
+    }
+    ${root}:is([data-cwb-liquid-glass="off"], [data-cwb-glass-composer="off"]) :is(${composer})${outsideProtected}
+    ${antigravity ? `, ${root}[data-cwb-liquid-glass="off"] ${antigravityScrollSelector}${outsideProtected}` : ""} {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+    ${antigravityTokens}
+  `;
+}
+
+const antigravityPreservedSurfaceSelector = `.surface-composer, ${antigravityComposerSelector}`;
 
 const antigravityShellSelector = `
   html,
@@ -130,19 +246,18 @@ const antigravityShellSelector = `
 `;
 
 const antigravityControlExclusions = `
-  button, a, input, textarea, select, option, pre, code, [contenteditable="true"],
-  [role="navigation"][aria-label="Sidebar"], .agy-sidebar-row, [data-selected="true"], [aria-current="page"],
-  [role="button"], [role="textbox"], [role="searchbox"], [role="combobox"], [role="menuitem"], [role="option"]
+  ${interactiveControlSelector}, a, pre, code,
+  [role="navigation"][aria-label="Sidebar"], .agy-sidebar-row, [data-selected="true"], [aria-current="page"]
 `;
 
 function adaptiveRuntimeSource({ hostType = "codex" } = {}) {
   const isAntigravity = hostType === "antigravity";
   const blockedSelector = isAntigravity
-    ? "button, a, input, textarea, select, option, pre, code, [contenteditable=true], [data-composer-body], [role=navigation][aria-label=Sidebar], .surface-composer, .surface-composer-card, .agy-user-bubble, .agy-sidebar-row, [data-selected=true], [aria-current=page], [data-testid=user-message-bubble], [role=button], [role=textbox], [role=searchbox], [role=combobox], [role=menu], [role=menuitem], [role=listbox], [role=option], [role=dialog], [role=alertdialog], [role=tooltip], [popover], [data-base-ui-portal], #gemini-neko-pet-root"
-    : "button, input, textarea, select, option, [contenteditable=true], [data-composer-body], aside.app-shell-left-panel, aside[data-app-shell-left-panel-appearance], aside[data-ds-part=sidebar], [role=button], [role=menu], [role=menuitem], [role=dialog], [role=alertdialog]";
+    ? `button, a, input, textarea, select, option, pre, code, ${editableControlSelector}, [data-composer-body], [role=navigation][aria-label=Sidebar], .surface-composer, .surface-composer-card, .agy-user-bubble, .agy-sidebar-row, [data-selected=true], [aria-current=page], [data-testid=user-message-bubble], [role=button], [role=textbox], [role=searchbox], [role=combobox], [role=menu], [role=menuitem], [role=listbox], [role=option], [role=dialog], [role=alertdialog], [role=tooltip], [popover], [data-base-ui-portal], #gemini-neko-pet-root`
+    : `${interactiveControlSelector}, [data-composer-body], ${codexSidebarSelector}`;
   const skipClosestSelector = isAntigravity
-    ? "#codex-wallpaper-bridge-root, #gemini-neko-pet-root, .surface-composer, .agy-user-bubble, [data-testid=user-message-bubble], [data-base-ui-portal], [role=dialog], [role=alertdialog], [role=menu], [role=listbox], [role=tooltip], [popover], [data-radix-popper-content-wrapper], pre, code"
-    : "#codex-wallpaper-bridge-root";
+    ? `${antigravityPreservedSurfaceSelector}, ${protectedSurfaceSelector}, pre, code`
+    : `${codexComposerSelector}, ${codexBubbleSelector}, ${protectedSurfaceSelector}, pre, code`;
   const geometryCheck = isAntigravity
     ? `
         const isTallSidebar = rect.width >= 160 && rect.height >= innerHeight * .55 && (rect.left <= 6 || rect.right >= innerWidth - 6);
@@ -217,7 +332,7 @@ function adaptiveRuntimeSource({ hostType = "codex" } = {}) {
       const viewportArea = Math.max(1, innerWidth * innerHeight);
       let visited = 0;
       for (const element of document.querySelectorAll("body *")) {
-        if (++visited > 3000 || element.matches(blockedSelector) || element.closest(${JSON.stringify(skipClosestSelector)})) continue;
+        if (++visited > 3000 || element.matches(blockedSelector) || element.closest("#codex-wallpaper-bridge-root") || element.closest(${JSON.stringify(skipClosestSelector)})) continue;
         const rect = element.getBoundingClientRect();
         if (rect.bottom <= 0 || rect.right <= 0) continue;
         ${geometryCheck}
@@ -235,15 +350,15 @@ function adaptiveRuntimeSource({ hostType = "codex" } = {}) {
 
 function buildCompatibilityCss(hostType) {
   if (hostType === "antigravity") {
+    const root = `html[${ROOT_ATTRIBUTE}="active"]`;
     return `
+      ${buildLiquidGlassCss(hostType, root)}
       html[${ROOT_ATTRIBUTE}="active"],
       html[${ROOT_ATTRIBUTE}="active"] body,
       html[${ROOT_ATTRIBUTE}="active"] body.theme-standalone,
       html[${ROOT_ATTRIBUTE}="active"] body.theme-light,
       html[${ROOT_ATTRIBUTE}="active"] body.dark,
-      html[${ROOT_ATTRIBUTE}="active"] .agy-shell,
-      html[${ROOT_ATTRIBUTE}="active"] .agy-inset-shell,
-      html[${ROOT_ATTRIBUTE}="active"] .agy-sheet {
+      ${root} :is(.agy-shell, .agy-inset-shell, .agy-sheet)${outsideProtected} {
         color-scheme: dark !important;
         --background: transparent !important;
         --color-background: transparent !important;
@@ -268,16 +383,9 @@ function buildCompatibilityCss(hostType) {
         --sidebar-secondary: rgba(255, 255, 255, 0.08) !important;
         --sidebar-muted: rgba(255, 255, 255, 0.05) !important;
         --color-sidebar-muted: rgba(255, 255, 255, 0.05) !important;
-        --card: rgba(24, 27, 36, 0.62) !important;
-        --color-card: rgba(24, 27, 36, 0.62) !important;
-        --card-border: rgba(255, 255, 255, 0.09) !important;
         --border: rgba(255, 255, 255, 0.07) !important;
-        --glass: rgba(24, 27, 36, 0.66) !important;
-        --glass-border: rgba(255, 255, 255, 0.10) !important;
-        --glass-highlight: rgba(255, 255, 255, 0.10) !important;
         --onyx-frame: transparent !important;
         --onyx-well: rgba(255, 255, 255, 0.06) !important;
-        --onyx-raised: rgba(24, 27, 36, 0.66) !important;
         --onyx-selected: rgba(255, 255, 255, 0.10) !important;
         --onyx-key: rgba(255, 255, 255, 0.14) !important;
         --editor-code-block-background: rgba(14, 16, 22, 0.54) !important;
@@ -302,24 +410,6 @@ function buildCompatibilityCss(hostType) {
         --syntax-class-name: #ffa657 !important;
         --syntax-regex: #a5d6ff !important;
         --syntax-default-fg: #f4f4f6 !important;
-      }
-      /* Keep popovers, menus and dialogs readable with solid surface tokens. */
-      html[${ROOT_ATTRIBUTE}="active"] :is(${protectedSurfaceSelector}):not(#gemini-neko-pet-root) {
-        --background: #141418 !important;
-        --color-background: #141418 !important;
-        --body-background: #141418 !important;
-        --content: #141418 !important;
-        --sidebar: #19191f !important;
-        --color-sidebar: #19191f !important;
-        --shell: #19191f !important;
-        --shell-canvas: #19191f !important;
-        --card: #1f1f27 !important;
-        --color-card: #1f1f27 !important;
-        --glass: #1f1f27 !important;
-        --onyx-frame: #141418 !important;
-        --onyx-raised: #1f1f27 !important;
-        --border: rgba(255, 255, 255, 0.09) !important;
-        --card-border: rgba(255, 255, 255, 0.10) !important;
       }
       html[${ROOT_ATTRIBUTE}="active"] body > #root {
         position: relative !important;
@@ -369,32 +459,6 @@ function buildCompatibilityCss(hostType) {
         background: transparent !important;
         background-color: transparent !important;
         background-image: none !important;
-        border-color: transparent !important;
-        box-shadow: none !important;
-      }
-      /* Subtle frosted-glass vibrancy on the outer left sidebar container to distinguish navigation from the clear canvas. */
-      html[${ROOT_ATTRIBUTE}="active"]:not([data-cwb-sidebar-blur="off"]) [role="navigation"][aria-label="Sidebar"]:not(:is(${protectedSurfaceSelector}) *) {
-        background: rgba(12, 16, 24, 0.22) !important;
-        background-color: rgba(12, 16, 24, 0.22) !important;
-        background-image: linear-gradient(
-          180deg,
-          rgba(255, 255, 255, 0.03) 0%,
-          rgba(12, 16, 24, 0.04) 100%
-        ) !important;
-        backdrop-filter: blur(var(--cwb-sidebar-blur, 16px)) saturate(118%) !important;
-        -webkit-backdrop-filter: blur(var(--cwb-sidebar-blur, 16px)) saturate(118%) !important;
-        border-top: 1px solid rgba(255, 255, 255, 0.04) !important;
-        border-right: 1px solid rgba(255, 255, 255, 0.07) !important;
-        border-bottom-color: transparent !important;
-        border-left-color: transparent !important;
-        box-shadow: none !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"][data-cwb-sidebar-blur="off"] [role="navigation"][aria-label="Sidebar"]:not(:is(${protectedSurfaceSelector}) *) {
-        background: transparent !important;
-        background-color: transparent !important;
-        background-image: none !important;
-        backdrop-filter: none !important;
-        -webkit-backdrop-filter: none !important;
         border-color: transparent !important;
         box-shadow: none !important;
       }
@@ -448,55 +512,12 @@ function buildCompatibilityCss(hostType) {
         box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06) !important;
         --row-bg: transparent !important;
       }
-      /* Cohesive frosted-glass composer capsule and user message bubbles (Codex parity). */
-      html[${ROOT_ATTRIBUTE}="active"] .surface-composer {
+      /* Clear the composer wrapper so the card can show the wallpaper. */
+      html[${ROOT_ATTRIBUTE}="active"] .surface-composer${outsideProtected} {
         background: transparent !important;
         background-color: transparent !important;
         border-color: transparent !important;
         box-shadow: none !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] .surface-composer > .surface-composer-card {
-        background: rgba(24, 27, 36, 0.68) !important;
-        background-color: rgba(24, 27, 36, 0.68) !important;
-        backdrop-filter: blur(20px) saturate(135%) !important;
-        -webkit-backdrop-filter: blur(20px) saturate(135%) !important;
-        box-shadow:
-          0 10px 30px -8px rgba(0, 0, 0, 0.36),
-          inset 0 1px 0 rgba(255, 255, 255, 0.12),
-          0 0 0 1px rgba(255, 255, 255, 0.09) !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] .surface-composer:focus-within > .surface-composer-card {
-        background: rgba(26, 29, 39, 0.74) !important;
-        background-color: rgba(26, 29, 39, 0.74) !important;
-        box-shadow:
-          0 12px 34px -8px rgba(0, 0, 0, 0.42),
-          inset 0 1px 0 rgba(255, 255, 255, 0.16),
-          0 0 0 1px rgba(255, 255, 255, 0.15) !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] .surface-composer-card button:not(.agy-send-button):not(:hover):not([aria-expanded="true"]) {
-        background: transparent !important;
-        background-color: transparent !important;
-        box-shadow: none !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] .surface-composer-card button:not(.agy-send-button):hover {
-        background-color: rgba(255, 255, 255, 0.08) !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] :is(.agy-user-bubble, [data-testid="user-message-bubble"]) {
-        background: rgba(28, 31, 42, 0.56) !important;
-        background-color: rgba(28, 31, 42, 0.56) !important;
-        backdrop-filter: blur(16px) saturate(130%) !important;
-        -webkit-backdrop-filter: blur(16px) saturate(130%) !important;
-        box-shadow:
-          inset 0 1px 0 rgba(255, 255, 255, 0.10),
-          0 0 0 1px rgba(255, 255, 255, 0.08),
-          0 6px 18px -6px rgba(0, 0, 0, 0.24) !important;
-      }
-      html[${ROOT_ATTRIBUTE}="active"] button[aria-label="Scroll to Bottom"] {
-        background: rgba(24, 27, 36, 0.68) !important;
-        background-color: rgba(24, 27, 36, 0.68) !important;
-        backdrop-filter: blur(14px) !important;
-        -webkit-backdrop-filter: blur(14px) !important;
-        border-color: rgba(255, 255, 255, 0.10) !important;
       }
       /* Clear top and bottom scroll gradient fades above the composer. */
       html[${ROOT_ATTRIBUTE}="active"] :is(
@@ -525,7 +546,9 @@ function buildCompatibilityCss(hostType) {
     `;
   }
   return `
-      html[${ROOT_ATTRIBUTE}="active"] :is(${semanticSelector}) {
+      html[${ROOT_ATTRIBUTE}="active"] :is(${semanticSelector}):not(
+        ${interactiveControlSelector}, ${codexComposerSelector}, ${codexBubbleSelector}
+      )${outsideProtected} {
         background: transparent !important;
         background-color: transparent !important;
         background-image: none !important;
@@ -535,8 +558,7 @@ function buildCompatibilityCss(hostType) {
         -webkit-backdrop-filter: none !important;
       }
       html[${ROOT_ATTRIBUTE}="active"] :is(${nestedSurfaceSelector}):not(
-        button, input, textarea, select, option, [contenteditable="true"],
-        [role="button"], [role="textbox"], [role="searchbox"], [role="menuitem"], [role="option"]
+        ${interactiveControlSelector}
       ):not(:is(${protectedSurfaceSelector})):not(:is(${protectedSurfaceSelector}) *) {
         background-color: transparent !important;
         background-image: none !important;
@@ -547,7 +569,7 @@ function buildCompatibilityCss(hostType) {
         background-color: transparent !important;
         background-image: none !important;
       }
-      html[${ROOT_ATTRIBUTE}="active"] [data-app-shell-page-surface] {
+      html[${ROOT_ATTRIBUTE}="active"] [data-app-shell-page-surface]${outsideProtected} {
         --app-shell-content-fade: none !important;
         --app-shell-content-fade-opacity: 0 !important;
       }
@@ -581,6 +603,7 @@ function buildCompatibilityCss(hostType) {
         border-color: transparent !important;
         box-shadow: none !important;
       }
+      ${buildLiquidGlassCss(hostType, `html[${ROOT_ATTRIBUTE}="active"]`)}
     `;
 }
 

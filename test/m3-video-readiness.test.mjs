@@ -6,8 +6,8 @@ import { resolvePlayback } from '../bridge-runtime/src/playback-policy.mjs';
 
 const source = await readFile(new URL('../bridge-overrides/src/injected-renderer.mjs', import.meta.url), 'utf8');
 const factory = source.slice(source.indexOf('const createMedia ='), source.indexOf('const mediaSwitcher ='));
-const effects = { playing: true, pauseWhenHidden: true, pauseOnBattery: true, fit: 'cover', position: '50% 50%', zoom: 100, volume: 50, playbackRate: 1 };
-function fixture({ hidden = false, onBattery = false, playing = true, direct = true } = {}) {
+const effects = { playing: true, pauseWhenHidden: true, pauseWhenOccluded: true, pauseOnBattery: true, fit: 'cover', position: '50% 50%', zoom: 100, volume: 50, playbackRate: 1 };
+function fixture({ hidden = false, onBattery = false, occluded = false, playing = true, direct = true } = {}) {
   const nodes = [], handlers = new Map(), frames = [], reports = [];
   const video = { style: {}, paused: true, videoWidth: 640, readyState: 0,
     addEventListener: (name, fn) => handlers.set(name, fn),
@@ -18,7 +18,9 @@ function fixture({ hidden = false, onBattery = false, playing = true, direct = t
   const document = { hidden, getElementById: () => root, createElement: kind => kind === 'video' ? video : { style: {}, dataset: {}, contentWindow: { postMessage() {} }, remove() {} } };
   const parent = { postMessage: v => reports.push(v) };
   const context = { document, nativeEnabled: direct, directSceneEnabled: false, ensureRoot: () => root,
-    ids: { media: 'media', scrim: 'scrim' }, resolvePlayback, updateMediaState() {}, addEventListener: (name, fn) => events.set(name, fn),
+    ids: { media: 'media', scrim: 'scrim' },
+    resolvePlayback: (effects, environment) => resolvePlayback(effects, { ...environment, occluded }),
+    updateMediaState() {}, addEventListener: (name, fn) => events.set(name, fn),
     removeEventListener() {}, parent, window: null, performance: { now: () => 0 }, console, JSON };
   context.window = context;
   const create = vm.runInNewContext(factory + '\ncreateMedia', context);
@@ -28,15 +30,28 @@ function fixture({ hidden = false, onBattery = false, playing = true, direct = t
     assert.ok(script);
     vm.runInNewContext(script, context);
   }
-  return { slot, video, frames, handlers, events, reports, document, parent };
+  return { slot, video, frames, handlers, events, reports, document, parent, setOccluded: value => { occluded = value; } };
 }
 
 test('native DOM paused video accepts decoded data without waiting for a non-existent compositor callback', async () => {
-  for (const flags of [{ hidden: true }, { onBattery: true }, { playing: false }]) {
+  for (const flags of [{ hidden: true }, { onBattery: true }, { occluded: true }, { playing: false }]) {
     const f = fixture(flags); f.handlers.get('loadeddata')();
     const ready = await Promise.race([f.slot.ready.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 30))]);
     assert.equal(ready, true, JSON.stringify(flags)); assert.equal(f.frames.length, 0); assert.equal(f.video.paused, true);
   }
+});
+
+test('an occlusion transition pauses and resumes the same DOM video while preserving manual pause', () => {
+  const f = fixture();
+  assert.equal(f.video.paused, false);
+  f.setOccluded(true);
+  f.slot.update({ effects });
+  assert.equal(f.video.paused, true);
+  f.setOccluded(false);
+  f.slot.update({ effects });
+  assert.equal(f.video.paused, false);
+  f.slot.update({ effects: { ...effects, playing: false } });
+  assert.equal(f.video.paused, true);
 });
 
 test('playing video still waits for an actual frame and pause during decode cannot strand readiness', async () => {

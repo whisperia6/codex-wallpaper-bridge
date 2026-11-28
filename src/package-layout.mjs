@@ -4,12 +4,12 @@ import path from "node:path";
 export const COMPILED_BRIDGE_UNPACKED_FILES = Object.freeze([
   "dist/bridge-utility-entry.mjs",
   ...["windows-media.ps1", "windows-media.dll", "cwb-win-helper.exe"].map(file => `dist/bridge-runtime/native/${file}`),
-  ...["app.js", "author-properties-panel.js", "cwb-scene-bridge.js", "cwb-verifier-probe.js", "cwb-web-bridge.js",
+  ...["app.js", "author-properties-panel.js", "cwb-scene-bridge.js", "cwb-scene-host.mjs", "cwb-verifier-probe.js", "cwb-web-bridge.js",
     "electron-host.js", "index.html", "media-switch.js", "workbench-scene-preview.js", "workbench-theme.js", "styles.css"].map((file) => `dist/bridge-runtime/public/${file}`),
   ...["cli.mjs", "desktop-engine-host.mjs", "engine-provider-rpc.mjs", "engine-renderer-owner.mjs", "engine-vp8-preload.cjs",
     "native-engine-provider.mjs", "scene-server.mjs"].map((file) => `dist/bridge-runtime/src/${file}`),
-  ...["index.html", "LICENSE", "mediabunny-LICENSE", "NOTICE.md", "vendor-lock.json", "we-scene-LICENSE", "web-shim.js",
-    "assets/modulepreload-polyfill-B5Qt9EMX.js", "assets/renderer-AJkjEL9i.js", "default-wallpaper/index.html",
+  ...["index.html", "LICENSE", "mediabunny-LICENSE", "NOTICE.md", "vendor-lock.json", "we-scene-LICENSE",
+    "webwallgl.mjs", "mediabunny.mjs",
     "sources/mediabunny-1.56.0.tgz"].map((file) => `dist/bridge-runtime/vendor/webwallgl/${file}`),
 ]);
 

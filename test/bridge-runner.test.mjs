@@ -111,7 +111,7 @@ test("scene inject/retry and restore have bounded startup/cleanup deadlines whil
   await invokeBridgeAction({ controlUrl, action: "restore" });
   await invokeBridgeAction({ controlUrl, action: "pause" });
   await invokeBridgeAction({ controlUrl, action: "inject", timeoutMs: 50 });
-  assert.deepEqual(deadlines, [150_000, 150_000, 30_000, 15_000, 50]);
+  assert.deepEqual(deadlines, [160_000, 160_000, 30_000, 15_000, 50]);
 });
 
 test("native inject still propagates server verification failures and explicit deadline aborts", async (context) => {

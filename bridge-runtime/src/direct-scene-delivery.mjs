@@ -11,12 +11,12 @@ import { validateWebWallpaperInput } from './web-wallpaper-input.mjs';
  */
 export class DirectSceneDelivery {
   #getProject; #getConfig; #sources = new Map(); #failures = new Set();
-  #closed = false; #timer; #polling = null; #onReceiverLost; #onPreloadReady;
+  #closed = false; #timer; #polling = null; #onReceiverLost; #onPreloadReady; #onCommittedFailure;
   #warming = new Map();
   #diagnosticProbe;
   #authorFiles;
   #onMediaControl;
-  constructor({ getProject, getConfig, onReceiverLost = () => {}, onPreloadReady = () => {}, diagnosticProbe = false, authorFiles = null, onMediaControl = null }) {
+  constructor({ getProject, getConfig, onReceiverLost = () => {}, onPreloadReady = () => {}, onCommittedFailure = () => {}, diagnosticProbe = false, authorFiles = null, onMediaControl = null }) {
     if (typeof getProject !== 'function' || typeof getConfig !== 'function') throw TypeError('gpu_provider_invalid');
     if (typeof diagnosticProbe !== 'boolean') throw TypeError('gpu_diagnostic_invalid');
     this.#diagnosticProbe = diagnosticProbe;
@@ -24,6 +24,7 @@ export class DirectSceneDelivery {
     this.#getProject = getProject; this.#getConfig = getConfig;
     this.#onReceiverLost = onReceiverLost;
     this.#onPreloadReady = onPreloadReady;
+    this.#onCommittedFailure = onCommittedFailure;
     this.#onMediaControl = onMediaControl;
     // Lease/health polling only, at 1 Hz, independent of the renderer's FPS.
     this.#timer = setInterval(() => { void this.sweep().catch(() => {}); }, 1000); this.#timer.unref?.();
@@ -190,7 +191,13 @@ export class DirectSceneDelivery {
           try { this.#onReceiverLost(lease.session); } catch {}
           await this.#release(lease); return;
         }
-        if (state?.failed && !lease.speculative) this.#rememberFailure(lease.key);
+        if (state?.failed && !lease.speculative && !lease.retiring) {
+          this.#rememberFailure(lease.key);
+          if (state.committed && !lease.failureReported) {
+            lease.failureReported = true;
+            try { this.#onCommittedFailure(lease); } catch {}
+          }
+        }
         if (state?.released) await this.#release(lease);
       }));
     })().finally(() => { this.#polling = null; });

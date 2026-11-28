@@ -289,7 +289,7 @@ async function sceneProbe() {
     await wait(`${host}?.state?.phase==='ready' && ${host}.state.draws>0`, 45000);
     await selectContext(scene);
     report.firstFrame = stateMetadata(await connection.evaluate(`${host}.state`));
-    report.sceneState = await inScene(`({type:__wp.getState().type,scene:!!window.__scene,layers:window.__sceneLayers?.length,
+    report.sceneState = await inScene(`({type:window.__cwbScene?.source==='cwb-scene'?'scene':null,scene:!!window.__scene,layers:window.__sceneLayers?.length,
       canvas:!!document.querySelector('canvas'),fallback:!!document.querySelector('iframe')})`);
     assert.equal(report.sceneState.type, 'scene'); assert.equal(report.sceneState.scene, true);
     assert.equal(report.sceneState.canvas, true); assert.equal(report.sceneState.fallback, false);

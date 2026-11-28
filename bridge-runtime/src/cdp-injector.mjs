@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { buildRestoreScript } from "./injected-renderer.mjs";
 import { NativeEngineDelivery } from "../../bridge-runtime/src/native-engine-delivery.mjs";
 import { DirectSceneDelivery } from "../../bridge-runtime/src/direct-scene-delivery.mjs";
+import { NATIVE_SCENE_APPLY_TIMEOUT_MS } from "../../bridge-runtime/src/engine-health.mjs";
 import { extractTargetOrigin, hostDisplayName, isValidTargetUrlForHost, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
 
 const SCRIPT_TIMEOUT_MS = 15_000;
 // Owned media keeps its existing 15 s load gate. Leave room for that gate to
 // report failure and dispose the candidate before the CDP request expires.
 const MEDIA_APPLY_TIMEOUT_MS = 20_000;
-const GPU_APPLY_TIMEOUT_MS = 105_000;
+const GPU_APPLY_TIMEOUT_MS = 140_000;
 const COLD_START_RETRY_DELAY_MS = 250;
 const RENDERER_DOM_FAILURE = "Renderer DOM application verification failed";
 const standaloneRestoration = Symbol("standalone restoration");
@@ -61,7 +62,7 @@ function normalizeInjection(value) {
     ['embedded_video', 'custom_static', 'preview', 'empty'].includes(entry?.reason) && typeof entry.script === 'string'
     && Buffer.byteLength(entry.script, 'utf8') <= 10000).slice(0, 4).map(entry => ({ reason: entry.reason, script: entry.script })) : [];
   return { bootstrapScript, applyScript, compatibilityScript, compatibilityRestoreScript, fallbackScripts,
-    nativeEnabled: value.nativeEnabled === true, nativeWallpaperId,
+    nativeEnabled: value.nativeEnabled === true, nativeWallpaperId, nativeScene: nativeWallpaperId !== null && value.nativeScene === true,
     directSceneEnabled: value.directSceneEnabled === true, directSceneId,
     requiresMediaCsp: value.requiresMediaCsp === true || directSceneId !== null };
 }
@@ -258,6 +259,7 @@ export class CdpWallpaperInjector {
     nativeProvider = null,
     sharedNativeDelivery = null,
     sceneProvider = null,
+    occlusion = null,
     verifyEndpoint = typeof nativeProvider?.verifyEndpoint === "function"
       ? (port, purpose) => nativeProvider.verifyEndpoint(port, hostType, purpose) : null
   } = {}) {
@@ -273,8 +275,13 @@ export class CdpWallpaperInjector {
       onFailure: (failure) => this.status('native-frame-error', { message: JSON.stringify(failure) }),
       onReceiverLost: (session) => this.onNativeReceiverLost(session) }) : null);
     this.verifyEndpoint = verifyEndpoint;
+    this.occlusion = occlusion;
+    this.occluded = false;
+    this.occlusionTimer = null;
+    this.occlusionQuery = null;
     this.sceneDelivery = sceneProvider ? new DirectSceneDelivery({ ...sceneProvider,
       onPreloadReady: (elapsedMs) => this.status('scene-preload-ready', { message: `候选首帧已预加载：${elapsedMs} ms` }),
+      onCommittedFailure: (lease) => this.fallbackFailedScene(lease),
       onReceiverLost: (session) => {
       if (!this.running || this.restoring || session.rehydrating || session.themeReloading) return;
       session.runtimeInstalled = false;
@@ -284,6 +291,7 @@ export class CdpWallpaperInjector {
     } }) : null;
     this.nativeEnabled = false;
     this.nativeWallpaperId = null;
+    this.nativeScene = false;
     this.directSceneEnabled = false;
     this.directSceneId = null;
     this.requiresMediaCsp = false;
@@ -374,12 +382,15 @@ export class CdpWallpaperInjector {
     const timing = createInjectionTiming();
     const lifecycleVersion = this.lifecycleVersion;
     let attachmentVerified = false;
+    let processId;
     try {
       if (this.nativeEnabled || this.directSceneEnabled) {
         this.assertDebuggerSocketEndpoint(target.webSocketDebuggerUrl);
         if ((this.nativeEnabled && !this.nativeDelivery) || (this.directSceneEnabled && !this.sceneDelivery)
-          || typeof this.verifyEndpoint !== "function"
-          || (await this.measureStage(timing, "owner", () => this.verifyEndpoint(this.port)))?.verified !== true) throw new Error("Native CDP endpoint is not identity-verified");
+          || typeof this.verifyEndpoint !== "function") throw new Error("Native CDP endpoint is not identity-verified");
+        const owner = await this.measureStage(timing, "owner", () => this.verifyEndpoint(this.port));
+        if (owner?.verified !== true) throw new Error("Native CDP endpoint is not identity-verified");
+        processId = owner.processId;
         attachmentVerified = true;
         await Promise.all([...this.nativeCleanups]);
       }
@@ -437,10 +448,12 @@ export class CdpWallpaperInjector {
         gpuCspInitialized: previous?.gpuCspInitialized === true,
         cspBypassActive: previous?.cspBypassActive === true,
         attachmentVerified,
+        processId,
+        occlusionApplied: previous?.occlusionApplied,
         removeLoadListener: null,
         removeContextListener: null
       };
-      const convergenceDeadline = performance.now() + (this.directSceneEnabled ? GPU_APPLY_TIMEOUT_MS : SCRIPT_TIMEOUT_MS);
+      const convergenceDeadline = performance.now() + (this.nativeScene ? NATIVE_SCENE_APPLY_TIMEOUT_MS : this.directSceneEnabled ? GPU_APPLY_TIMEOUT_MS : SCRIPT_TIMEOUT_MS);
       let appliedVersion;
       do {
         appliedVersion = this.planVersion;
@@ -449,7 +462,7 @@ export class CdpWallpaperInjector {
           applyScript: this.applyScript,
           compatibilityScript: this.compatibilityScript,
           compatibilityRestoreScript: this.compatibilityRestoreScript,
-          nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId,
+          nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId, nativeScene: this.nativeScene,
           directSceneEnabled: this.directSceneEnabled, directSceneId: this.directSceneId, fallbackScripts: this.fallbackScripts,
           requiresMediaCsp: this.requiresMediaCsp
         }, { timing });
@@ -472,6 +485,7 @@ export class CdpWallpaperInjector {
           session.removeContextListener = socket.onEvent("Runtime.executionContextsCleared", () => {
             if (!this.running || this.restoring || session.themeReloading) return;
             session.runtimeInstalled = false;
+            this.refreshOcclusion();
             void this.releaseSessionNative(session).catch(() => {
               this.status("native-cleanup-error", { message: "Native receiver cleanup incomplete" });
             });
@@ -482,6 +496,7 @@ export class CdpWallpaperInjector {
         });
       }
       this.trackSessionDisconnect(session);
+      this.refreshOcclusion();
       this.status("attached", { targetId: target.id, url: target.url, title: target.title });
       return session;
     } catch (error) {
@@ -520,12 +535,14 @@ export class CdpWallpaperInjector {
   }
 
   rememberSessionCleanup(session) {
-    if (session.newDocumentId || session.compatibilityRestoreScript || session.cspBypassActive) {
+    if (session.newDocumentId || session.compatibilityRestoreScript || session.cspBypassActive
+      || (this.occlusion && session.occlusionApplied !== false)) {
       this.disconnectedSessions.set(session.target.id, {
         newDocumentId: session.newDocumentId,
         compatibilityRestoreScript: session.compatibilityRestoreScript,
         gpuCspInitialized: session.gpuCspInitialized === true,
         cspBypassActive: session.cspBypassActive === true,
+        occlusionApplied: session.occlusionApplied,
       });
     }
   }
@@ -539,6 +556,7 @@ export class CdpWallpaperInjector {
       session.removeContextListener = null;
       this.rememberSessionCleanup(session);
       this.sessions.delete(session.target.id);
+      this.refreshOcclusion();
       void this.releaseSessionNative(session).catch(() => {});
     });
   }
@@ -740,6 +758,14 @@ export class CdpWallpaperInjector {
         if (runtime?.ready !== true) throw new Error("Renderer runtime readiness verification failed");
       }
       session.runtimeInstalled = true;
+      if (this.occlusion) {
+        // New documents start unoccluded. Reconcile a previous paused document
+        // too, since bootstrap can reuse the runtime after socket reconnect.
+        if (this.occluded || session.occlusionApplied !== false) {
+          session.occlusionApplied = undefined;
+          await this.applyOcclusion(session).catch(() => {});
+        }
+      }
     });
   }
 
@@ -906,6 +932,9 @@ export class CdpWallpaperInjector {
       let candidate = null;
       let sceneCandidate = null;
       try {
+        if (injection.directSceneId && previousScene?.key === injection.directSceneId && previousScene.snapshot?.failed) {
+          throw new Error('gpu_source_failed');
+        }
         if (injection.nativeWallpaperId && previous?.key !== injection.nativeWallpaperId) {
           candidate = this.nativeDelivery.prepare(session, injection.nativeWallpaperId);
           session.pendingNativeLease = candidate;
@@ -921,7 +950,7 @@ export class CdpWallpaperInjector {
           }
         }
         if (this.restoring) throw new Error("Renderer restoration is in progress");
-        const applyTimeout = injection.directSceneId ? GPU_APPLY_TIMEOUT_MS : MEDIA_APPLY_TIMEOUT_MS;
+        const applyTimeout = injection.nativeScene ? NATIVE_SCENE_APPLY_TIMEOUT_MS : injection.directSceneId ? GPU_APPLY_TIMEOUT_MS : MEDIA_APPLY_TIMEOUT_MS;
         const applyMedia = () => this.measureStage(timing, "apply", () => this.evaluateScript(session, injection.applyScript, applyTimeout));
         apply = await applyMedia();
         if (injection.directSceneId && apply?.deferred === true) {
@@ -965,16 +994,17 @@ export class CdpWallpaperInjector {
           if (["Media load timed out", "Media failed to load or decode", "Media commit failed"].includes(error.cwbSwitchFailure)) this.sceneDelivery.fail(sceneCandidate);
           await sceneCandidate.release();
         }
-        // New candidates never replace an existing committed wallpaper on
-        // failure. With no old frame, try only trusted token-scoped fallbacks;
-        // no VP8, arbitrary URL, automatic failure-cache clear or reload loop.
+        // Commit only a decoded fallback. Keep the previous wallpaper during
+        // preparation and if all sources fail for a different selection.
         const contentFailure = ['gpu_source_failed', 'gpu_project_unavailable', 'scene_manifest', 'scene_resource',
           'scene project root is unavailable', 'scene manifest is unavailable', 'scene manifest is invalid'].includes(error.message)
           || ['Media load timed out', 'Media failed to load or decode', 'Media commit failed'].includes(error.cwbSwitchFailure);
-        if (!contentFailure || !injection.directSceneId || (session.lastApplied && session.fallbackFor !== injection.directSceneId)
+        if (!contentFailure || !injection.directSceneId
           || this.restoring || !injection.fallbackScripts.length) throw error;
         apply = null;
         for (const fallback of injection.fallbackScripts) {
+          if (fallback.reason === 'empty' && session.lastApplied?.directSceneId !== injection.directSceneId
+            && session.lastApplied) continue;
           try {
             const value = await this.evaluateScript(session, fallback.script, MEDIA_APPLY_TIMEOUT_MS);
             if (appliedMediaReady(value)) {
@@ -983,9 +1013,8 @@ export class CdpWallpaperInjector {
           } catch {}
         }
         if (!apply) throw error;
-        session.fallbackFor = injection.directSceneId;
+        if (previousScene) { session.sceneLease = null; previousScene.retire(); }
       }
-      if (!apply?.degraded) session.fallbackFor = null;
       timing.applyMs += performance.now() - applyStartedAt;
       if (!appliedMediaReady(apply)) {
         throw rendererDomFailure(apply);
@@ -1049,8 +1078,22 @@ export class CdpWallpaperInjector {
     if (this.power.onBattery) await this.applyPower(session);
     session.lastApplied = injection;
     session.deferred = false; session.deferredInjection = null;
+    this.refreshOcclusion();
     this.status("injection-ready", detail);
     return detail;
+  }
+
+  fallbackFailedScene(lease) {
+    const { session } = lease;
+    const planVersion = this.planVersion;
+    void this.queueSessionWork(session, async () => {
+      if (!this.running || session.sceneLease !== lease || this.planVersion !== planVersion
+        || session.lastApplied?.directSceneId !== lease.key) return;
+      const result = await this.installScriptInternal(session, session.lastApplied, { updateReloadHook: false });
+      if (result && !result.deferred) session.lastInjection = result;
+    }).catch(error => {
+      if (this.running && !this.restoring) this.status("scene-fallback-error", { targetId: session.target.id, message: error.message });
+    });
   }
 
   async rehydrateSession(session) {
@@ -1059,6 +1102,7 @@ export class CdpWallpaperInjector {
     // reload is filtered above and must not rearm the cached reload request.
     session.themeReloadHandled = false;
     session.runtimeInstalled = false;
+    this.refreshOcclusion();
     session.appliedPlanVersion = 0;
     const planVersion = this.planVersion;
     session.rehydrating = this.installScript(
@@ -1068,7 +1112,7 @@ export class CdpWallpaperInjector {
         applyScript: this.applyScript,
         compatibilityScript: this.compatibilityScript,
         compatibilityRestoreScript: this.compatibilityRestoreScript,
-        nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId,
+        nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId, nativeScene: this.nativeScene,
         directSceneEnabled: this.directSceneEnabled, directSceneId: this.directSceneId, fallbackScripts: this.fallbackScripts,
         requiresMediaCsp: this.requiresMediaCsp
       },
@@ -1134,6 +1178,62 @@ export class CdpWallpaperInjector {
     await Promise.allSettled([...this.sessions.values()].filter(session => session.runtimeInstalled).map(session => this.applyPower(session)));
   }
 
+  occlusionSessions() {
+    return [...this.sessions.values()].filter(session => session.runtimeInstalled && !session.deferred
+      && session.socket.closed !== true && Number.isInteger(session.processId) && session.processId > 0);
+  }
+
+  stopOcclusion() {
+    clearTimeout(this.occlusionTimer);
+    this.occlusionTimer = null;
+    this.occlusionQuery?.abort();
+    this.occluded = false;
+  }
+
+  refreshOcclusion() {
+    if (!this.occlusion) return;
+    const sessions = this.occlusionSessions();
+    if (!this.running || this.restoring || !this.occlusion.isEnabled() || !sessions.length) {
+      this.stopOcclusion();
+      if (this.running && !this.restoring) {
+        void Promise.allSettled(sessions.map(session => this.applyOcclusion(session)));
+      }
+      return;
+    }
+    if (this.occlusionTimer || this.occlusionQuery) return;
+    this.occlusionTimer = setTimeout(() => void this.pollOcclusion(), this.occlusion.intervalMs ?? 1750);
+    this.occlusionTimer.unref?.();
+  }
+
+  async applyOcclusion(session) {
+    const value = this.occluded;
+    if (session.occlusionApplied === value) return;
+    session.occlusionApplied = undefined;
+    const applied = await this.evaluateScript(session, `globalThis.__codexWallpaperBridgeRuntime?.setOcclusion?.(${value})`, 3000);
+    if (applied === true && this.occluded === value) session.occlusionApplied = value;
+  }
+
+  async pollOcclusion() {
+    this.occlusionTimer = null;
+    const sessions = this.occlusionSessions();
+    if (!this.running || this.restoring || !this.occlusion.isEnabled() || !sessions.length || this.occlusionQuery) return;
+    const query = new AbortController();
+    this.occlusionQuery = query;
+    try {
+      const pids = [...new Set(sessions.map(session => session.processId))];
+      const result = await Promise.resolve().then(() => this.occlusion.query(pids, { signal: query.signal })).catch(() => null);
+      if (query.signal.aborted || !this.occlusion.isEnabled()) return;
+      const current = this.occlusionSessions();
+      const currentPids = new Set(current.map(session => session.processId));
+      if (pids.length !== currentPids.size || !pids.every(pid => currentPids.has(pid))) return;
+      this.occluded = result?.occluded === true;
+      await Promise.allSettled(current.map(session => this.applyOcclusion(session)));
+    } finally {
+      this.occlusionQuery = null;
+      this.refreshOcclusion();
+    }
+  }
+
   async update(injectionValue, { scan = false } = {}) {
     if (this.restoring) throw new Error("Renderer restoration is in progress");
     const injection = normalizeInjection(injectionValue);
@@ -1143,6 +1243,7 @@ export class CdpWallpaperInjector {
     this.compatibilityRestoreScript = injection.compatibilityRestoreScript;
     this.nativeEnabled = injection.nativeEnabled;
     this.nativeWallpaperId = injection.nativeWallpaperId;
+    this.nativeScene = injection.nativeScene;
     this.directSceneEnabled = injection.directSceneEnabled;
     this.directSceneId = injection.directSceneId;
     this.requiresMediaCsp = injection.requiresMediaCsp;
@@ -1255,9 +1356,10 @@ export class CdpWallpaperInjector {
     for (const [id, session] of this.sessions) {
       if (!liveIds.has(id)) {
         session.removeLoadListener?.(); session.removeContextListener?.();
+        this.sessions.delete(id);
+        this.refreshOcclusion();
         await this.releaseSessionNative(session).catch(() => {});
         session.socket.close();
-        this.sessions.delete(id);
       } else if (session.deferred && session.deferredInjection && !session.rehydrating) {
         try {
           const planVersion = this.planVersion;
@@ -1266,7 +1368,7 @@ export class CdpWallpaperInjector {
             applyScript: this.applyScript,
             compatibilityScript: this.compatibilityScript,
             compatibilityRestoreScript: this.compatibilityRestoreScript,
-            nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId,
+            nativeEnabled: this.nativeEnabled, nativeWallpaperId: this.nativeWallpaperId, nativeScene: this.nativeScene,
             directSceneEnabled: this.directSceneEnabled, directSceneId: this.directSceneId, fallbackScripts: this.fallbackScripts,
             requiresMediaCsp: this.requiresMediaCsp,
           });
@@ -1339,6 +1441,7 @@ export class CdpWallpaperInjector {
       this.compatibilityRestoreScript = injection.compatibilityRestoreScript;
       this.nativeEnabled = injection.nativeEnabled;
       this.nativeWallpaperId = injection.nativeWallpaperId;
+      this.nativeScene = injection.nativeScene;
       this.directSceneEnabled = injection.directSceneEnabled;
       this.directSceneId = injection.directSceneId;
       this.requiresMediaCsp = injection.requiresMediaCsp;
@@ -1365,6 +1468,7 @@ export class CdpWallpaperInjector {
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
     this.lifecycleVersion += 1;
     this.running = false;
+    this.stopOcclusion();
     this.waitingMessage = null;
     clearTimeout(this.timer);
     this.restoring = true;
@@ -1579,6 +1683,7 @@ export class CdpWallpaperInjector {
     clearTimeout(this.scenePreloadTimer); this.scenePreloadTimer = null;
     this.lifecycleVersion += 1;
     this.running = false;
+    this.stopOcclusion();
     this.waitingMessage = null;
     clearTimeout(this.timer);
     try {

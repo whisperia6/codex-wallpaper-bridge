@@ -63,6 +63,8 @@ async function rendererFixture({ saved = "dark", rejectTheme = false, themeRespo
   const api = { windowChrome: true,
     setWorkbenchTheme: async theme => { calls.push(theme); if (themeResponse) return themeResponse(theme); if (rejectTheme) throw Error("fixture native failure"); return { supported: true }; },
     getState: async () => ({ installations: [], port: 9335 }),
+    getUpdateState: async () => ({ updateAvailable: false }),
+    onUpdateState: () => {},
     openControlPanel: async () => ({ ok: true, url: "http://127.0.0.1:43210/fixture/" }),
     onTrayAction: handler => { listeners.tray = handler; },
   };

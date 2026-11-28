@@ -1,6 +1,6 @@
-# Codex Wallpaper Bridge 运行时
+# Lumina 运行时
 
-本目录包含壁纸工作台、本机媒体服务、资源管理和 Codex 页面显示层。普通用户请从 [项目首页](../README.md) 获取使用说明，并在 [GitHub Releases](https://github.com/whisperia6/codex-wallpaper-bridge/releases) 下载 EXE。
+本目录包含壁纸工作台、本机媒体服务、资源管理和 Codex 页面显示层。普通用户请从 [项目首页](../README.md) 获取使用说明，并在 [GitHub Releases](https://github.com/whisperia6/lumina/releases) 下载 EXE。
 
 ## 目录结构
 

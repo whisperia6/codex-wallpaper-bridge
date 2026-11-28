@@ -1,16 +1,15 @@
 # Third-party renderer notices
 
-WebWallGL 2.1.0, MIT, Copyright (c) 2026 oneincase.
-Source: https://github.com/oneincase/webwallgl/tree/4ba71c406fbc78f24c99b1bb1edd9d9cef9793c8
-License: `LICENSE`. Included we-scene code: MIT, Copyright (c) 2026 aurora-wallpaper contributors, `we-scene-LICENSE`.
+**WebWallGL 3.1.0** is MIT licensed, copyright (c) 2026 oneincase.
+`webwallgl.mjs` is the unmodified ESM artifact from the [npm release](https://registry.npmjs.org/webwallgl/-/webwallgl-3.1.0.tgz).
+Its source is [WebWallGL 3.1.0](https://github.com/oneincase/webwallgl/tree/28ab4381c806cf40e0577aba47b4520b31b19e57).
+See `LICENSE` and `we-scene-LICENSE` for the included MIT notices.
+Lumina's local Scene server adds a frame completion callback when serving the ESM artifact.
 
-Renderer artifacts are unmodified bytes from https://github.com/elysia395/dsh-wallpaper-engine/tree/111816a4fc7ae29acf4fce4ed134b84557424515/lib/webwallgl
-Their declared upstream is the WebWallGL commit above. Artifact reproduction was not performed in this wave. `vendor-lock.json` pins the exact bytes, source repositories and versions. Only the standalone engine artifacts are included, not the DSH plugin/host code.
+**Mediabunny 1.56.0** is MPL-2.0 licensed, copyright (c) 2026-present Vanilagy and contributors.
+`mediabunny.mjs` is the unmodified `dist/bundles/mediabunny.min.mjs` from the [npm release](https://registry.npmjs.org/mediabunny/-/mediabunny-1.56.0.tgz).
+See `mediabunny-LICENSE` and `sources/mediabunny-1.56.0.tgz` for the license and corresponding published source.
+Both ship with Lumina for offline use.
 
-The renderer bundles **Mediabunny 1.56.0**, Copyright (c) 2026-present Vanilagy and contributors, under **MPL-2.0**, not MIT.
-License: `mediabunny-LICENSE`. The unmodified published source is included as `sources/mediabunny-1.56.0.tgz` (the package contains `src/` and its original license headers); its original npm SHA-512 integrity and SHA-256 are recorded in the lock.
-Source repository: https://github.com/Vanilagy/mediabunny
-Versioned source package: https://registry.npmjs.org/mediabunny/-/mediabunny-1.56.0.tgz
-The archive is shipped with the renderer so recipients have the corresponding MPL-covered source without fetching from the network. No MPL-covered source was modified for this integration.
-
-Wallpaper Engine project files, textures, packages, and official assets are **not** distributed here. They are consumed read-only from the user's registered local scene project.
+`vendor-lock.json` records npm package integrity and SHA-256 hashes for the shipped assets.
+Wallpaper Engine projects and official assets are supplied by the user and consumed read-only.

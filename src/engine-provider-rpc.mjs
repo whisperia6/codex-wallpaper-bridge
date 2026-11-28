@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { validateEngineVp8Frame } from '../bridge-runtime/src/engine-vp8-frame.mjs';
+import { NATIVE_SCENE_READY_TIMEOUT_MS } from '../bridge-runtime/src/engine-health.mjs';
 
 const CHANNEL = 'cwb-engine-provider-v1';
 const MAX_FRAME_BYTES = 2 * 1024 ** 2;
@@ -97,9 +98,12 @@ export function serveEngineProvider({ peer, resolveProject, createOwner, retryPr
       return { cleared: true };
     }
     if (request.op === 'verify-endpoint') {
-      try { if (typeof verifyEndpoint !== 'function' || (await verifyEndpoint(request.port, request.hostType, request.purpose))?.verified !== true || closed) throw Error(); }
-      catch { throw failure('endpoint_unverified'); }
-      return { verified: true };
+      try {
+        const result = await verifyEndpoint?.(request.port, request.hostType, request.purpose);
+        if (result?.verified !== true || closed) throw Error();
+        const { processId } = result;
+        return { verified: true, ...(Number.isInteger(processId) && processId > 0 && processId <= 0xffffffff ? { processId } : {}) };
+      } catch { throw failure('endpoint_unverified'); }
     }
     if (request.op === 'create') {
       if (entries.size >= 2) throw failure('provider_capacity');
@@ -179,7 +183,9 @@ export function serveEngineProvider({ peer, resolveProject, createOwner, retryPr
 /** Node-side client used only inside the owned utility. Nothing is exposed to
  * the author or desktop renderer. Actual native pixels are captured in parent.
  */
-export function createEngineProviderClient({ port, timeoutMs = 60000 }) {
+export function createEngineProviderClient({ port, timeoutMs }) {
+  const firstReadyTimeoutMs = timeoutMs === undefined ? NATIVE_SCENE_READY_TIMEOUT_MS : timeoutMs;
+  if (timeoutMs === undefined) timeoutMs = 60_000;
   if (!port?.on || !port.removeListener || !port.postMessage || !Number.isFinite(timeoutMs) || timeoutMs < 50 || timeoutMs > 60000) throw TypeError('invalid native provider client');
   const pending = new Map(); let closed = false, sequence = 0;
   function seal(error) {
@@ -200,13 +206,13 @@ export function createEngineProviderClient({ port, timeoutMs = 60000 }) {
     clearTimeout(waiter.timer); pending.delete(data.sequence);
     if (data.ok) waiter.resolve(data.result); else waiter.reject(failure(data.error));
   }
-  function request(op, extra = {}) {
+  function request(op, extra = {}, deadlineMs = timeoutMs) {
     if (closed) return Promise.reject(failure('provider_closed'));
     if (pending.size >= 4) return Promise.reject(failure('provider_busy'));
     const message = { channel: CHANNEL, sequence: ++sequence, op, ...extra };
     if (!validRequest(message)) return Promise.reject(failure('invalid_request'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => close(failure('provider_timeout')), timeoutMs);
+      const timer = setTimeout(() => close(failure('provider_timeout')), deadlineMs);
       pending.set(message.sequence, { resolve, reject, timer });
       try { port.postMessage(message); } catch { close(failure('provider_closed')); }
     });
@@ -222,7 +228,7 @@ export function createEngineProviderClient({ port, timeoutMs = 60000 }) {
     const proxy = {
       ready: created.then(async () => {
         if (cancelled) throw failure('engine_cancelled');
-        state = await request('ready', { handle });
+        state = await request('ready', { handle }, firstReadyTimeoutMs);
         if (cancelled || closed) throw failure('engine_cancelled'); return proxy;
       }),
       capture: async () => nativeFrame(await control('capture')),

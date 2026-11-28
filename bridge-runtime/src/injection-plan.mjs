@@ -1,6 +1,7 @@
 import { buildApplyScript, buildBootstrapScript } from "./injected-renderer.mjs";
 import { eligibleProjects } from "../../bridge-runtime/src/library-policy.mjs";
 import { normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
+import { DEFAULT_GLASS_EFFECTS, normalizeLiquidGlass } from "../../bridge-runtime/src/liquid-glass.mjs";
 
 function absoluteAssetUrl(value, origin) {
   if (!value) return null;
@@ -54,10 +55,9 @@ export function rendererEffects(config) {
     opacity: effects.opacity ?? 100,
     playing: effects.playing !== false,
     pauseWhenHidden: effects.pauseWhenHidden !== false,
+    pauseWhenOccluded: effects.pauseWhenOccluded !== false,
     pauseOnBattery: effects.pauseOnBattery === true,
-    glassOpacity: effects.glassOpacity ?? 62,
-    glassBlur: effects.glassBlur ?? 18,
-    sidebarBlur: effects.sidebarBlur !== false,
+    ...normalizeLiquidGlass(effects, DEFAULT_GLASS_EFFECTS),
     webLoopHoldSeconds: Math.max(0, Math.min(3600, Math.round(Number(effects.webLoopHoldSeconds) || 0))),
     webForceSingleLoop: effects.webForceSingleLoop === true,
     transition: effects.transition ?? "cut",
@@ -130,6 +130,7 @@ export function buildInjectionPlan({ server, config, inventory, nativeEnabled = 
     applyScript,
     nativeEnabled: nativeEnabled === true,
     nativeWallpaperId: wallpaper?.playable === "native" ? wallpaper.id : null,
+    nativeScene: wallpaper?.playable === "native" && wallpaper.type === "scene",
     directSceneEnabled: directSceneEnabled === true,
     directSceneId: wallpaper?.playable === "direct-gpu" ? wallpaper.id : null,
     requiresMediaCsp: Boolean(wallpaper?.mediaUrl || wallpaper?.playable === "direct-gpu"),

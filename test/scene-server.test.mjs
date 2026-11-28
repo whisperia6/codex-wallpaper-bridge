@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,10 +36,22 @@ function raw(server, relative, headers = {}, method = 'GET') {
 
 test('vendored renderer/dependency provenance has exact hashes and both licenses', async () => {
   const result = await verifyWebWallglAssets();
-  assert.equal(result.version, '2.1.0');
-  assert.equal(result.commit, '4ba71c406fbc78f24c99b1bb1edd9d9cef9793c8');
+  assert.equal(result.version, '3.1.0');
+  assert.equal(result.commit, '28ab4381c806cf40e0577aba47b4520b31b19e57');
   assert.equal(result.dependencies[0].license, 'MPL-2.0');
-  assert.ok(result.files['assets/renderer-AJkjEL9i.js'].size > 1_000_000);
+  assert.ok(result.files['webwallgl.mjs'].size > 1_000_000);
+});
+
+test('vendor verification rejects a modified offline module', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cwb-vendor-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = new URL('../bridge-runtime/vendor/webwallgl/', import.meta.url);
+  await cp(source, root, { recursive: true });
+  const dependency = path.join(root, 'mediabunny.mjs');
+  const original = await readFile(dependency);
+  original[0] ^= 1;
+  await writeFile(dependency, original);
+  await assert.rejects(verifyWebWallglAssets(root), /vendor integrity check failed/);
 });
 
 test('optional resource warming respects exclusion and cancellation before accessing any project files', async () => {
@@ -56,11 +68,18 @@ test('dedicated scene origin serves engine and only a per-project readonly capab
   assert.notEqual(server.origin, 'http://127.0.0.1:42341');
   const html = await fetch(server.rendererUrl);
   assert.equal(html.status, 200);
-  assert.match(await html.text(), /cwb-scene-bridge.js/);
+  const page = await html.text();
+  assert.match(page, /cwb-scene-bridge.js/);
+  assert.match(page, /"mediabunny":"\/wallpaper-engine\/scene-live\/mediabunny.mjs"/);
   const csp = html.headers.get('content-security-policy');
   assert.match(csp, /connect-src 'self' blob:/);
   assert.match(csp, /frame-ancestors http:\/\/127\.0\.0\.1:42341/);
   assert.match(csp, /sandbox allow-scripts allow-same-origin/);
+  assert.match(csp, /'sha256-/);
+  assert.doesNotMatch(csp, /script-src [^;]*'unsafe-inline'/);
+  const dependency = await fetch(server.origin + '/wallpaper-engine/scene-live/mediabunny.mjs');
+  assert.match(dependency.headers.get('content-type'), /javascript/);
+  assert.deepEqual(Buffer.from(await dependency.arrayBuffer()), await readFile(new URL('../bridge-runtime/vendor/webwallgl/mediabunny.mjs', import.meta.url)));
   const manifest = await fetch(server.resourceBase + '/project.json');
   assert.equal(manifest.status, 200);
   assert.equal((await manifest.json()).type, 'scene');
@@ -75,18 +94,35 @@ test('dedicated scene origin serves engine and only a per-project readonly capab
 });
 test('served scene renderer has an exact completion overlay; vendored bytes remain immutable and Range/HEAD match served bytes', async (t) => {
   const { server } = await fixture(t);
-  const original = await readFile(new URL('../bridge-runtime/vendor/webwallgl/assets/renderer-AJkjEL9i.js', import.meta.url));
-  const url = server.origin + '/wallpaper-engine/scene-live/assets/renderer-AJkjEL9i.js';
+  const original = await readFile(new URL('../bridge-runtime/vendor/webwallgl/webwallgl.mjs', import.meta.url));
+  const url = server.origin + '/wallpaper-engine/scene-live/webwallgl.mjs';
   const response = await fetch(url), patched = Buffer.from(await response.arrayBuffer());
   assert.equal(response.status, 200); assert.ok(patched.length > original.length);
-  assert.match(patched.toString(), /en\.beginFrame\(\);.*?t\.raf=requestAnimationFrame\(eo\);try\{window\.__cwbSceneRenderComplete\?\.\(\)\}catch\{\}/);
-  assert.ok((await readFile(new URL('../bridge-runtime/vendor/webwallgl/assets/renderer-AJkjEL9i.js', import.meta.url))).equals(original));
+  assert.match(patched.toString(), /pointerSrc\.beginFrame\(\);[\s\S]{0,350}requestAnimationFrame\(renderLoop\);\s+globalThis\.__cwbSceneRenderComplete\?\.\(\);/);
+  assert.ok((await readFile(new URL('../bridge-runtime/vendor/webwallgl/webwallgl.mjs', import.meta.url))).equals(original));
   const head = await fetch(url, { method: 'HEAD' }); assert.equal(Number(head.headers.get('content-length')), patched.length);
   const ranged = await fetch(url, { headers: { Range: `bytes=${patched.length - 20}-` } });
   assert.equal(ranged.status, 206); assert.equal(ranged.headers.get('content-range'), `bytes ${patched.length - 20}-${patched.length - 1}/${patched.length}`);
   assert.ok(Buffer.from(await ranged.arrayBuffer()).equals(patched.subarray(-20)));
   assert.equal((await fetch(url, { headers: { Range: `bytes=${patched.length}-` } })).status, 416);
-  assert.equal(server.diagnostics().rendererOverlay, 'scene-render-completion-v1');
+  assert.equal(server.diagnostics().rendererOverlay, 'scene-render-completion-v2');
+});
+
+test('payload progress counts package bytes and only accepts the project capability', async t => {
+  const { server } = await fixture(t);
+  const progressUrl = server.resourceBase.replace('/files/project', '/payload-progress.json');
+  const progress = async () => (await fetch(progressUrl)).json();
+  assert.deepEqual(await progress(), { bytesServed: 0, lastByteAt: 0, activeTransfers: 0 });
+  await fetch(server.resourceBase + '/scene.pkg', { method: 'HEAD' });
+  await (await fetch(server.resourceBase + '/project.json')).text();
+  assert.equal((await progress()).bytesServed, 0);
+  const payload = await fetch(server.resourceBase + '/scene.pkg', { headers: { Range: 'bytes=0-3' } });
+  assert.equal(await payload.text(), 'PKGV');
+  const stats = await progress();
+  assert.equal(stats.bytesServed, 4);
+  assert.ok(stats.lastByteAt > 0);
+  assert.equal(stats.activeTransfers, 0);
+  assert.equal((await fetch(server.origin + '/wrong/payload-progress.json')).status, 404);
 });
 
 test('verifier tracing is explicit only and normal source/permission boundaries remain unchanged', async (t) => {
@@ -182,16 +218,58 @@ test('close is idempotent, concurrent lifecycle calls do not leak listeners, res
 
 test('closing an active payload destroys its stream; restart uses a fresh transfer ledger', async (t) => {
   const { server, projectRoot } = await fixture(t);
-  await writeFile(path.join(projectRoot, 'large.pkg'), Buffer.alloc(24 * 1024 ** 2, 7));
-  const req = httpRequest(server.resourceBase + '/large.pkg');
+  await server.close();
+  await truncate(path.join(projectRoot, 'scene.pkg'), 40 * 1024 ** 2);
+  await server.start();
+  assert.equal(server.firstFrameTimeoutMs, 20000);
+  const req = httpRequest(server.resourceBase + '/scene.pkg');
   const res = await new Promise((resolve, reject) => { req.on('response', resolve); req.on('error', reject); req.end(); });
   res.pause();
+  const progress = server.payloadProgress();
+  assert.equal(progress.activeTransfers, 1);
+  assert.ok(progress.lastByteAt > 0 && progress.bytesServed > 0);
   await server.close();
   res.destroy(); req.destroy();
   await server.start();
   assert.deepEqual(server.diagnostics().requests, []);
   assert.equal(server.diagnostics().bytes, 0);
+  assert.deepEqual(server.payloadProgress(), { activeTransfers: 0, bytesServed: 0, lastByteAt: 0 });
   assert.equal((await fetch(server.resourceBase + '/project.json')).status, 200);
+});
+
+test('cached package progress follows client backpressure and stops on disconnect', { timeout: 10000 }, async (t) => {
+  const { server, projectRoot } = await fixture(t);
+  const size = 32 * 1024 ** 2;
+  await truncate(path.join(projectRoot, 'scene.pkg'), size);
+  await prewarmSceneAssets({ project: { id: 'scene', type: 'scene', rootPath: projectRoot } });
+
+  const req = httpRequest(server.resourceBase + '/scene.pkg');
+  t.after(() => req.destroy());
+  const res = await new Promise((resolve, reject) => { req.on('response', resolve); req.on('error', reject); req.end(); });
+  assert.equal(res.headers['content-length'], String(size));
+  const initial = server.payloadProgress();
+  assert.equal(initial.activeTransfers, 1);
+  assert.ok(initial.bytesServed > 0 && initial.bytesServed < size);
+
+  await new Promise((resolve, reject) => {
+    let received = 0;
+    res.on('error', reject);
+    res.on('data', (chunk) => {
+      received += chunk.length;
+      if (received > initial.bytesServed + 64 * 1024) { res.pause(); resolve(); }
+    });
+  });
+  const resumed = server.payloadProgress();
+  assert.ok(resumed.bytesServed > initial.bytesServed);
+  assert.ok(resumed.lastByteAt >= initial.lastByteAt);
+  res.destroy();
+  for (let i = 0; i < 100 && server.payloadProgress().activeTransfers; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const stopped = server.payloadProgress();
+  assert.equal(stopped.activeTransfers, 0);
+  assert.ok(stopped.bytesServed < size);
+  assert.equal(server.diagnostics().bytes, stopped.bytesServed);
 });
 
 test('oversized scene payload and rating-blocked projects are explicitly denied', async (t) => {

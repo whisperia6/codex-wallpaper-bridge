@@ -20,7 +20,8 @@ var cwbScenePreview = (() => {
   // bridge-runtime/src/workbench-scene-preview.mjs
   var workbench_scene_preview_exports = {};
   __export(workbench_scene_preview_exports, {
-    createScenePreviewSlot: () => createScenePreviewSlot
+    createScenePreviewSlot: () => createScenePreviewSlot,
+    switchScenePreviewFallback: () => switchScenePreviewFallback
   });
 
   // bridge-runtime/src/author-properties.mjs
@@ -131,14 +132,30 @@ var cwbScenePreview = (() => {
     const reasons = [];
     if (effects.playing === false) reasons.push("user");
     if (environment.hidden === true && effects.pauseWhenHidden !== false) reasons.push("hidden");
+    if (environment.occluded === true && effects.pauseWhenOccluded === true) reasons.push("occluded");
     if ((environment.onBattery ?? effects.onBattery) === true && effects.pauseOnBattery === true) reasons.push("battery");
     if (environment.inactive === true) reasons.push("inactive");
     return { userPlaying: effects.playing !== false, playing: reasons.length === 0, reasons };
   }
 
   // bridge-runtime/src/workbench-scene-preview.mjs
+  async function switchScenePreviewFallback(project, customStatic, switchTo, isCurrent) {
+    const candidates = [
+      ["embedded_video", "video", project.type === "scene" ? project.embeddedVideoUrl : null],
+      ["custom_static", "image", customStatic?.mediaUrl],
+      ["preview", "image", project.previewUrl]
+    ];
+    for (const [reason, type, mediaUrl] of candidates) {
+      if (!isCurrent()) return { ok: false, cancelled: true };
+      if (!mediaUrl) continue;
+      const result = await switchTo({ ...project, type, mediaUrl, scenePreviewAvailable: false }, reason);
+      if (result.ok || result.cancelled) return { ...result, fallbackReason: reason };
+    }
+    return { ok: false, error: "preview_fallback_unavailable" };
+  }
   function createScenePreviewSlot({
     node,
+    poster = null,
     project,
     client,
     api,
@@ -157,12 +174,14 @@ var cwbScenePreview = (() => {
   }) {
     let descriptor, released = false, committed = false, prepared = false, failed = false, closing;
     let sequence = 0, meter = null, startupTimer, renewalTimer, healthTimer, lastMessage = Date.now();
+    let nominalDeadline, startupLimit, posterFade;
     let resolveReady, rejectReady;
     let propertyRequest = 0, propertyPending = null;
     let pointerDown = false;
     let lastControlRequest = 0, controlPending = 0;
     let pointerReceived = 0, pointerForwarded = 0, pointerBlocked = "none";
     const isWeb = project.type === "web";
+    if (poster) node.style.opacity = "0";
     const ready = new Promise((resolve, reject) => {
       resolveReady = resolve;
       rejectReady = reject;
@@ -263,6 +282,8 @@ var cwbScenePreview = (() => {
       released = true;
       committed = false;
       cleanup();
+      posterFade?.cancel();
+      poster?.remove();
       rejectReady(Error("preview_cancelled"));
       node.removeAttribute("src");
       node.remove();
@@ -282,6 +303,10 @@ var cwbScenePreview = (() => {
         send("pause");
         cleanup();
       } else void release();
+    };
+    const watchStartup = (duration) => {
+      window.clearTimeout(startupTimer);
+      startupTimer = window.setTimeout(() => fail("preview_first_frame_timeout"), duration);
     };
     const onMessage = (event) => {
       if (released || failed || !descriptor || event.source !== node.contentWindow || event.origin !== descriptor.origin) return;
@@ -313,6 +338,10 @@ var cwbScenePreview = (() => {
       if (message.phase === "failed" || message.phase === "released") {
         fail("preview_engine_failed");
         return;
+      }
+      if (!isWeb && !prepared && message.phase === "loading") {
+        const silence = Math.max(1e4, nominalDeadline - lastMessage);
+        watchStartup(Math.max(0, Math.min(silence, startupLimit - lastMessage)));
       }
       if (readyPhase) {
         if (propertyPending && message.propertyRequest === propertyPending.id) {
@@ -375,7 +404,11 @@ var cwbScenePreview = (() => {
       window.addEventListener("pagehide", onPagehide);
       window.document?.addEventListener?.("visibilitychange", onVisibility);
       for (const type of ["pointermove", "pointerdown", "pointerup"]) window.addEventListener(type, onPointer, { passive: true, capture: true });
-      startupTimer = window.setTimeout(() => fail("preview_first_frame_timeout"), Math.min(9e4, Math.max(15e3, descriptor.firstFrameTimeoutMs || 9e4)));
+      const nominal = Math.min(9e4, Math.max(15e3, descriptor.firstFrameTimeoutMs || 9e4));
+      const startupTime = Date.now();
+      nominalDeadline = startupTime + nominal + 2500;
+      startupLimit = startupTime + 123e3;
+      watchStartup(isWeb ? nominal : nominal + 2500);
       renewalTimer = window.setInterval(() => {
         void request("renew", { handle: descriptor.handle }).catch(() => fail("preview_lease_lost"));
       }, 15e3);
@@ -410,6 +443,13 @@ var cwbScenePreview = (() => {
       },
       activate() {
         if (released || failed || !prepared) throw Error("preview_unavailable");
+        if (poster) {
+          node.style.opacity = "";
+          if (!getEffects().reduceMotion && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches && node.animate) {
+            posterFade = node.animate([{ opacity: 0, offset: 0 }], { duration: 160, easing: "ease-out" });
+            void posterFade.finished.then(() => poster.remove(), () => poster.remove());
+          } else poster.remove();
+        }
         committed = true;
         update();
         publish("ready");

@@ -15,7 +15,7 @@ app.whenReady().then(() => {
       CWB_BRIDGE_CLI: cliPath,
     },
     stdio: "pipe",
-    serviceName: "Codex Wallpaper Bridge Smoke Test",
+    serviceName: "Lumina Smoke Test",
   });
   let output = "";
   child.stdout.on("data", (chunk) => {

@@ -64,6 +64,10 @@
           <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3"/></svg>
           <span>应用壁纸</span>
         </button>
+        <div class="desktop-update-pill" id="desktopUpdatePill" role="group" aria-label="版本更新" hidden>
+          <button id="desktopOpenUpdate" type="button" title="打开 GitHub 发布页"></button>
+          <button id="desktopDismissUpdate" type="button" aria-label="忽略此版本" title="忽略此版本">×</button>
+        </div>
       </section>
 
       <aside class="library glass-panel" aria-label="Wallpaper Engine 壁纸库">
@@ -265,7 +269,6 @@
         <aside class="settings glass-panel" id="settingsPanel" aria-label="壁纸显示设置">
           <header class="settings-header">
             <div>
-              <p>APPEARANCE</p>
               <h2>显示设置</h2>
             </div>
             <div class="settings-header-actions">
@@ -280,153 +283,202 @@
           </header>
 
           <nav class="settings-tabs" id="settingsTabs" role="tablist" aria-label="设置分类">
-            <button type="button" role="tab" data-settings-tab-trigger="appearance" aria-selected="true">画面</button>
-            <button type="button" role="tab" data-settings-tab-trigger="author" aria-selected="false">作者<i class="tab-dot" id="authorTabDot" hidden></i></button>
-            <button type="button" role="tab" data-settings-tab-trigger="transition" aria-selected="false">过场</button>
-            <button type="button" role="tab" data-settings-tab-trigger="music" aria-selected="false">音乐</button>
-            <button type="button" role="tab" data-settings-tab-trigger="video" aria-selected="false">视频</button>
+            <button type="button" role="tab" id="settings-tab-appearance" data-settings-tab-trigger="appearance" aria-controls="settings-panel-appearance" aria-selected="true">画面</button>
+            <button type="button" role="tab" id="settings-tab-glass" data-settings-tab-trigger="glass" aria-controls="settings-panel-glass" aria-selected="false" tabindex="-1">玻璃</button>
+            <button type="button" role="tab" id="settings-tab-playback" data-settings-tab-trigger="playback" aria-controls="settings-panel-playback" aria-selected="false" tabindex="-1">播放</button>
+            <button type="button" role="tab" id="settings-tab-author" data-settings-tab-trigger="author" aria-controls="settings-panel-author" aria-selected="false" tabindex="-1">作者<i class="tab-dot" id="authorTabDot" aria-hidden="true" hidden></i></button>
+            <button type="button" role="tab" id="settings-tab-music" data-settings-tab-trigger="music" aria-controls="settings-panel-music" aria-selected="false" tabindex="-1">音乐</button>
+            <button type="button" role="tab" id="settings-tab-video" data-settings-tab-trigger="video" aria-controls="settings-panel-video" aria-selected="false" tabindex="-1">视频</button>
           </nav>
 
-          <div class="setting-group" data-settings-tab="appearance">
-            <label class="setting-label" for="brightnessRange">
-              <span><svg viewBox="0 0 24 24"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg>亮度</span>
-              <output id="brightnessValue">72%</output>
-            </label>
-            <input class="range" id="brightnessRange" type="range" min="10" max="160" step="1" value="72" />
-          </div>
-
-          <div class="setting-group" data-settings-tab="appearance">
-            <label class="setting-label" for="darknessRange">
-              <span><svg viewBox="0 0 24 24"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"/></svg>暗化遮罩</span>
-              <output id="darknessValue">22%</output>
-            </label>
-            <input class="range" id="darknessRange" type="range" min="0" max="90" step="1" value="22" />
-          </div>
-
-          <div class="setting-group" data-settings-tab="appearance">
-            <label class="setting-label" for="blurRange">
-              <span><svg viewBox="0 0 24 24"><path d="M7 5h10M5 9h14M7 13h10M9 17h6M11 21h2"/></svg>背景模糊</span>
-              <output id="blurValue">0px</output>
-            </label>
-            <input class="range" id="blurRange" type="range" min="0" max="40" step="1" value="0" />
-          </div>
-
-          <div class="setting-group" data-settings-tab="appearance">
-            <label class="setting-label" for="saturationRange">
-              <span><svg viewBox="0 0 24 24"><path d="M12 3s7 7.2 7 12a7 7 0 0 1-14 0c0-4.8 7-12 7-12Zm0 0v19"/></svg>色彩饱和度</span>
-              <output id="saturationValue">100%</output>
-            </label>
-            <input class="range range--spectrum" id="saturationRange" type="range" min="0" max="240" step="1" value="100" />
-          </div>
-
-          <div class="settings-divider" data-settings-tab="appearance"></div>
-
-          <div class="select-setting" data-settings-tab="appearance">
-            <label for="fitSelect">
-              <span><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>背景适配</span>
-              <small>画面如何填充目标应用窗口</small>
-            </label>
-            <div class="select-wrap">
-              <select id="fitSelect">
+          <div class="settings-tab-panel" id="settings-panel-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-tab="appearance">
+            <section class="settings-card" aria-labelledby="imageQualityTitle">
+              <h3 class="settings-card-title" id="imageQualityTitle">画质与遮罩</h3>
+              <div class="setting-group">
+                <label class="setting-label" for="brightnessRange">
+                  <span><svg viewBox="0 0 24 24"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg>亮度</span>
+                  <output id="brightnessValue">72%</output>
+                </label>
+                <input class="range" id="brightnessRange" type="range" min="10" max="160" step="1" value="72" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="darknessRange">
+                  <span><svg viewBox="0 0 24 24"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"/></svg>暗化遮罩</span>
+                  <output id="darknessValue">22%</output>
+                </label>
+                <input class="range" id="darknessRange" type="range" min="0" max="90" step="1" value="22" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="blurRange">
+                  <span><svg viewBox="0 0 24 24"><path d="M7 5h10M5 9h14M7 13h10M9 17h6M11 21h2"/></svg>背景模糊</span>
+                  <output id="blurValue">0px</output>
+                </label>
+                <input class="range" id="blurRange" type="range" min="0" max="40" step="1" value="0" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="saturationRange">
+                  <span><svg viewBox="0 0 24 24"><path d="M12 3s7 7.2 7 12a7 7 0 0 1-14 0c0-4.8 7-12 7-12Zm0 0v19"/></svg>色彩饱和度</span>
+                  <output id="saturationValue">100%</output>
+                </label>
+                <input class="range range--spectrum" id="saturationRange" type="range" min="0" max="240" step="1" value="100" />
+              </div>
+            </section>
+            <section class="settings-card" aria-labelledby="fitSettingsTitle">
+              <h3 class="settings-card-title" id="fitSettingsTitle">填充方式</h3>
+              <select aria-labelledby="fitSettingsTitle" id="fitSelect">
                 <option value="cover">填充</option>
                 <option value="contain">适应</option>
                 <option value="fill">拉伸</option>
               </select>
-              <svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg>
+              <div class="settings-segments" data-segment-select="fitSelect" role="radiogroup" aria-labelledby="fitSettingsTitle" hidden>
+                <label><input type="radio" name="fitSelect" value="cover" checked /><span>填充</span></label>
+                <label><input type="radio" name="fitSelect" value="contain" /><span>适应</span></label>
+                <label><input type="radio" name="fitSelect" value="fill" /><span>拉伸</span></label>
+              </div>
+            </section>
+            <details class="effect-advanced" id="framingTools">
+              <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M9 8l7 4-7 4V8Z"/></svg><span>取景与精细色彩</span></summary>
+              <div class="effect-row"><label for="positionXNumber">水平位置 %</label><input class="range" data-effect="positionX" type="range" min="0" max="100" step="1" aria-label="水平位置" /><input id="positionXNumber" data-effect="positionX" type="number" min="0" max="100" step="1" /></div>
+              <div class="effect-row"><label for="positionYNumber">垂直位置 %</label><input class="range" data-effect="positionY" type="range" min="0" max="100" step="1" aria-label="垂直位置" /><input id="positionYNumber" data-effect="positionY" type="number" min="0" max="100" step="1" /></div>
+              <div class="effect-row"><label for="zoomNumber">缩放 %</label><input class="range" data-effect="zoom" type="range" min="50" max="300" step="1" aria-label="缩放" /><input id="zoomNumber" data-effect="zoom" type="number" min="50" max="300" step="1" /></div>
+              <div class="effect-row"><label for="contrastNumber">对比度 %</label><input class="range" data-effect="contrast" type="range" min="0" max="240" step="1" aria-label="对比度" /><input id="contrastNumber" data-effect="contrast" type="number" min="0" max="240" step="1" /></div>
+              <div class="effect-row"><label for="opacityNumber">壁纸不透明度 %</label><input class="range" data-effect="opacity" type="range" min="0" max="100" step="1" aria-label="壁纸不透明度" /><input id="opacityNumber" data-effect="opacity" type="number" min="0" max="100" step="1" /></div>
+              <label class="effect-check"><span>水平镜像</span><input id="mirrorInput" data-effect="mirror" type="checkbox" /></label>
+            </details>
+          </div>
+
+          <div class="settings-tab-panel" id="settings-panel-glass" role="tabpanel" aria-labelledby="settings-tab-glass" data-settings-tab="glass">
+            <section class="settings-card" aria-labelledby="liquidGlassTitle">
+              <label class="settings-master-toggle" id="liquidGlassTitle" for="liquidGlassToggle">
+                <span>液态玻璃</span>
+                <input id="liquidGlassToggle" data-effect="liquidGlass" type="checkbox" checked />
+              </label>
+              <div class="glass-swatch">
+                <span class="glass-swatch-pill" aria-hidden="true"></span>
+                <span class="glass-swatch-copy"><span>材质预览</span><output id="glassSwatchStatus" aria-live="off">深邃 · 18px</output></span>
+              </div>
+            </section>
+            <fieldset id="liquidGlassControls" aria-label="液态玻璃参数">
+              <div class="settings-toggle-grid">
+                <label class="settings-toggle-tile"><span>左侧栏</span><input id="sidebarBlurToggle" data-effect="sidebarBlur" type="checkbox" checked /></label>
+                <label class="settings-toggle-tile"><span>输入框/气泡</span><input id="glassComposerToggle" data-effect="glassComposer" type="checkbox" checked /></label>
+              </div>
+              <section class="settings-card" aria-labelledby="glassTintTitle">
+                <h3 class="settings-card-title" id="glassTintTitle">玻璃色调</h3>
+                <select aria-labelledby="glassTintTitle" id="glassTintSelect" data-effect="glassTint">
+                  <option value="dark">深邃</option>
+                  <option value="neutral">中性</option>
+                  <option value="frost">冰霜</option>
+                </select>
+                <div class="settings-segments" data-segment-select="glassTintSelect" role="radiogroup" aria-labelledby="glassTintTitle" hidden>
+                  <label><input type="radio" name="glassTintSelect" value="dark" checked /><span>深邃</span></label>
+                  <label><input type="radio" name="glassTintSelect" value="neutral" /><span>中性</span></label>
+                  <label><input type="radio" name="glassTintSelect" value="frost" /><span>冰霜</span></label>
+                </div>
+              </section>
+              <section class="settings-card" aria-labelledby="glassMaterialTitle">
+                <h3 class="settings-card-title" id="glassMaterialTitle">材质参数</h3>
+                <div class="setting-group">
+                  <label class="setting-label" for="glassOpacityRange">玻璃透明度 <output for="glassOpacityRange" data-glass-value="glassOpacity" data-unit="%">62%</output></label>
+                  <input class="range" id="glassOpacityRange" data-effect="glassOpacity" type="range" min="0" max="100" value="62" />
+                </div>
+                <div class="setting-group">
+                  <label class="setting-label" for="glassBlurRange">玻璃模糊 <output for="glassBlurRange" data-glass-value="glassBlur" data-unit="px">18px</output></label>
+                  <input class="range" id="glassBlurRange" data-effect="glassBlur" type="range" min="0" max="60" value="18" />
+                </div>
+                <div class="setting-group">
+                  <label class="setting-label" for="glassBorderOpacityRange">边框高光 <output for="glassBorderOpacityRange" data-glass-value="glassBorderOpacity" data-unit="%">12%</output></label>
+                  <input class="range" id="glassBorderOpacityRange" data-effect="glassBorderOpacity" type="range" min="0" max="100" value="12" />
+                </div>
+                <div class="setting-group">
+                  <label class="setting-label" for="glassSaturationRange">色彩饱和度 <output for="glassSaturationRange" data-glass-value="glassSaturation" data-unit="%">130%</output></label>
+                  <input class="range range--spectrum" id="glassSaturationRange" data-effect="glassSaturation" type="range" min="100" max="220" value="130" />
+                </div>
+              </section>
+            </fieldset>
+          </div>
+
+          <div class="settings-tab-panel" id="settings-panel-playback" role="tabpanel" aria-labelledby="settings-tab-playback" data-settings-tab="playback">
+            <div class="settings-toggle-grid">
+              <label class="settings-toggle-tile"><span>自动播放</span><input id="playbackToggle" type="checkbox" checked /></label>
+              <label class="settings-toggle-tile"><span>壁纸声音</span><input id="audioEnabledInput" data-effect="audioEnabled" type="checkbox" /></label>
+              <label class="settings-toggle-tile"><span>隐藏暂停</span><input id="pauseWhenHiddenInput" data-effect="pauseWhenHidden" type="checkbox" /></label>
+              <label class="settings-toggle-tile"><span>电池暂停</span><input id="pauseOnBatteryInput" data-effect="pauseOnBattery" type="checkbox" /></label>
+              <label class="settings-toggle-tile"><span>遮挡暂停<small>被其他窗口盖住时省电</small></span><input id="pauseWhenOccludedInput" data-effect="pauseWhenOccluded" type="checkbox" checked /></label>
+            </div>
+            <section class="settings-card" aria-labelledby="playbackControlsTitle">
+              <h3 class="settings-card-title" id="playbackControlsTitle">播放控制</h3>
+              <div class="effect-row"><label for="playbackRateNumber">播放倍速</label><input class="range" data-effect="playbackRate" type="range" min="0.25" max="4" step="0.25" aria-label="播放倍速" /><input id="playbackRateNumber" data-effect="playbackRate" type="number" min="0.25" max="4" step="0.25" /></div>
+              <div class="effect-row"><label for="volumeNumber">音量 %</label><input class="range" data-effect="volume" type="range" min="0" max="100" step="1" aria-label="音量" /><input id="volumeNumber" data-effect="volume" type="number" min="0" max="100" step="1" /></div>
+              <output id="playbackPolicyStatus" aria-live="polite"></output>
+            </section>
+            <details class="effect-advanced" id="webLoopTools">
+              <summary>Web 壁纸循环设置</summary>
+              <label class="effect-field" for="webLoopHoldNumber"><span>Web 单套循环停留<small>播完停 N 秒再继续；0 关闭。仅对支持单套循环的 Web 壁纸生效。</small></span><input id="webLoopHoldNumber" data-effect="webLoopHoldSeconds" type="number" min="0" max="3600" step="1" /></label>
+              <label class="effect-check"><span>Web 壁纸自动单套循环<small>切换穿搭或重新加载后自动恢复，不需要点击壁纸内的按钮</small></span><input id="webForceSingleLoopInput" data-effect="webForceSingleLoop" type="checkbox" /></label>
+            </details>
+            <details class="effect-advanced" id="transitionTools" open>
+              <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>切换过场</span></summary>
+              <p class="effect-hint">手动选择和轮播共用过场；新媒体就绪后切换。系统减少动态效果时自动硬切。</p>
+              <label class="effect-field" for="transitionSelect"><span>过场效果</span><select id="transitionSelect" data-effect="transition"><option value="cut">硬切</option><option value="fade">淡化</option><option value="push">推移</option><option value="wipe">擦除</option><option value="iris">光圈</option><option value="zoom">缩放</option><option value="stripes">条带</option></select></label>
+              <label class="effect-field" for="transitionDirectionSelect"><span>切换方向</span><select id="transitionDirectionSelect" data-effect="transitionDirection"><option value="left">向左</option><option value="right">向右</option><option value="up">向上</option><option value="down">向下</option></select></label>
+              <div class="effect-row"><label for="transitionDurationNumber">时长 ms</label><input class="range" data-effect="transitionDurationMs" type="range" min="100" max="3000" step="50" aria-label="过场时长" /><input id="transitionDurationNumber" data-effect="transitionDurationMs" type="number" min="100" max="3000" step="50" /></div>
+              <label class="effect-check"><span>减少动态效果<small>关闭过场动画，直接切换壁纸</small></span><input id="reduceMotionInput" data-effect="reduceMotion" type="checkbox" /></label>
+            </details>
+          </div>
+
+          <div class="settings-tab-panel" id="settings-panel-author" role="tabpanel" aria-labelledby="settings-tab-author" data-settings-tab="author">
+            <details class="effect-advanced" id="authorPropertiesPanel" hidden open></details>
+            <div class="author-empty-note" id="authorEmptyState" hidden>
+              <strong>当前壁纸无作者属性</strong>
+              <p>支持自定义参数的 Wallpaper Engine 场景或网页壁纸会在这里显示专属调节项。</p>
             </div>
           </div>
 
-          <div class="toggle-setting" data-settings-tab="appearance">
-            <label for="playbackToggle">
-              <span><svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5V7Z"/></svg>视频自动播放</span>
-              <small>切换壁纸后立即播放</small>
-            </label>
-            <input class="switch-input" id="playbackToggle" type="checkbox" checked />
-            <span class="switch" aria-hidden="true"></span>
+          <div class="settings-tab-panel" id="settings-panel-music" role="tabpanel" aria-labelledby="settings-tab-music" data-settings-tab="music">
+            <details class="effect-advanced" id="systemMediaPanel">
+              <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13M9 8l11-2M9 18a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Zm11-2a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Z"/></svg><span>系统音乐联动</span><span class="settings-badge">Windows</span></summary>
+              <label class="effect-check"><span>系统音频频谱<small>采集系统输出，不使用麦克风</small></span><input data-media="captureAudio" type="checkbox" /></label>
+              <label class="effect-check"><span>读取当前歌曲<small>同步歌名、封面与播放时间线</small></span><input data-media="nowPlaying" type="checkbox" /></label>
+              <label class="effect-check"><span>允许壁纸控制播放器<small>仅对受支持的壁纸生效</small></span><input data-media="allowControl" type="checkbox" /></label>
+              <label class="effect-check"><span>在线同步歌词<small>发送歌名 / 歌手查询，本地歌词优先</small></span><input data-media="onlineLyrics" type="checkbox" /></label>
+              <div class="system-media-card">
+                <p id="systemMediaStatus" aria-live="polite">系统媒体尚未启用</p>
+                <div class="system-media-track">
+                  <img id="systemMediaCover" width="48" height="48" alt="当前歌曲封面" hidden />
+                  <div class="system-media-copy"><p id="systemMediaTrack">没有当前歌曲</p><p id="systemMediaLyrics"></p></div>
+                </div>
+                <p id="systemLyricsStatus" class="effect-hint" aria-live="polite">歌词：先启用歌曲读取</p>
+                <div class="settings-actions media-transport" role="group" aria-label="系统媒体播放控制">
+                  <button type="button" data-media-command="previous" title="上一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14m14-14L8 12l11 7V5Z"/></svg><span>上一首</span></button>
+                  <button class="settings-action-primary" type="button" data-media-command="play" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span>播放</span></button>
+                  <button type="button" data-media-command="pause" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg><span>暂停</span></button>
+                  <button type="button" data-media-command="next" title="下一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M5 5l11 7-11 7V5Z"/></svg><span>下一首</span></button>
+                </div>
+              </div>
+              <label class="effect-field effect-field--stacked" for="systemLyricsInput"><span>导入本地歌词<small>LRC 格式 · 最大 128 KiB · 应用到当前歌曲</small></span><input id="systemLyricsInput" type="file" accept=".lrc,text/plain" /></label>
+            </details>
           </div>
 
-          <div class="toggle-setting" data-settings-tab="appearance">
-            <label for="sidebarBlurToggle">
-              <span><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5Zm5 0v14"/></svg>左侧栏毛玻璃</span>
-              <small>为侧栏叠加轻雾模糊，与右侧壁纸区分</small>
-            </label>
-            <input class="switch-input" id="sidebarBlurToggle" data-effect="sidebarBlur" type="checkbox" checked />
-            <span class="switch" aria-hidden="true"></span>
-          </div>
-
-          <details class="effect-advanced" id="framingTools" data-settings-tab="appearance" open>
-            <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M9 8l7 4-7 4V8Z"/></svg><span>取景、播放与声音</span></summary>
-            <p class="effect-hint">支持直接输入数值；“重置”恢复服务端默认值。镜像、倍速和声音只更新当前媒体。</p>
-            <div class="effect-row"><label for="positionXNumber">水平位置 %</label><input class="range" data-effect="positionX" type="range" min="0" max="100" step="1" aria-label="水平位置" /><input id="positionXNumber" data-effect="positionX" type="number" min="0" max="100" step="1" /></div>
-            <div class="effect-row"><label for="positionYNumber">垂直位置 %</label><input class="range" data-effect="positionY" type="range" min="0" max="100" step="1" aria-label="垂直位置" /><input id="positionYNumber" data-effect="positionY" type="number" min="0" max="100" step="1" /></div>
-            <div class="effect-row"><label for="zoomNumber">缩放 %</label><input class="range" data-effect="zoom" type="range" min="50" max="300" step="1" aria-label="缩放" /><input id="zoomNumber" data-effect="zoom" type="number" min="50" max="300" step="1" /></div>
-            <div class="effect-row"><label for="playbackRateNumber">播放倍速</label><input class="range" data-effect="playbackRate" type="range" min="0.25" max="4" step="0.25" aria-label="播放倍速" /><input id="playbackRateNumber" data-effect="playbackRate" type="number" min="0.25" max="4" step="0.25" /></div>
-            <div class="effect-row"><label for="contrastNumber">对比度 %</label><input class="range" data-effect="contrast" type="range" min="0" max="240" step="1" aria-label="对比度" /><input id="contrastNumber" data-effect="contrast" type="number" min="0" max="240" step="1" /></div>
-            <div class="effect-row"><label for="opacityNumber">壁纸不透明度 %</label><input class="range" data-effect="opacity" type="range" min="0" max="100" step="1" aria-label="壁纸不透明度" /><input id="opacityNumber" data-effect="opacity" type="number" min="0" max="100" step="1" /></div>
-            <label class="effect-check"><span>水平镜像</span><input id="mirrorInput" data-effect="mirror" type="checkbox" /></label>
-            <label class="effect-check"><span>播放壁纸声音<small>默认静音，开启后使用下方音量</small></span><input id="audioEnabledInput" data-effect="audioEnabled" type="checkbox" /></label>
-            <div class="effect-row"><label for="volumeNumber">音量 %</label><input class="range" data-effect="volume" type="range" min="0" max="100" step="1" aria-label="音量" /><input id="volumeNumber" data-effect="volume" type="number" min="0" max="100" step="1" /></div>
-            <label class="effect-field" for="webLoopHoldNumber"><span>Web 单套循环停留<small>播完停 N 秒再继续；0 关闭。仅对支持单套循环的 Web 壁纸生效。</small></span><input id="webLoopHoldNumber" data-effect="webLoopHoldSeconds" type="number" min="0" max="3600" step="1" /></label>
-            <label class="effect-check"><span>Web 壁纸自动单套循环<small>切换穿搭或重新加载后自动恢复，不需要点击壁纸内的按钮</small></span><input id="webForceSingleLoopInput" data-effect="webForceSingleLoop" type="checkbox" /></label>
-            <label class="effect-check"><span>窗口隐藏时自动暂停</span><input id="pauseWhenHiddenInput" data-effect="pauseWhenHidden" type="checkbox" /></label>
-            <label class="effect-check"><span>使用电池时自动暂停<small>保留你的手动播放状态</small></span><input id="pauseOnBatteryInput" data-effect="pauseOnBattery" type="checkbox" /></label>
-            <output id="playbackPolicyStatus" aria-live="polite"></output>
-          </details>
-
-          <details class="effect-advanced" id="transitionTools" data-settings-tab="transition" open>
-            <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>切换过场</span></summary>
-            <p class="effect-hint">手动选择和轮播共用过场；新媒体就绪后切换。系统减少动态效果时自动硬切。</p>
-            <label class="effect-field" for="transitionSelect"><span>过场效果</span><select id="transitionSelect" data-effect="transition"><option value="cut">硬切</option><option value="fade">淡化</option><option value="push">推移</option><option value="wipe">擦除</option><option value="iris">光圈</option><option value="zoom">缩放</option><option value="stripes">条带</option></select></label>
-            <label class="effect-field" for="transitionDirectionSelect"><span>切换方向</span><select id="transitionDirectionSelect" data-effect="transitionDirection"><option value="left">向左</option><option value="right">向右</option><option value="up">向上</option><option value="down">向下</option></select></label>
-            <div class="effect-row"><label for="transitionDurationNumber">时长 ms</label><input class="range" data-effect="transitionDurationMs" type="range" min="100" max="3000" step="50" aria-label="过场时长" /><input id="transitionDurationNumber" data-effect="transitionDurationMs" type="number" min="100" max="3000" step="50" /></div>
-            <label class="effect-check"><span>减少动态效果<small>关闭过场动画，直接切换壁纸</small></span><input id="reduceMotionInput" data-effect="reduceMotion" type="checkbox" /></label>
-          </details>
-          <details class="effect-advanced" id="systemMediaPanel" data-settings-tab="music">
-            <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13M9 8l11-2M9 18a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Zm11-2a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Z"/></svg><span>系统音乐联动</span><span class="settings-badge">Windows</span></summary>
-            <label class="effect-check"><span>系统音频频谱<small>采集系统输出，不使用麦克风</small></span><input data-media="captureAudio" type="checkbox" /></label>
-            <label class="effect-check"><span>读取当前歌曲<small>同步歌名、封面与播放时间线</small></span><input data-media="nowPlaying" type="checkbox" /></label>
-            <label class="effect-check"><span>允许壁纸控制播放器<small>仅对受支持的壁纸生效</small></span><input data-media="allowControl" type="checkbox" /></label>
-            <label class="effect-check"><span>在线同步歌词<small>发送歌名 / 歌手查询，本地歌词优先</small></span><input data-media="onlineLyrics" type="checkbox" /></label>
-            <div class="system-media-card">
-              <p id="systemMediaStatus" aria-live="polite">系统媒体尚未启用</p>
-              <div class="system-media-track">
-                <img id="systemMediaCover" width="48" height="48" alt="当前歌曲封面" hidden />
-                <div class="system-media-copy"><p id="systemMediaTrack">没有当前歌曲</p><p id="systemMediaLyrics"></p></div>
-              </div>
-              <p id="systemLyricsStatus" class="effect-hint" aria-live="polite">歌词：先启用歌曲读取</p>
-              <div class="settings-actions media-transport" role="group" aria-label="系统媒体播放控制">
-                <button type="button" data-media-command="previous" title="上一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14m14-14L8 12l11 7V5Z"/></svg><span>上一首</span></button>
-                <button class="settings-action-primary" type="button" data-media-command="play" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span>播放</span></button>
-                <button type="button" data-media-command="pause" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg><span>暂停</span></button>
-                <button type="button" data-media-command="next" title="下一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5v14M5 5l11 7-11 7V5Z"/></svg><span>下一首</span></button>
-              </div>
-            </div>
-            <label class="effect-field effect-field--stacked" for="systemLyricsInput"><span>导入本地歌词<small>LRC 格式 · 最大 128 KiB · 应用到当前歌曲</small></span><input id="systemLyricsInput" type="file" accept=".lrc,text/plain" /></label>
-          </details>
-
-          <details class="effect-advanced" id="videoOptimizationPanel" data-settings-tab="video">
-            <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h12v14H4V5Zm12 5 5-3v10l-5-3M8 9h4m-4 4h4"/></svg><span>视频优化与缓存</span></summary>
-            <p class="effect-hint">转码期间继续播放原片；完成后由你应用优化版。Faststart 使用虚拟布局，不复制整份原片，也不保证任意视频一秒首帧。</p>
-            <label class="effect-check"><span>Faststart 虚拟前置<small>不支持的 MP4 布局保留原样</small></span><input data-video="faststart" type="checkbox" /></label>
-            <label class="effect-check"><span>优先使用已校验的优化版本<small>没有可用版本时继续播放原片</small></span><input data-video="useOptimized" type="checkbox" /></label>
-            <label class="effect-field" for="videoFpsCap"><span>帧率上限 <small>FPS</small></span><input id="videoFpsCap" data-video="fpsCap" type="number" min="1" max="120" step="1" value="30" /></label>
-            <label class="effect-field effect-field--stacked" for="videoEncoder"><span>视频编码器</span><select id="videoEncoder" data-video="encoder"><option value="auto">自动硬件 → 软件回退</option><option value="software">软件 libx264</option><option value="h264_nvenc">NVENC → 软件回退</option><option value="h264_qsv">QSV → 软件回退</option><option value="h264_amf">AMF → 软件回退</option></select></label>
-            <button id="probeVideoToolsButton" type="button">探测本机 ffmpeg / ffprobe</button>
-            <p id="videoToolsStatus" role="status">未探测；缺少工具时原片播放不受影响。可设置 CWB_FFMPEG_PATH / CWB_FFPROBE_PATH 后重新启动桥。</p>
-            <div class="settings-actions"><button class="settings-action-primary" id="optimizeVideoButton" type="button">优化当前视频</button><button id="cancelVideoJobButton" type="button" disabled>取消</button><button id="retryVideoJobButton" type="button" disabled>重试</button></div>
-            <progress id="videoJobProgress" max="1" value="0" aria-label="视频优化进度"></progress><p id="videoJobStatus" role="status">没有视频任务</p>
-            <button class="settings-action-primary" id="applyOptimizedVideoButton" type="button" disabled>应用已验证优化版</button>
-            <p id="cacheDirectoryStatus" role="status">缓存路径尚未读取</p>
-            <label class="effect-field effect-field--stacked" for="cacheDirectoryInput"><span>迁移缓存目录</span><input id="cacheDirectoryInput" type="text" placeholder="已存在父目录的绝对路径" /></label>
-            <p class="effect-hint">复制到 CodexWallpaperBridge-cache 子目录，校验后切换路径。保留源缓存和未知文件，不移动 WE 原件、自定义库或本地歌词。环境覆盖启用时不允许迁移。</p>
-            <div class="settings-actions"><button class="settings-action-primary" id="migrateCacheButton" type="button">复制、校验并迁移</button><button id="cancelCacheJobButton" type="button" disabled>取消</button><button id="retryCacheJobButton" type="button" disabled>重试</button><button id="resumeCacheJobButton" type="button" disabled>恢复中断迁移</button></div>
-            <progress id="cacheJobProgress" max="1" value="0" aria-label="缓存迁移进度"></progress><p id="cacheJobStatus" role="status">没有缓存迁移任务</p>
-          </details>
-
-          <details class="effect-advanced" id="authorPropertiesPanel" data-settings-tab="author" hidden open></details>
-          <div class="author-empty-note" id="authorEmptyState" data-settings-tab="author" hidden>
-            <strong>当前壁纸无作者属性</strong>
-            <p>支持自定义参数的 Wallpaper Engine 场景或网页壁纸会在这里显示专属调节项。</p>
+          <div class="settings-tab-panel" id="settings-panel-video" role="tabpanel" aria-labelledby="settings-tab-video" data-settings-tab="video">
+            <details class="effect-advanced" id="videoOptimizationPanel">
+              <summary><svg class="settings-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h12v14H4V5Zm12 5 5-3v10l-5-3M8 9h4m-4 4h4"/></svg><span>视频优化与缓存</span></summary>
+              <p class="effect-hint">转码期间继续播放原片；完成后由你应用优化版。Faststart 使用虚拟布局，不复制整份原片，也不保证任意视频一秒首帧。</p>
+              <label class="effect-check"><span>Faststart 虚拟前置<small>不支持的 MP4 布局保留原样</small></span><input data-video="faststart" type="checkbox" /></label>
+              <label class="effect-check"><span>优先使用已校验的优化版本<small>没有可用版本时继续播放原片</small></span><input data-video="useOptimized" type="checkbox" /></label>
+              <label class="effect-field" for="videoFpsCap"><span>帧率上限 <small>FPS</small></span><input id="videoFpsCap" data-video="fpsCap" type="number" min="1" max="120" step="1" value="30" /></label>
+              <label class="effect-field effect-field--stacked" for="videoEncoder"><span>视频编码器</span><select id="videoEncoder" data-video="encoder"><option value="auto">自动硬件 → 软件回退</option><option value="software">软件 libx264</option><option value="h264_nvenc">NVENC → 软件回退</option><option value="h264_qsv">QSV → 软件回退</option><option value="h264_amf">AMF → 软件回退</option></select></label>
+              <button id="probeVideoToolsButton" type="button">探测本机 ffmpeg / ffprobe</button>
+              <p id="videoToolsStatus" role="status">未探测；缺少工具时原片播放不受影响。可设置 CWB_FFMPEG_PATH / CWB_FFPROBE_PATH 后重新启动桥。</p>
+              <div class="settings-actions"><button class="settings-action-primary" id="optimizeVideoButton" type="button">优化当前视频</button><button id="cancelVideoJobButton" type="button" disabled>取消</button><button id="retryVideoJobButton" type="button" disabled>重试</button></div>
+              <progress id="videoJobProgress" max="1" value="0" aria-label="视频优化进度"></progress><p id="videoJobStatus" role="status">没有视频任务</p>
+              <button class="settings-action-primary" id="applyOptimizedVideoButton" type="button" disabled>应用已验证优化版</button>
+              <p id="cacheDirectoryStatus" role="status">缓存路径尚未读取</p>
+              <label class="effect-field effect-field--stacked" for="cacheDirectoryInput"><span>迁移缓存目录</span><input id="cacheDirectoryInput" type="text" placeholder="已存在父目录的绝对路径" /></label>
+              <p class="effect-hint">复制到 CodexWallpaperBridge-cache 子目录，校验后切换路径。保留源缓存和未知文件，不移动 WE 原件、自定义库或本地歌词。环境覆盖启用时不允许迁移。</p>
+              <div class="settings-actions"><button class="settings-action-primary" id="migrateCacheButton" type="button">复制、校验并迁移</button><button id="cancelCacheJobButton" type="button" disabled>取消</button><button id="retryCacheJobButton" type="button" disabled>重试</button><button id="resumeCacheJobButton" type="button" disabled>恢复中断迁移</button></div>
+              <progress id="cacheJobProgress" max="1" value="0" aria-label="缓存迁移进度"></progress><p id="cacheJobStatus" role="status">没有缓存迁移任务</p>
+            </details>
           </div>
 
           <div class="settings-note">

@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import { readAuthorProperties, validateAuthorPropertyPatch, normalizeAuthorProperties } from '../bridge-runtime/src/author-properties.mjs';
 import { validateWebWallpaperInput } from '../bridge-runtime/src/web-wallpaper-input.mjs';
+import { SCENE_MAX_FIRST_FRAME_TIMEOUT_MS } from '../bridge-runtime/src/engine-health.mjs';
 
 const script = await readFile(new URL('../bridge-runtime/public/cwb-scene-bridge.js', import.meta.url), 'utf8');
 async function fixture({ scene = true, configOk = true, parentOrigin = 'http://127.0.0.1:42341', authorProperties = { schema: { enabled: { type: 'bool' } }, values: { enabled: true } } } = {}) {
@@ -12,7 +13,8 @@ async function fixture({ scene = true, configOk = true, parentOrigin = 'http://1
   let cleared = 0;
   let canvas = { width: 960, height: 540 };
   let paused = false;
-  let properties = { enabled: true };
+  const properties = { ...authorProperties.values };
+  let mountOptions, progress;
   const calls = [];
   const messages = [];
   const events = new Map();
@@ -21,28 +23,41 @@ async function fixture({ scene = true, configOk = true, parentOrigin = 'http://1
   let frameId = 0;
   class GL { drawArrays() {} }
   const parent = { postMessage: (message, origin) => messages.push({ message, origin }) };
-  const window = { parent, __cwbValidateWebInput: validateWebWallpaperInput, __cwbReadProperties: readAuthorProperties, __cwbValidateProperties: validateAuthorPropertyPatch, WebGL2RenderingContext: GL, __scene: scene ? {} : undefined, __sceneLayers: scene ? [{}, {}] : [],
-    __wpStats: { frame: () => ({ fps: paused ? 0 : 30, running: !paused }) },
-    __wp: { pause() { paused = true; calls.push('pause'); }, resume() { paused = false; calls.push('resume'); },
-      release() { calls.push('release'); canvas = null; window.__scene = undefined; window.__sceneLayers = []; paused = true; },
-      getState: () => ({ paused }) },
+  const window = { parent, __cwbValidateWebInput: validateWebWallpaperInput, __cwbReadProperties: readAuthorProperties, __cwbValidateProperties: validateAuthorPropertyPatch, WebGL2RenderingContext: GL,
     addEventListener(name, fn) { events.set(name, fn); }, removeEventListener(name) { events.delete(name); } };
-  window.__wp.pushPointer = (...args) => calls.push(['pointer', ...args]);
-  window.__wp.setVolume = (v) => calls.push(['volume', v]);
-  window.__wp.updateWebProps = (patch) => { for (const [key, entry] of Object.entries(patch)) properties[key] = entry.value; };
-  window.__wp.getProperties = () => properties;
+  const instance = {
+    get canvas() { return canvas; }, get paused() { return paused; },
+    get stats() { return paused ? { fps: 0, running: false } : { fps: 30, running: true }; },
+    pause() { paused = true; calls.push('pause'); }, resume() { paused = false; calls.push('resume'); },
+    destroy() { calls.push('release'); canvas = null; paused = true; },
+    pointerLeave() {},
+    pushPointer(...args) { calls.push(['pointer', ...args]); },
+    setVolume(value) { calls.push(['volume', value]); },
+    setProperties(patch) { Object.assign(properties, patch); },
+    getProperties: () => properties,
+    async load(source) {
+      assert.equal((await source.project()).type, 'scene');
+      if (scene) { new GL().drawArrays(); mountOptions.onReady({ layerCount: 2 }); }
+    },
+  };
   window.requestAnimationFrame = (fn) => { frames.set(++frameId, fn); return frameId; };
   window.cancelAnimationFrame = (id) => frames.delete(id);
-  vm.runInNewContext(script, { window, document: { querySelector: (selector) => selector.startsWith('meta')
-    ? { content: 'a'.repeat(32) } : canvas }, performance: { now: () => now },
-    fetch: async () => ({ ok: configOk, json: async () => ({ parentOrigin, channel: 'trusted', firstFrameTimeoutMs: 15000,
-      authorProperties }) }),
+  vm.runInNewContext(script, { window, document: { querySelector: () => ({ content: 'a'.repeat(32) }), getElementById: () => ({}) },
+    AbortSignal, Date: { now: () => now }, performance: { now: () => now },
+    fetch: async url => url.endsWith('/payload-progress.json') ? { ok: true, json: async () => progress }
+      : { ok: configOk, json: async () => ({ parentOrigin, channel: 'trusted', firstFrameTimeoutMs: 15000,
+        maxFirstFrameTimeoutMs: SCENE_MAX_FIRST_FRAME_TIMEOUT_MS, authorProperties }) },
     setInterval: (fn) => { tick = fn; return 1; }, clearInterval: () => cleared++, queueMicrotask: (fn) => microtasks.push(fn),
     setTimeout: (fn) => { frames.set(++frameId, fn); return frameId; }, clearTimeout: (id) => frames.delete(id) });
-  if (scene) new GL().drawArrays();
+  window.__cwbStartScene({
+    httpSource: () => ({ project: async () => ({ type: 'web' }) }),
+    createScene(_target, options) { mountOptions = options; return instance; },
+  });
   await new Promise((resolve) => setImmediate(resolve));
   const send = (data, origin = parentOrigin, source = parent) => events.get('message')?.({ origin, source, data });
-  return { window, calls, messages, events, send, tick: () => tick(), advance: (ms) => { now += ms; }, cleared: () => cleared,
+  return { window, instance, calls, messages, events, send, tick: () => tick(), advance: (ms) => { now += ms; }, cleared: () => cleared,
+    audio: () => mountOptions.audio.snapshot(), setProgress: (bytesServed, lastByteAt = now) => { progress = { bytesServed, lastByteAt }; },
+    completeFirstFrame: () => mountOptions.onReady({ layerCount: 2 }), engineFailure: () => mountOptions.onError(Error('engine')),
     draw() { new GL().drawArrays(); while (microtasks.length) microtasks.shift()(); tick(); },
     completeRender() { window.__cwbSceneRenderComplete?.(); tick(); },
     pendingFrames: () => frames.size };
@@ -51,17 +66,49 @@ async function fixture({ scene = true, configOk = true, parentOrigin = 'http://1
 test('fps/canvas alone cannot pass scene first-frame gate; timed failure releases resources', async () => {
   const env = await fixture({ scene: false });
   assert.equal(env.window.__cwbScene.phase, 'loading');
-  env.advance(15001); env.tick();
+  env.draw(); assert.equal(env.window.__cwbScene.phase, 'loading');
+  env.advance(15001); env.tick(); await new Promise(setImmediate);
   assert.equal(env.window.__cwbScene.phase, 'failed');
   assert.deepEqual(env.calls, ['release']);
   assert.ok(env.cleared() > 0);
   assert.equal(env.messages.at(-1).origin, 'http://127.0.0.1:42341');
 });
 
-test('M3 Scene uses the pinned audioBridge, rejects invalid sources, copies stereo data and clears pause/release', async () => {
-  const env = await fixture(); let bridge;
-  env.window.__wp.setAudioBridge = callback => { bridge = callback; };
-  env.tick(); assert.equal(typeof bridge, 'function');
+test('recent package bytes extend the deadline once per advance, while a stalled transfer expires', async () => {
+  const env = await fixture({ scene: false });
+  const tick = async () => { env.tick(); await new Promise(setImmediate); };
+  env.advance(15000); env.setProgress(1024); await tick();
+  assert.equal(env.window.__cwbScene.phase, 'loading');
+  env.advance(4999); env.setProgress(2048); await tick();
+  env.advance(1); await tick();
+  assert.equal(env.window.__cwbScene.phase, 'loading');
+  env.advance(5000); await tick();
+  assert.equal(env.window.__cwbScene.phase, 'failed');
+});
+
+test('a completed first frame can recover during a transfer extension and runtime errors notify the host', async () => {
+  const env = await fixture({ scene: false });
+  env.advance(15000); env.setProgress(2048); env.tick(); await new Promise(setImmediate);
+  env.draw(); env.completeFirstFrame();
+  assert.equal(env.window.__cwbScene.phase, 'ready');
+  env.engineFailure();
+  assert.equal(env.window.__cwbScene.phase, 'failed');
+});
+
+test('ongoing transfer still stops at the absolute startup cap', async () => {
+  const env = await fixture({ scene: false });
+  env.advance(15000);
+  for (let bytes = 1024; bytes <= 21504; bytes += 1024) {
+    env.setProgress(bytes); env.tick(); await new Promise(setImmediate);
+    assert.equal(env.window.__cwbScene.phase, 'loading');
+    env.advance(5000);
+  }
+  env.setProgress(22528); env.tick(); await new Promise(setImmediate);
+  assert.equal(env.window.__cwbScene.phase, 'failed');
+});
+
+test('Scene audio source rejects invalid data, copies stereo samples and clears on pause/release', async () => {
+  const env = await fixture(); const bridge = env.audio;
   assert.equal(bridge().left.length, 64); assert.equal(bridge().left.some(value => value !== 0), false);
   const values = Array(64).fill(0.25).concat(Array(64).fill(0.75));
   const message = { source: 'cwb-scene-control', channel: 'trusted', op: 'audio', values };
@@ -73,12 +120,13 @@ test('M3 Scene uses the pinned audioBridge, rejects invalid sources, copies ster
   env.send({ source: message.source, channel: message.channel, op: 'pause' });
   assert.equal(bridge().left[0], 0); env.send(message); assert.equal(bridge().right[0], 0);
   env.send({ source: message.source, channel: message.channel, op: 'resume' }); env.send(message); assert.equal(bridge().right[0], 0.75);
-  env.send({ source: message.source, channel: message.channel, op: 'release' }); assert.equal(bridge, null);
+  env.send({ source: message.source, channel: message.channel, op: 'release' }); assert.equal(bridge().left[0], 0);
+  assert.equal(env.window.__cwbScene.systemAudio.attached, false);
 });
 
 test('a real WebGL submit passes ready for a static scene with no second frame or FPS', async () => {
   const env = await fixture();
-  env.window.__wpStats.frame = () => ({ running: false, fps: 0, idle: true });
+  Object.defineProperty(env.instance, 'stats', { value: { running: false, fps: 0 } });
   env.tick();
   assert.equal(env.window.__cwbScene.phase, 'ready');
   assert.ok(env.window.__cwbScene.draws > 0);
@@ -214,7 +262,7 @@ test('author read/apply acknowledgements are exact and contain getProperties out
   send('readProperties', { propertyRequest: 1 });
   assert.equal(env.window.__cwbScene.propertyRequest, 1); assert.equal(env.window.__cwbScene.properties.enabled, true);
   assert.equal(env.window.__cwbScene.propertyRevision, 0);
-  env.window.__wp.getProperties = () => ({ enabled: true });
+  env.instance.getProperties = () => ({ enabled: true });
   send('properties', { propertyRequest: 2, values: { enabled: false } });
   assert.equal(env.window.__cwbScene.propertyRequest, 2); assert.equal(env.window.__cwbScene.properties.enabled, true);
   assert.equal(env.window.__cwbScene.propertyRevision, 1);

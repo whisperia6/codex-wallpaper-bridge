@@ -68,6 +68,32 @@ test('playback fields and zero opacity reach the lightweight injection payload',
   }
 });
 
+test('legacy glass settings acquire defaults and survive partial patches and the host payload', () => {
+  const before = normalizeConfig({ effects: { glassOpacity: 25, glassBlur: 17, sidebarBlur: false } });
+  const legacy = rendererEffects(before);
+  assert.deepEqual([legacy.glassOpacity, legacy.glassBlur, legacy.sidebarBlur], [25, 17, false]);
+  const { liquidGlass, glassComposer, glassBorderOpacity, glassSaturation, glassTint } = before.effects;
+  assert.deepEqual([liquidGlass, glassComposer, glassBorderOpacity, glassSaturation, glassTint], [true, true, 12, 130, 'dark']);
+  const after = mergeConfig(before, { effects: { liquidGlass: false, glassComposer: false, glassTint: 'frost' } });
+  for (const key of ['liquidGlass', 'glassComposer', 'glassTint', 'glassOpacity', 'glassBlur', 'sidebarBlur']) {
+    assert.equal(rendererEffects(after)[key], after.effects[key], key);
+  }
+  assert.deepEqual([after.effects.glassOpacity, after.effects.glassBlur, after.effects.sidebarBlur], [25, 17, false]);
+});
+
+test('liquid glass bounds numbers and validates booleans and tint across config merges', () => {
+  const current = normalizeConfig({ effects: { glassTint: 'neutral' } });
+  const { effects } = mergeConfig(current, { effects: {
+    liquidGlass: 'false', glassComposer: 1, glassOpacity: -1, glassBlur: 61,
+    glassBorderOpacity: 101, glassSaturation: 99, glassTint: 'url(foo)',
+  } });
+  assert.deepEqual([effects.glassOpacity, effects.glassBlur, effects.glassBorderOpacity, effects.glassSaturation], [0, 60, 100, 100]);
+  assert.deepEqual([effects.liquidGlass, effects.glassComposer, effects.glassTint], [true, true, 'dark']);
+  assert.equal(mergeConfig(current, { effects: { liquidGlass: false } }).effects.glassTint, 'neutral');
+  assert.equal(normalizeConfig({ effects: { glassSaturation: 221 } }).effects.glassSaturation, 220);
+  assert.equal(normalizeConfig({ effects: { glassBorderOpacity: -1 } }).effects.glassBorderOpacity, 0);
+});
+
 test('version 2 migrates without losing the library and preserves original bytes', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cwb-playback-'));
   t.after(() => rm(root, { recursive: true, force: true }));

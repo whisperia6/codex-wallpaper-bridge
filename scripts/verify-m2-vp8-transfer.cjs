@@ -247,7 +247,7 @@ exports.run = async function run({ connection, guard, step, report, workspace, r
       createSource();
       await attachSource(); await ready();
       transfer.firstSceneReadyMs = performance.now() - sceneStarted;
-      const info = await inScene(`({type:__wp.getState().type,layers:window.__sceneLayers?.length,canvas:!!document.querySelector('canvas'),fallback:!!document.querySelector('iframe')})`);
+      const info = await inScene(`({type:window.__cwbScene?.source==='cwb-scene'?'scene':null,layers:window.__sceneLayers?.length,canvas:!!document.querySelector('canvas'),fallback:!!document.querySelector('iframe')})`);
       assert.equal(info.type, 'scene'); assert.ok(info.layers > 0 && info.canvas && !info.fallback);
       transfer.scene = info;
       transfer.rendererGpu = await inScene(`(()=>{const c=document.querySelector('canvas');const g=c.getContext('webgl2')||c.getContext('webgl');if(!g)return null;const d=g.getExtension('WEBGL_debug_renderer_info');return {renderer:g.getParameter(d?d.UNMASKED_RENDERER_WEBGL:g.RENDERER),version:g.getParameter(g.VERSION)}})()`);

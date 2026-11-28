@@ -5,14 +5,16 @@ import { resolvePlayback } from './playback-policy.mjs';
 
 /** Latest-value producer cache; one in-flight delivery, never a PCM/CDP queue. */
 export class MediaMiddleware {
-  #getConfig; #create; #provider; #dispatch; #onPower; #lyrics; #latest = new Map();
+  #getConfig; #create; #provider; #dispatch; #onPower; #getOccluded; #lyrics; #latest = new Map();
   #session = { id: '', commands: [] }; #power = { onBattery: false }; #sources = { audio: 'off', media: 'off' };
   #closed = false; #queue = Promise.resolve(); #timer = null; #pumping = null; #generation = 0;
   #track = null; #trackKey = ''; #rows = []; #flags = ''; #deliveryFailures = 0;
   #lyricRequest = 0; #lyricImport = 0; #lyricStatus = { state: 'waiting', source: 'none' };
   #requested = { audio: false, media: false, power: false }; #unsubscribe; #writes = new Set();
-  constructor({ getConfig, createProvider = () => new WindowsMediaProvider(), dispatch = async () => {}, onPower = async () => {}, lyrics = new LyricsStore() }) {
+  constructor({ getConfig, createProvider = () => new WindowsMediaProvider(), dispatch = async () => {}, onPower = async () => {},
+    getOccluded = () => false, lyrics = new LyricsStore() }) {
     this.#getConfig = getConfig; this.#create = createProvider; this.#dispatch = dispatch; this.#onPower = onPower; this.#lyrics = lyrics;
+    this.#getOccluded = getOccluded;
     this.#latest.set('mediaStatus', { op: 'mediaStatus', value: { enabled: false } });
   }
   configure() {
@@ -101,7 +103,7 @@ export class MediaMiddleware {
     const commands = config.media?.nowPlaying && config.media?.allowControl ? this.#session.commands : [];
     const inputs = [...this.#latest.values()].filter(input => input.op === 'audio' ? config.media?.captureAudio : config.media?.nowPlaying).map(input => structuredClone(input));
     if (!inputs.some(input => input.op === 'audio')) inputs.unshift({ op: 'audio', values: Array(128).fill(0) });
-    return { power: { ...this.#power }, provider: this.#provider?.status() || { running: false, reason: 'off' }, sources: { ...this.#sources },
+    return { power: { ...this.#power }, occluded: this.#getOccluded(), provider: this.#provider?.status() || { running: false, reason: 'off' }, sources: { ...this.#sources },
       sessionId: commands.length || config.media?.nowPlaying ? this.#session.id : '', commands: [...commands], trackKey: config.media?.nowPlaying ? this.#trackKey : '',
       track: config.media?.nowPlaying && this.#track ? { ...this.#track } : null,
       lyric: { ...lyricAt(config.media?.nowPlaying ? this.#rows : [], this.#track?.position || 0), ...(config.media?.nowPlaying ? this.#lyricStatus : { state: 'off', source: 'none' }) }, inputs,

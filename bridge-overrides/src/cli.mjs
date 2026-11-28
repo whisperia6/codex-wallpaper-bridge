@@ -19,6 +19,7 @@ import { MediaMiddleware } from "../../bridge-runtime/src/media-middleware.mjs";
 import { LyricsStore } from "../../bridge-runtime/src/media-lyrics.mjs";
 import { defaultCdpPort, hostDisplayName, hostPortConflict, normalizeHostType } from "../../bridge-runtime/src/host-profiles.mjs";
 import { validateCdpPort } from "../../src/installations.mjs";
+import { queryWindowOcclusion } from "../../src/win-helper.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
@@ -59,7 +60,7 @@ function parseArguments(argv) {
 }
 
 function printHelp() {
-  console.log(`Codex Wallpaper Bridge
+  console.log(`Lumina
 
 用法：
   node src/cli.mjs preview [--no-open]
@@ -161,11 +162,14 @@ async function main() {
   const sceneRenderer = process.env.CWB_SCENE_RENDERER || "gpu";
   if (!["gpu", "vp8"].includes(sceneRenderer)) throw new Error("CWB_SCENE_RENDERER 只能为 gpu 或 vp8");
   const directSceneEnabled = Boolean(nativeProvider) && sceneRenderer === "gpu";
+  let stopping = false;
+  const occlusion = nativeProvider && process.platform === "win32" && process.env.CWB_WINDOW_OCCLUSION === "1"
+    ? { query: queryWindowOcclusion, isEnabled: () => !stopping && configStore.get().effects.pauseWhenOccluded }
+    : null;
   options.sceneRenderer = nativeProvider ? (directSceneEnabled ? "direct-gpu" : "vp8") : "preview-only";
 
   const injectors = new Map();
   let server;
-  let stopping = false;
   let operationQueue = Promise.resolve();
   const enqueueOperation = (task) => {
     if (stopping) return Promise.reject(new Error("壁纸服务正在停止"));
@@ -239,6 +243,11 @@ async function main() {
   const media = new MediaMiddleware({ getConfig: () => configStore.get(),
     lyrics: new LyricsStore({ root: path.join(path.dirname(configStore.filePath), "media-lyrics") }),
     onPower: (power) => settleAll(activeInjectors(), ({ injector }) => injector.updatePower(power)),
+    getOccluded: () => {
+      if (!occlusion) return false;
+      const connected = activeInjectors().filter(({ injector }) => injector.occlusionSessions().length);
+      return connected.length > 0 && connected.every(({ injector }) => injector.occluded);
+    },
     dispatch: (id, input) => !stopping && directSceneEnabled ? dispatchInput(id, input) : null });
 
   async function dispatchInput(id, input) {
@@ -300,6 +309,7 @@ async function main() {
         installOnNewDocument: !options.once,
         nativeProvider,
         sharedNativeDelivery,
+        occlusion,
         sceneProvider: directSceneEnabled ? {
           onMediaControl: (id, value) => media.control({ ...value, projectId: id }),
           authorFiles: server.authorFiles,
@@ -365,7 +375,10 @@ async function main() {
       const first = reports[0];
       return first && reports.every(({ values }) => JSON.stringify(values) === JSON.stringify(first.values)) ? first : unavailable;
     },
-    onConfigChange: () => enqueueOperation(() => refreshInjection({ allowDetached: true, allowPartial: true })),
+    onConfigChange: () => {
+      if (occlusion) for (const { injector } of activeInjectors()) injector.refreshOcclusion();
+      return enqueueOperation(() => refreshInjection({ allowDetached: true, allowPartial: true }));
+    },
     // Speculation does not join the apply queue or install/reload any renderer.
     onScenePreload: directSceneEnabled ? async (id) => {
       const results = stopping ? [] : await settleAll(activeInjectors(), ({ injector }) => injector.preloadScene(id));
@@ -519,6 +532,7 @@ async function main() {
   const stop = async (signal) => {
     if (stopping) return;
     stopping = true;
+    if (occlusion) for (const { injector } of injectors.values()) injector.stopOcclusion();
     console.log(`\n收到 ${signal}，正在清理...`);
     await operationQueue;
     const errors = [];

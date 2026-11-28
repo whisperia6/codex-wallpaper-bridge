@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { openScenePackageVideo } from './scene-inspector.mjs';
 
 export const WALLPAPER_ENGINE_APP_ID = '431960';
 export const PROJECT_TYPES = Object.freeze(['video', 'web', 'scene', 'application']);
@@ -212,7 +211,6 @@ export async function parseWallpaperProject(projectDirectoryOrFile, details = {}
   let webEntry = null;
   let playable = false;
   let embeddedVideoPath = null;
-  let embeddedVideoPackage = false;
 
   if (type === 'video') {
     mediaPath = contentPath;
@@ -222,16 +220,9 @@ export async function parseWallpaperProject(projectDirectoryOrFile, details = {}
     webEntry = contentPath;
     playable = Boolean(contentPath);
   } else if (type === 'scene') {
-    // Native scene.pkg/scene.json rendering is not available in Chromium.
-    // The preview is still useful as a static Codex background.
     mediaPath = previewPath;
-    // Ordinary video files or one bounded validated package member, never
-    // execute/extract authors. HTTP rechecks containment/table on every stream.
+    // The fallback route inspects the current package on demand.
     embeddedVideoPath = await findFirstRootFile(rootPath, name => ['.mp4', '.webm', '.m4v', '.mov'].includes(path.extname(name).toLowerCase()));
-    if (!embeddedVideoPath) {
-      const entry = await openScenePackageVideo(rootPath).catch(() => null);
-      embeddedVideoPackage = Boolean(entry); await entry?.handle.close();
-    }
   }
 
   return {
@@ -244,7 +235,6 @@ export async function parseWallpaperProject(projectDirectoryOrFile, details = {}
     previewPath,
     mediaPath,
     embeddedVideoPath,
-    embeddedVideoPackage,
     webRoot,
     webEntry,
     playable,

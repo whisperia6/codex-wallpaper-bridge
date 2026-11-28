@@ -1,11 +1,8 @@
 {
   "name": "webwallgl",
-  "version": "2.1.0",
-  "commit": "4ba71c406fbc78f24c99b1bb1edd9d9cef9793c8",
+  "version": "3.1.0",
+  "commit": "28ab4381c806cf40e0577aba47b4520b31b19e57",
   "repository": "https://github.com/oneincase/webwallgl",
-  "artifactRepository": "https://github.com/elysia395/dsh-wallpaper-engine",
-  "artifactCommit": "111816a4fc7ae29acf4fce4ed134b84557424515",
-  "reproducedBuild": false,
   "dependencies": [
     {
       "name": "mediabunny",
@@ -19,40 +16,38 @@
   ],
   "files": {
     "index.html": {
-      "size": 1599,
-      "sha256": "d175fe6cd214cee81c7b0b0ccbd4861c18e9ec6a582c2cd6ed84698e86486496"
+      "size": 363,
+      "sha256": "f26d30b7b8e9c314d4ddc941d3f65ca0efcc804c3672f4303c2f699212d5a5d5"
     },
-    "web-shim.js": {
-      "size": 78778,
-      "sha256": "fb5f1f0dc6d5f208d13a5693da81e590ea04fbe637792876bc063bc2fdd11bce"
+    "webwallgl.mjs": {
+      "size": 1428507,
+      "sha256": "29b2c0e813b3e033aa1cf6bc72c290184501f2cf25f4f21ca622aef016c76cc0"
     },
-    "assets/renderer-AJkjEL9i.js": {
-      "size": 1071482,
-      "sha256": "7d4cf1bc13ce49153169d072772f22cd705467195d6cd1c5451d5af13269d566"
-    },
-    "assets/modulepreload-polyfill-B5Qt9EMX.js": {
-      "size": 712,
-      "sha256": "b0a5b051ca37ac46a8ff45c38a091064542174fbe60286bedc5abe1492679f2e"
-    },
-    "default-wallpaper/index.html": {
-      "size": 4456,
-      "sha256": "c18ac4a7dbdcd1e07c76e8da7aa7e21d400fd02f58ebdca4a2e81d81e4701896"
+    "mediabunny.mjs": {
+      "size": 671277,
+      "sha256": "887f8eb63e7f2b6db51918dbc111a545f91aef1a1a0e2cdba80df898e0216640"
     },
     "LICENSE": {
-      "size": 1106,
-      "sha256": "99dcac5899e7ab69080b9a1002181f4b2ac19e3c150b7637d4e34393f19cc8ee"
+      "size": 1085,
+      "sha256": "857432ca4f48930e6079aca25164c27b791576ee2a7d3e3c9d6a92a089fe4948"
     },
     "we-scene-LICENSE": {
-      "size": 1107,
-      "sha256": "b8af57a26cf907ebfbdb08b8508ac94fd3896d7e4ee5b54d43dbca9f06e0d455"
+      "size": 1086,
+      "sha256": "55bb1034635de81dc53f0466ec62e7681c49ae171fe5dc3221e346a0ea732641"
     },
     "mediabunny-LICENSE": {
       "size": 17099,
       "sha256": "9221c2f936159b8446d329249fb4c0f25be510f447383a0f13336ac7985668a3"
     },
+    "NOTICE.md": {
+      "size": 1102,
+      "sha256": "a3ddf917d53afe079f22c01b3bbd8e47e7e0805cad7e1e37af8300dcb6f308ac"
+    },
     "sources/mediabunny-1.56.0.tgz": {
       "size": 2112734,
       "sha256": "fea9640f56ff10658a600e5b7b29f70216c9df42cbd3df8c3aa6c965eff40bb5"
     }
-  }
+  },
+  "artifact": "https://registry.npmjs.org/webwallgl/-/webwallgl-3.1.0.tgz",
+  "integrity": "sha512-x9NYwCtqPEgIOtkfYv9IMcTmCZVDv+DwOdwMJXolQC8IEgd36dma83m05/eIxo0QhUPnTa/KxCM+Mby5Y+XpGA=="
 }

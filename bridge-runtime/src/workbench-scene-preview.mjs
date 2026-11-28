@@ -2,21 +2,38 @@ import { readAuthorProperties, validateAuthorPropertyPatch } from './author-prop
 import { validateWebWallpaperInput } from './web-wallpaper-input.mjs';
 import { resolvePlayback } from './playback-policy.mjs';
 
+export async function switchScenePreviewFallback(project, customStatic, switchTo, isCurrent) {
+  const candidates = [
+    ['embedded_video', 'video', project.type === 'scene' ? project.embeddedVideoUrl : null],
+    ['custom_static', 'image', customStatic?.mediaUrl],
+    ['preview', 'image', project.previewUrl],
+  ];
+  for (const [reason, type, mediaUrl] of candidates) {
+    if (!isCurrent()) return { ok: false, cancelled: true };
+    if (!mediaUrl) continue;
+    const result = await switchTo({ ...project, type, mediaUrl, scenePreviewAvailable: false }, reason);
+    if (result.ok || result.cancelled) return { ...result, fallbackReason: reason };
+  }
+  return { ok: false, error: 'preview_fallback_unavailable' };
+}
+
 /** Shared GPU-direct Scene slot. Engine telemetry is a readiness hint, never
  * the trusted native decoded-frame proof used by the optional VP8 path.
  */
-export function createScenePreviewSlot({ node, project, client, api, getEffects, onStatus = () => {},
+export function createScenePreviewSlot({ node, poster = null, project, client, api, getEffects, onStatus = () => {},
   beforeOpen = async () => {}, window = globalThis, preserveOnFailure = false,
   readback = readAuthorProperties, validate = validateAuthorPropertyPatch, validateInput = validateWebWallpaperInput,
   playback = resolvePlayback, onMediaControl = null }) {
   let descriptor, released = false, committed = false, prepared = false, failed = false, closing;
   let sequence = 0, meter = null, startupTimer, renewalTimer, healthTimer, lastMessage = Date.now();
+  let nominalDeadline, startupLimit, posterFade;
   let resolveReady, rejectReady;
   let propertyRequest = 0, propertyPending = null;
   let pointerDown = false;
   let lastControlRequest = 0, controlPending = 0;
   let pointerReceived = 0, pointerForwarded = 0, pointerBlocked = 'none';
   const isWeb = project.type === 'web';
+  if (poster) node.style.opacity = '0';
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; }); ready.catch(() => {});
   const capability = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
   const request = (op, extra = {}) => api('scene-preview', { method: 'POST', keepalive: op === 'close',
@@ -81,6 +98,7 @@ export function createScenePreviewSlot({ node, project, client, api, getEffects,
   const release = () => {
     if (closing) return closing;
     send('release'); released = true; committed = false; cleanup();
+    posterFade?.cancel(); poster?.remove();
     rejectReady(Error('preview_cancelled')); node.removeAttribute('src'); node.remove();
     closing = opening.then(async () => {
       if (capability(descriptor?.handle)) await request('close', { handle: descriptor.handle }).catch(() => {});
@@ -95,6 +113,10 @@ export function createScenePreviewSlot({ node, project, client, api, getEffects,
       // A failed candidate still releases immediately, so M1 retains the old slot.
       send('volume', { value: 0 }); send('pause'); cleanup();
     } else void release();
+  };
+  const watchStartup = (duration) => {
+    window.clearTimeout(startupTimer);
+    startupTimer = window.setTimeout(() => fail('preview_first_frame_timeout'), duration);
   };
   const onMessage = (event) => {
     if (released || failed || !descriptor || event.source !== node.contentWindow || event.origin !== descriptor.origin) return;
@@ -122,6 +144,12 @@ export function createScenePreviewSlot({ node, project, client, api, getEffects,
         : !Number.isSafeInteger(message.draws) || message.draws <= 0 || !Number.isInteger(message.layers) || message.layers <= 0))) return;
     sequence = message.sequence; lastMessage = Date.now();
     if (message.phase === 'failed' || message.phase === 'released') { fail('preview_engine_failed'); return; }
+    if (!isWeb && !prepared && message.phase === 'loading') {
+      // The Scene child owns the size/transfer-aware deadline. Bound silence
+      // and total elapsed time separately in case the child stops responding.
+      const silence = Math.max(10_000, nominalDeadline - lastMessage);
+      watchStartup(Math.max(0, Math.min(silence, startupLimit - lastMessage)));
+    }
     if (readyPhase) {
       if (propertyPending && message.propertyRequest === propertyPending.id) {
         const pending = propertyPending; propertyPending = null; window.clearTimeout(pending.timer);
@@ -164,7 +192,11 @@ export function createScenePreviewSlot({ node, project, client, api, getEffects,
     // Passive capture observes input before host bubble handlers stop it;
     // it never prevents or redirects the host's own click/drag behaviour.
     for (const type of ['pointermove', 'pointerdown', 'pointerup']) window.addEventListener(type, onPointer, { passive: true, capture: true });
-    startupTimer = window.setTimeout(() => fail('preview_first_frame_timeout'), Math.min(90000, Math.max(15000, descriptor.firstFrameTimeoutMs || 90000)));
+    const nominal = Math.min(90000, Math.max(15000, descriptor.firstFrameTimeoutMs || 90000));
+    const startupTime = Date.now();
+    nominalDeadline = startupTime + nominal + 2500;
+    startupLimit = startupTime + 123_000;
+    watchStartup(isWeb ? nominal : nominal + 2500);
     renewalTimer = window.setInterval(() => {
       void request('renew', { handle: descriptor.handle }).catch(() => fail('preview_lease_lost'));
     }, 15000);
@@ -187,6 +219,13 @@ export function createScenePreviewSlot({ node, project, client, api, getEffects,
     },
     activate() {
       if (released || failed || !prepared) throw Error('preview_unavailable');
+      if (poster) {
+        node.style.opacity = '';
+        if (!getEffects().reduceMotion && !window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches && node.animate) {
+          posterFade = node.animate([{ opacity: 0, offset: 0 }], { duration: 160, easing: 'ease-out' });
+          void posterFade.finished.then(() => poster.remove(), () => poster.remove());
+        } else poster.remove();
+      }
       committed = true; update(); publish('ready');
     },
     retire() { committed = false; update(); },

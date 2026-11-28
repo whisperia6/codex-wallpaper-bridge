@@ -238,6 +238,136 @@ namespace CwbWinHelper {
     }
   }
 
+  internal static class WindowOcclusion {
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x20;
+    private const int WS_EX_TOOLWINDOW = 0x80;
+    private const int WS_EX_LAYERED = 0x80000;
+    private const uint LWA_COLORKEY = 1;
+    private const uint LWA_ALPHA = 2;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private const int DWMWA_CLOAKED = 14;
+    private const int MinimumSide = 8;
+    private const int MaxFragments = 256;
+    private const int MaxSubtractions = 4096;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect {
+      public int Left, Top, Right, Bottom;
+      public Rect(int left, int top, int right, int bottom) {
+        Left = left; Top = top; Right = right; Bottom = bottom;
+      }
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr data);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr window, int index);
+    [DllImport("user32.dll")] private static extern bool GetLayeredWindowAttributes(IntPtr window, out uint key, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Rect value, int size);
+
+    private static bool LayeredWindowQualifies(bool isTarget, bool hasAttributes, byte alpha, uint flags) {
+      // Per-pixel layered windows can be visible without exposing a global alpha.
+      if (isTarget) return !hasAttributes || (flags & LWA_ALPHA) == 0 || alpha > 0;
+      return hasAttributes && (flags & LWA_COLORKEY) == 0 && (flags & LWA_ALPHA) != 0 && alpha == 255;
+    }
+
+    private static bool TryGetBounds(IntPtr window, bool isTarget, out Rect bounds) {
+      bounds = new Rect();
+      if (!IsWindowVisible(window) || IsIconic(window)) return false;
+      int cloaked;
+      if (DwmGetWindowAttribute(window, DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0) return false;
+      int style = GetWindowLong(window, GWL_EXSTYLE);
+      if ((style & WS_EX_TOOLWINDOW) != 0 || (!isTarget && (style & WS_EX_TRANSPARENT) != 0)) return false;
+      if ((style & WS_EX_LAYERED) != 0) {
+        uint key, flags;
+        byte alpha;
+        bool hasAttributes = GetLayeredWindowAttributes(window, out key, out alpha, out flags);
+        if (!LayeredWindowQualifies(isTarget, hasAttributes, alpha, flags)) return false;
+      }
+      if (DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, out bounds, Marshal.SizeOf(typeof(Rect))) != 0
+        && !GetWindowRect(window, out bounds)) return false;
+      int minimumSide = isTarget ? 1 : MinimumSide;
+      return (long)bounds.Right - bounds.Left >= minimumSide && (long)bounds.Bottom - bounds.Top >= minimumSide;
+    }
+
+    private static bool TryAddFragment(List<Rect> remaining, Rect fragment) {
+      if (remaining.Count >= MaxFragments) return false;
+      remaining.Add(fragment);
+      return true;
+    }
+
+    private static bool TrySubtract(Rect area, Rect cover, List<Rect> remaining) {
+      int left = Math.Max(area.Left, cover.Left), right = Math.Min(area.Right, cover.Right);
+      int top = Math.Max(area.Top, cover.Top), bottom = Math.Min(area.Bottom, cover.Bottom);
+      if (left >= right || top >= bottom) {
+        return TryAddFragment(remaining, area);
+      }
+      return (area.Top >= top || TryAddFragment(remaining, new Rect(area.Left, area.Top, area.Right, top)))
+        && (bottom >= area.Bottom || TryAddFragment(remaining, new Rect(area.Left, bottom, area.Right, area.Bottom)))
+        && (area.Left >= left || TryAddFragment(remaining, new Rect(area.Left, top, left, bottom)))
+        && (right >= area.Right || TryAddFragment(remaining, new Rect(right, top, area.Right, bottom)));
+    }
+
+    private static bool IsCovered(Rect target, List<Rect> covers) {
+      var remaining = new List<Rect> { target };
+      var next = new List<Rect>();
+      int subtractions = 0;
+      foreach (Rect cover in covers) {
+        foreach (Rect area in remaining) {
+          // A complex cover arrangement cannot establish occlusion within the budget.
+          if (subtractions == MaxSubtractions || !TrySubtract(area, cover, next)) return false;
+          subtractions++;
+        }
+        if (next.Count == 0) return true;
+        var previous = remaining;
+        remaining = next;
+        next = previous;
+        next.Clear();
+      }
+      return false;
+    }
+
+    public static object Query(string[] args) {
+      if (args.Length < 2 || args.Length > 65) throw new ArgumentException("Expected 1 to 64 process IDs");
+      var targets = new HashSet<uint>();
+      for (int i = 1; i < args.Length; i++) {
+        uint pid;
+        if (!uint.TryParse(args[i], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid == 0) {
+          throw new ArgumentException("Invalid target process ID");
+        }
+        targets.Add(pid);
+      }
+      // Keep GetWindowRect fallback and DWM frame bounds in physical pixels.
+      try { if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) SetProcessDPIAware(); }
+      catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
+      var covers = new List<Rect>();
+      int targetCount = 0;
+      bool allCovered = true;
+      if (!EnumWindows(delegate(IntPtr window, IntPtr data) {
+        uint pid;
+        Rect bounds;
+        if (GetWindowThreadProcessId(window, out pid) == 0) return true;
+        bool isTarget = targets.Contains(pid);
+        if ((!isTarget && !allCovered) || !TryGetBounds(window, isTarget, out bounds)) return true;
+        if (isTarget) {
+          targetCount++;
+          if (allCovered) allCovered = IsCovered(bounds, covers);
+        } else {
+          covers.Add(bounds);
+        }
+        return true;
+      }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      return new { ok = true, occluded = targetCount > 0 && allCovered, targetCount = targetCount };
+    }
+  }
+
   public static class Program {
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const int ProcessCommandLineInformation = 60;
@@ -1070,6 +1200,9 @@ namespace CwbWinHelper {
       }
       try {
         switch (args[0]) {
+          case "window-occlusion":
+            Console.WriteLine(Json.Serialize(WindowOcclusion.Query(args)));
+            return 0;
           case "verify-cdp-owner":
             return RunVerifyCdpOwner();
           case "activate-store-app":

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { normalizeLibrary } from './library-policy.mjs';
 import { DEFAULT_PLAYLISTS, normalizePlaylists } from './playlists.mjs';
 import { AUTHOR_STATE_LIMITS, normalizeSavedAuthorProperties, updateSavedAuthorProperties } from './author-property-state.mjs';
+import { DEFAULT_GLASS_EFFECTS, normalizeLiquidGlass } from './liquid-glass.mjs';
 
 /**
  * Configuration shared by the preview UI and the injector.  Keeping the
@@ -40,12 +41,11 @@ export const DEFAULT_CONFIG = Object.freeze({
     volume: 50,
     contrast: 100,
     opacity: 100,
-    glassOpacity: 62,
-    glassBlur: 18,
-    sidebarBlur: true,
+    ...DEFAULT_GLASS_EFFECTS,
     webLoopHoldSeconds: 0,
     webForceSingleLoop: false,
     pauseWhenHidden: true,
+    pauseWhenOccluded: true,
     pauseOnBattery: false,
     playing: true,
     transition: 'cut',
@@ -160,16 +160,15 @@ export function normalizeConfig(input = {}, defaults = DEFAULT_CONFIG) {
       reduceMotion: typeof effects.reduceMotion === 'boolean' ? effects.reduceMotion : (baseEffects.reduceMotion ?? false),
       mirror: typeof effects.mirror === 'boolean' ? effects.mirror : (baseEffects.mirror ?? false),
       audioEnabled: typeof effects.audioEnabled === 'boolean' ? effects.audioEnabled : (baseEffects.audioEnabled ?? false),
-      glassOpacity: finiteNumber(effects.glassOpacity, baseEffects.glassOpacity ?? 62, 0, 100),
-      glassBlur: finiteNumber(effects.glassBlur, baseEffects.glassBlur ?? 18, 0, 60),
-      sidebarBlur: typeof effects.sidebarBlur === 'boolean'
-        ? effects.sidebarBlur
-        : (typeof baseEffects.sidebarBlur === 'boolean' ? baseEffects.sidebarBlur : true),
+      ...normalizeLiquidGlass(effects, DEFAULT_GLASS_EFFECTS, baseEffects),
       webLoopHoldSeconds: Math.round(finiteNumber(effects.webLoopHoldSeconds, baseEffects.webLoopHoldSeconds ?? 0, 0, 3600)),
       webForceSingleLoop: typeof effects.webForceSingleLoop === 'boolean' ? effects.webForceSingleLoop : (baseEffects.webForceSingleLoop === true),
       pauseWhenHidden: typeof effects.pauseWhenHidden === 'boolean'
         ? effects.pauseWhenHidden
         : (typeof baseEffects.pauseWhenHidden === 'boolean' ? baseEffects.pauseWhenHidden : true),
+      pauseWhenOccluded: typeof effects.pauseWhenOccluded === 'boolean'
+        ? effects.pauseWhenOccluded
+        : (typeof baseEffects.pauseWhenOccluded === 'boolean' ? baseEffects.pauseWhenOccluded : true),
       pauseOnBattery: typeof effects.pauseOnBattery === 'boolean' ? effects.pauseOnBattery : baseEffects.pauseOnBattery === true,
       playing: typeof effects.playing === 'boolean'
         ? effects.playing

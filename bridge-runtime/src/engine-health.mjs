@@ -1,3 +1,9 @@
+export const SCENE_MAX_FIRST_FRAME_TIMEOUT_MS = 120_000;
+export const SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS = SCENE_MAX_FIRST_FRAME_TIMEOUT_MS + 5_000;
+export const SCENE_SERVER_START_TIMEOUT_MS = 15_000;
+export const NATIVE_SCENE_READY_TIMEOUT_MS = SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS + SCENE_SERVER_START_TIMEOUT_MS + 5_000;
+export const NATIVE_SCENE_APPLY_TIMEOUT_MS = NATIVE_SCENE_READY_TIMEOUT_MS + 5_000;
+export const WALLPAPER_APPLY_REQUEST_TIMEOUT_MS = NATIVE_SCENE_APPLY_TIMEOUT_MS + 10_000;
 const REASONS = new Set(['first_frame_timeout', 'heartbeat_timeout', 'engine_failed', 'context_lost', 'transport_failed']);
 
 /** Session-scoped bounded failures. A user retry, not an automatic load loop, clears an entry. */
@@ -21,9 +27,11 @@ export class EngineFailureMemory {
 /** Readiness adapter only; selection/commit/cancel remains the existing M1 media switcher. */
 export function createEngineHealthGate({ identity, origin, source, channel, messageSource = 'cwb-scene', now = Date.now,
   firstFrameTimeoutMs = 15000, heartbeatTimeoutMs = 2500, failures = new EngineFailureMemory(), onRelease = () => {} }) {
+  const firstFrameLimit = messageSource === 'cwb-scene' ? SCENE_OWNER_FIRST_FRAME_TIMEOUT_MS : 90_000;
   if (typeof identity !== 'string' || !identity || identity.length > 256 || typeof channel !== 'string' || !channel
     || !source || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin) || !['cwb-scene', 'cwb-web'].includes(messageSource)
-    || ![firstFrameTimeoutMs, heartbeatTimeoutMs].every((n) => Number.isFinite(n) && n > 0 && n <= 90000)) throw new TypeError('invalid engine health context');
+    || !Number.isFinite(firstFrameTimeoutMs) || firstFrameTimeoutMs <= 0 || firstFrameTimeoutMs > firstFrameLimit
+    || !Number.isFinite(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0 || heartbeatTimeoutMs > 90_000) throw new TypeError('invalid engine health context');
   const started = now();
   let phase = 'loading', reason = null, sequence = 0, frameSequence = 0, lastHeartbeat = started;
   let engineReady = false, actualFrame = false, released = false, settled = false;
